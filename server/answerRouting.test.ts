@@ -331,12 +331,71 @@ test('Q3 a moved-off worker merged back is not the newest for the release pass o
   assert.ok(!isWith(x, E));
 });
 
-test('a moved-off worker merged back alone stays the newest of the request, so the release pass keeps it (w6309)', async (t) => {
+test('a moved-off worker merged back alone is not on it: no newest worker, and not with it for the release pass (w6320, w2079)', async (t) => {
   const env = await setup(t, 'on');
   const k = kit(env);
   const w = k.req([E, A], 'w5869', { [E]: 2 * H, [A]: H });
   k.moveOff(w, E);
   k.handBack(w);
   k.merge(w, [E], { [E]: 3 * H });
-  assert.equal(latestWorker(env.store.work.get('w5869')!), E);
+  const x = env.store.work.get('w5869')!;
+  assert.ok(x.sessionIds.includes(E), "listed, so a person's [answer] to it still goes");
+  assert.equal(latestWorker(x), undefined);
+  assert.ok(!isWith(x, E));
+});
+
+// The w6320 review of #1430 (w6309): routes that take a request's first worker that exists never pick a merged-back
+// moved-off worker alone on it (onRequest): a gate's end (F4), a held deploy (F3), a deploy's step after it (probe A).
+const dispatcherSaid = (env: Awaited<ReturnType<typeof setup>>) => {
+  const o = env.agents.orchestrators as unknown as { toDispatcher: (text: string, ...rest: unknown[]) => unknown };
+  const said: string[] = [];
+  const real = o.toDispatcher.bind(o);
+  o.toDispatcher = (text: string, ...rest: unknown[]) => { said.push(text); return real(text, ...rest); };
+  return said;
+};
+
+test('F4 a CI gate set by a worker since moved off and merged back: its end resumes nobody and tells the dispatcher (w6320)', async (t) => {
+  const env = await setup(t, 'on');
+  const k = kit(env);
+  const said = dispatcherSaid(env);
+  const w = k.req([E], 'w5869', { [E]: 2 * H });
+  w.status = 'blocked';
+  w.blocked = { kind: 'ci', ref: 'Final-Factory/ff-factory#9', what: "#9's checks", by: `worker ${E}`, at: T(H) } as unknown as WorkItem['blocked'];
+  env.store.putWork(w);
+  k.moveOff(w, E);
+  k.merge(env.store.work.get('w5869')!, [E], { [E]: -1000 });
+  env.agents.orchestrators.unblock('w5869', 'its checks passed');
+  const x = env.store.work.get('w5869')!;
+  assert.equal(timersOf(env).get(E), undefined, 'E is not resumed');
+  assert.ok(!isWith(x, E));
+  assert.ok(said.some((m) => m.includes('w5869') && /unblocked/.test(m)), 'the dispatcher is told to start it');
+});
+
+test('F3 a held deploy of a PR whose worker was moved off and merged back wakes nobody (w6320)', async (t) => {
+  const env = await setup(t, 'on');
+  const k = kit(env);
+  const SHA = '5a1909756' + 'e'.repeat(31);
+  const w = k.req([E], 'w5869', { [E]: 2 * H });
+  w.prs = [{ repo: 'Final-Factory/ff-factory', number: 682, state: 'merged', at: T(H), sha: SHA }] as unknown as WorkItem['prs'];
+  w.status = 'blocked';
+  w.blocked = { kind: 'deploy', what: 'the next portal deploy', at: T(H), by: `worker ${E}`, sha: '3acc3147' } as unknown as WorkItem['blocked'];
+  env.store.putWork(w);
+  k.moveOff(w, E);
+  k.merge(env.store.work.get('w5869')!, [E], { [E]: -1000 });
+  const r = env.agents.orchestrators.deployHeld({ sha: SHA, text: 'deploy held: master CI failed', prs: [682], repo: 'Final-Factory/ff-factory' });
+  assert.deepEqual(r.resumed, []);
+  assert.equal(timersOf(env).get(E), undefined);
+});
+
+test("a deploy's step after it does not resume a worker moved off and merged back, and leaves the request to its caller (w6320 probe A)", async (t) => {
+  const env = await setup(t, 'on');
+  const k = kit(env);
+  const w = k.req([E], 'w5869', { [E]: 2 * H });
+  k.moveOff(w, E);
+  k.merge(w, [E], { [E]: -1000 });
+  const x = env.store.work.get('w5869')!;
+  x.status = 'blocked'; env.store.putWork(x);
+  assert.equal(env.agents.orchestrators.resumeAfterDeploy('w5869', 'portal deployed abc', 'check the dashboard'), false);
+  assert.equal(timersOf(env).get(E), undefined);
+  assert.equal(env.store.work.get('w5869')!.status, 'blocked');
 });

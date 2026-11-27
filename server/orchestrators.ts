@@ -9,7 +9,7 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, offSince, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, offSince, onRequest, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { workerBranch } from './placeAgain.ts';
 import { COORD_TURN_MAX_CALLS, COORD_TURN_MAX_TOKENS_READ, type OptionsFactory, type SessionHandle, type SessionManager, type TurnBudgetHit } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
@@ -4687,7 +4687,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       // w1863: a leg for named computers of a request whose own worker carries on elsewhere ("queued for capacity on m5 … I
       // start a timing worker there when a slot frees"). It was the request's status, so the next message to that worker
       // (linkWorker: active) dropped it, and w1789's and w1785's m5 legs waited 8 hours unseen. Now it is its own entry.
-      const worker = w.status === 'active' && w.sessionIds.some((sid) => this.store.sessions.get(sid));
+      const worker = w.status === 'active' && w.sessionIds.some((sid) => this.store.sessions.get(sid) && onRequest(w, sid));
       if (needs.length && worker) {
         const at = this.now().toISOString();
         w.legs = [...(w.legs ?? []).filter((l) => !sameNeeds(l.needs, needs)), { at, needs, what: clip(note, 200) }].slice(-MAX_LEGS);
@@ -4928,7 +4928,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * not 0b5f813d that set the gate, and nobody merged the PR.
    */
   private gateOwner(w: WorkItem, gates: readonly WorkBlocker[]): { sid: string; gone?: string } | undefined {
-    const exists = (sid: string) => !!this.store.sessions.get(sid) && w.sessionIds.includes(sid);
+    const exists = (sid: string) => !!this.store.sessions.get(sid) && onRequest(w, sid);
     const setters = [...new Set(gates.map(gateSetter).filter((x): x is string => !!x))];
     const setter = setters.find(exists);
     if (setter) return { sid: setter };
@@ -5202,7 +5202,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (changed || fresh) this.store.putWork(w);
     }
     if (!newly.length) return { told: [], resumed: [] };
-    const exists = (w: WorkItem, sid: string) => !!this.store.sessions.get(sid) && w.sessionIds.includes(sid);
+    const exists = (w: WorkItem, sid: string) => !!this.store.sessions.get(sid) && onRequest(w, sid);
     const repoOk = (r: string) => (h.repo ? r.toLowerCase() === h.repo.toLowerCase() : /\/ff-factory$/i.test(r));
     const merged = [...this.store.work.values()].filter((w) => (w.prs ?? []).some((p) => h.prs.includes(p.number) && repoOk(p.repo)));
     const prsText = h.prs.length ? `pull request ${h.prs.map((n) => `#${n}`).join(', ')}` : 'a pull request';
@@ -6711,7 +6711,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * on 2026-11-03: "it requires a `DONE: w2895` line, and that would close the whole fan-out request, not just my row".
    */
   private legOffer(w: WorkItem, sessionId: string): string {
-    const others = w.sessionIds.filter((id) => id !== sessionId && this.store.sessions.get(id)?.kind === 'worker' && !doneOf(w)[id]);
+    const others = w.sessionIds.filter((id) => id !== sessionId && onRequest(w, id) && this.store.sessions.get(id)?.kind === 'worker' && !doneOf(w)[id]);
     const leg = `end it with "LEG DONE: ${w.id} <your leg>" in place of the DONE line: that records your leg as done and leaves ${w.id} open for the rest; only a "DONE: ${w.id}" closes it, once no other worker is on it. `;
     if (others.length || standingTargetOf(w)) return `You are one leg of ${w.id} (${others.length ? `other workers on it: ${others.slice(0, 6).join(', ')}` : 'its people keep several legs running'}): ${leg}`;
     return `If your work is one leg of ${w.id} (one row of a fan-out), ${leg}`;

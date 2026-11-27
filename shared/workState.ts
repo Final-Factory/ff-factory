@@ -43,7 +43,7 @@
 import { needsAwayText } from './availability.ts';
 import { asWorkPriority, questionFor, type BenchLock, type BuildHold, type Requester, type SessionInfo, type WorkItem } from './types.ts';
 import { agentState, holdsSandbox, hostFailureText } from './agentState.ts';
-import { gatesName, gatesOf } from './blockers.ts';
+import { gatesName, gatesOf, onRequest } from './blockers.ts';
 import { admitsPriority, needsOf, pairRoom, pairText, reservedText, ROOM_STAND_MS, unfitWhy, type ReservedRoom, type RoomFit } from './capacity.ts';
 import type { QueueWait } from './queueWaits.ts';
 
@@ -184,7 +184,7 @@ function linkOf(w: WorkItem, sessionId: string): { at: number; how: 'sent' | 'li
  * who a request waits on (stillOn) read this one.
  */
 export function servedBy(sessionId: string, items: readonly WorkItem[]): Set<string> {
-  const mine = items.filter((w) => live(w) && w.sessionIds.includes(sessionId)).map((w) => ({ w, l: linkOf(w, sessionId) }));
+  const mine = items.filter((w) => live(w) && onRequest(w, sessionId)).map((w) => ({ w, l: linkOf(w, sessionId) }));
   const lastSent = Math.max(-1, ...mine.filter((x) => x.l.how === 'sent').map((x) => x.l.at));
   return new Set(mine.filter((x) => (x.l.how === 'sent' ? x.l.at === lastSent : x.l.at >= lastSent)).map((x) => x.w.id));
 }
