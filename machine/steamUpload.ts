@@ -39,8 +39,10 @@ export type Runner = (cmd: string, args: string[], o: { env: NodeJS.ProcessEnv; 
 
 export const FFBOX_URL = 'https://github.com/Final-Factory/ffbox.git';
 const PLATFORM_FLAG = { windows: 'windows', mac: 'mac', linux: 'linux' } as const;
-/** The only Steam branch an agent's upload sets live (ffbox release_lane.SETLIVE, Release-Lanes.md "Development only"). */
-export const LIVE_ALLOWED = ['development'];
+/** The only Steam branches an agent's upload sets live (ffbox release_lane.SETLIVE, Release-Lanes.md "Development only"):
+ * development, and pre-release for a 0.50.x version only (LIVE_VERSIONS, ffbox release_lane.SETLIVE_VERSIONS; w6534). */
+export const LIVE_ALLOWED = ['development', 'pre-release'];
+export const LIVE_VERSIONS: Record<string, string> = { 'pre-release': '0.50.' };
 const UPLOAD_TIMEOUT_MS = 2 * 60 * 60_000;
 const CHECK_TIMEOUT_MS = 400_000;
 /** A lock older than this was left by a daemon that died mid-job. */
@@ -323,6 +325,7 @@ export async function runSteamJob(msg: SteamUploadMsg, d: SteamRunDeps): Promise
     const { version, app, runs } = msg;
     if (!version || !/^\d+\.\d+\.\d+\.\d+$/.test(version) || (app !== 'main' && app !== 'demo') || !runs) throw new Error('an upload needs version, app and runs');
     if (msg.live && (app !== 'main' || !LIVE_ALLOWED.includes(msg.live))) throw new Error(`refusing to set ${msg.live} live for ${app}`);
+    if (msg.live && !version.startsWith(LIVE_VERSIONS[msg.live] ?? '')) throw new Error(`refusing to set ${msg.live} live for ${version}: it takes ${LIVE_VERSIONS[msg.live]}x versions only`);
     if (msg.live && msg.preview) throw new Error('a preview sets nothing live');
     if (!msg.preview && readUploads(d.root).some((u) => u.version === version && u.app === app)) throw new Error(`${app} ${version} was uploaded from this computer already (${uploadsFile(d.root)})`);
     const real = checkRuns(runs, d.allowedRoots);

@@ -21,12 +21,18 @@ export const VERSION_RE = /^\d+\.\d+\.\d+\.\d+$/;
 const SHA_RE = /^[0-9a-f]{40}$/;
 
 /**
- * The Steam branches an upload of `app` from `branch` sets live: ffbox release_lane.SETLIVE, `{("master", "main"):
- * ("development",)}`, and nothing for pre-1.0 (UPLOAD_ONLY_BRANCHES). Default and every other branch are set by a person on
- * the partner site, never by an agent (Release-Lanes.md, "Development only").
+ * The Steam branches an upload of `app` from `branch` at `version` sets live: ffbox release_lane.SETLIVE, `{("master",
+ * "main"): ("development",), ("pre-1.0", "main"): ("pre-release",)}`, the second only for a 0.50.x version
+ * (SETLIVE_VERSIONS: no 1.0 build onto pre-release; w6522 for FFBox's lane, w6534 for this one; lothsahn: "Can it set
+ * that whenever a .50 release is made?"). Default and every other branch are set by a person on the partner site, never
+ * by an agent (Release-Lanes.md, "Development only").
  */
-export function liveBranchesFor(branch: ReleaseBranch, app: SteamApp): string[] {
-  return branch === 'master' && app === 'main' ? ['development'] : [];
+export const SETLIVE: Record<ReleaseBranch, string[]> = { master: ['development'], 'pre-1.0': ['pre-release'] };
+/** A Steam branch here takes only a version starting with its prefix (ffbox release_lane.SETLIVE_VERSIONS). */
+export const SETLIVE_VERSIONS: Record<string, string> = { 'pre-release': '0.50.' };
+export function liveBranchesFor(branch: ReleaseBranch, app: SteamApp, version: string): string[] {
+  if (app !== 'main') return [];
+  return (SETLIVE[branch] ?? []).filter((b) => version.startsWith(SETLIVE_VERSIONS[b] ?? ''));
 }
 
 /** `cicd/release-lane.json` in the bump commit (trigger-ci-release.sh --urgent): the urgent lane's claim. */
@@ -110,11 +116,11 @@ export function refuseUpload(ask: UploadAsk, f: UploadFacts): string | undefined
   const req = typeof c.request === 'string' ? c.request.toLowerCase() : '';
   if (!req || !f.requests.some((r) => r.toLowerCase() === req)) return `${ask.version} is ${JSON.stringify(c.request)}'s release, not one of your requests (${f.requests.join(', ') || 'none'}): steam_upload uploads only your own request's build`;
   if (!f.branch) return `${ask.sha.slice(0, 10)} is not on master or pre-1.0: only a merged bump is uploaded`;
-  const allowed = liveBranchesFor(f.branch, ask.app);
+  const allowed = liveBranchesFor(f.branch, ask.app, ask.version);
   if (ask.live && !allowed.includes(ask.live)) {
     return allowed.length
       ? `a ${f.branch} ${ask.app} release sets ${allowed.join(', ')} live, not ${ask.live}: no other Steam branch is set by an agent`
-      : `a ${f.branch} ${ask.app} release sets no Steam branch live, not ${ask.live}: a person sets the others on the partner site`;
+      : `a ${f.branch} ${ask.app} ${ask.version} release sets no Steam branch live, not ${ask.live}: a person sets the others on the partner site`;
   }
   if (f.uploaded) return `${ask.app} ${ask.version} is uploaded already: steam_upload uploads a version's app once`;
   return undefined;
