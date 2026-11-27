@@ -139,6 +139,11 @@ export class LineTail {
   }
 }
 
+/** Digits of every offset written (w6519): the largest safe integer has 16. */
+export const OFFSET_WIDTH = 16;
+/** An offset as it is written in daemon.offset and daemon.offset.stop: zero-padded, which Number() and every older daemon read as it. */
+export const offsetText = (at: number) => String(at).padStart(OFFSET_WIDTH, '0');
+
 export function hostFiles(dir: string) {
   const f = (n: string) => path.join(dir, n);
   return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), offsetStop: f('daemon.offset.stop'), beat: f('beat'), log: f('host.log'), creds: f('creds.sha'), lockEnv: f('lockenv.sha'), scope: f('scope'), progress: f('daemon.progress') };
@@ -656,7 +661,7 @@ export class HostedSession implements SessionHandle {
     fs.writeFileSync(f.creds, this.creds);
     if (this.deps.lockEnv) fs.writeFileSync(f.lockEnv, lockEnvOf(this.deps.lockEnv()));
     this.restaged = undefined;
-    fs.writeFileSync(f.offset, '0');
+    fs.writeFileSync(f.offset, offsetText(0));
     this.n = 0;
     this.savedOffset = 0;
     this.sends = [this.command(first) as Extract<HostCommand, { op: 'send' }>];
@@ -866,21 +871,22 @@ export class HostedSession implements SessionHandle {
    * read meanwhile. A folder that is gone is never made again (the open fails); kept in memory, the next poll tries
    * again. w6508: a write for an earlier start of the host writes nothing once a new start has come, so it can never put
    * the old, larger offset over the new start's '0'. The generation is looked at after the open: a file opened before
-   * start() removed the folder is the old one (on Windows the open file makes start() refuse), and one opened after it
-   * finds the generation changed, as start() runs whole before any open's answer comes back. Written then cut to length,
-   * the file never reads empty mid-write.
+   * start() removed the folder is the old one (on Windows the open file may make start() refuse), and one opened after
+   * it finds the generation changed, as start() runs whole before any open's answer comes back. Every write is
+   * OFFSET_WIDTH digits from byte 0 (offsetText) over the file, never cut short: it never reads empty mid-write, and a
+   * shorter, older offset landing on a longer one can never leave its digits followed by the longer one's (999 over 1000
+   * read 9990 until the truncate, w6519), whenever the daemon exits.
    */
   private saveOffset() {
     const at = this.tail?.position ?? 0;
     if (at === this.savedOffset || this.offsetWrite) return;
     const gen = this.offsetGen;
-    const text = String(at);
+    const text = offsetText(at);
     const write = async () => {
       const file = await fs.promises.open(this.files.offset, fs.constants.O_RDWR | fs.constants.O_CREAT);
       try {
         if (gen !== this.offsetGen) return false;
         await file.write(text, 0);
-        await file.truncate(Buffer.byteLength(text));
         return true;
       } finally {
         await file.close();
@@ -906,8 +912,8 @@ export class HostedSession implements SessionHandle {
     const at = this.tail?.position ?? 0;
     if (at === this.savedOffset || !fs.existsSync(this.files.dir)) return;
     try {
-      fs.writeFileSync(this.files.offset, String(at));
-      if (this.offsetWrite) fs.writeFileSync(this.files.offsetStop, String(at));
+      fs.writeFileSync(this.files.offset, offsetText(at));
+      if (this.offsetWrite) fs.writeFileSync(this.files.offsetStop, offsetText(at));
       this.savedOffset = at;
     } catch {
       // kept in memory; the next poll tries again
