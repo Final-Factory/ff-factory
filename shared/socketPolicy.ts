@@ -8,6 +8,8 @@
 export const SOCKET_CONNECT_TIMEOUT_MS = 10_000;
 /** The state fetch a failed attempt makes (is this login still good?) gives up after this: it carries the whole state. */
 export const SOCKET_FAILURE_CHECK_MS = 30_000;
+/** A failed attempt takes the whole state only if the page's is older than this (w6336); else it only checks the login. */
+export const SOCKET_STATE_REFRESH_MS = 5_000;
 /**
  * The longest wait between attempts. w6336: 15 s left a page dark up to ~45 s after a portal restart (the server back
  * in ~28 s, the page asleep in a 15 s wait: lothsahn's "almost a minute", 2026-11-27 06:48Z); 2 s finds it within
