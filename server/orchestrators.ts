@@ -1511,10 +1511,17 @@ It is for your part of the work, not an answer to another worker's question.`;
     // requests it holds.
     const asker = r.worker;
     const holds = (x: WorkItem) => !!asker && x.sessionIds.includes(asker);
+    // The w6248 review: sessionIds keeps every worker a request ever had, so its newest is its worker now only when it was sent
+    // or linked to it since the asker left it (moveOff's time, or the hand-back's); an earlier worker never is, and is never
+    // resumed on it (w2079). A worker with no link time counts only on a request not handed back (a placement after a
+    // hand-back always links its worker). With none since, a hand-off carries the answer (carried, below).
+    const leftAt = (x: WorkItem) => Math.max(Date.parse((asker && x.movedOff?.[asker]) || '') || 0, Date.parse(x.handedBack?.at ?? '') || 0);
     const workerOf = (x: WorkItem): string | undefined => {
       if (!asker || holds(x)) return asker;
       const now = latestWorker(x);
-      return now && now !== asker ? now : asker;
+      const link = now ? x.links?.[now]?.at : undefined;
+      const since = link ? (Date.parse(link) || 0) >= leftAt(x) : !x.handedBack;
+      return now && now !== asker && since ? now : asker;
     };
     const sid = workerOf(w);
     // w1812: the same question from the same worker on other requests is answered by this too: none of them waits on input
