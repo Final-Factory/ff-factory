@@ -58,7 +58,7 @@ export function blockReason(
   h: Pick<HostHealth, 'sandboxRoot' | 'level' | 'disks' | 'detail'>,
   kind: 'editor' | 'agent',
   mem: { freeGB: number; minFreeRamGB: number },
-  o: { diskCleanup?: boolean } = {},
+  o: { diskCleanup?: boolean; commit?: string } = {},
 ): string | undefined {
   if (h.sandboxRoot !== 'ok') return `the sandbox drive is offline (${h.sandboxRoot}${h.detail ? `: ${h.detail}` : ''}); the app is reattaching it and resumes the work afterwards`;
   if (h.level !== 'ok') {
@@ -72,7 +72,8 @@ export function blockReason(
     return `disk space is ${h.level === 'critical' ? 'critically ' : ''}low (${low.join(', ')}); new ${kind === 'editor' ? 'editors' : 'agent processes'} wait until space is freed`;
   }
   if (kind === 'editor' && mem.minFreeRamGB > 0 && mem.freeGB < mem.minFreeRamGB) {
-    return `only ${mem.freeGB.toFixed(1)} GB of RAM is free and an editor needs about ${mem.minFreeRamGB} GB (limits.minFreeRamGB); stop an editor first`;
+    // w6411: Windows' commit charge beside it ("commit 123.0 of 127.8 GB"), when the daemon read it
+    return `only ${mem.freeGB.toFixed(1)} GB of RAM is free${o.commit ? ` (${o.commit})` : ''} and an editor needs about ${mem.minFreeRamGB} GB (limits.minFreeRamGB); stop an editor first`;
   }
   return undefined;
 }
@@ -197,7 +198,7 @@ export class HostHealthMonitor {
   }
 
   /** Why a new editor / agent process must wait, or undefined. */
-  blockReason(kind: 'editor' | 'agent', o: { diskCleanup?: boolean } = {}): string | undefined {
+  blockReason(kind: 'editor' | 'agent', o: { diskCleanup?: boolean; commit?: string } = {}): string | undefined {
     // Between two looks, a drive that is gone blocks at once (the next look starts the remount).
     const gone = this.health.sandboxRoot === 'ok' && this.watchesDrive() && !this.d.exists(this.d.cfg.sandboxRoot);
     const h = gone ? { ...this.health, sandboxRoot: 'missing' as const } : this.health;

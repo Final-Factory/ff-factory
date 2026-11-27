@@ -83,7 +83,8 @@ import { LIVE_MATERIAL_NAME, LIVE_PROPERTY_NAME, keepInMat, type MatKnobType } f
 import { legsText, parseStage, restage, stageSummary, type LiveStageStep } from './liveStage.ts';
 import { FramePump, parseAck } from '../shared/framePump.ts';
 import { addMcpStatusDir, bridgeExecute, bridgeInfo } from '../server/unityHang.ts';
-import { hostStats } from '../server/system.ts';
+import { commitNow, hostStats } from '../server/system.ts';
+import { CommitCheck } from './commitCharge.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { onInstallDrive } from '../server/rootFence.ts';
 import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, passMarkerFile, biggestConsumers, fenceToRoot, sizePlan, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard, type CleanupItem, type CleanupRun } from '../server/cleanup.ts';
@@ -778,6 +779,18 @@ export class Daemon {
   private ghApp?: GhAppSetup;
   private lastSlotTick = 0;
   private lastStats?: { stats: HostStats; at: number };
+  /** w6411: CI jobs running on this machine's runners, as the Unity slots' last process listing counted them. */
+  private ciJobsSeen?: { n: number; at: number };
+  /**
+   * w6411: the commit-charge check before an editor start and a unity-slot grant (machine/commitCharge.ts). Warn-only:
+   * it logs what it would refuse. The pool's commitCheck "off" (add_machine commit_check) turns it off.
+   */
+  private readonly commitCheck = new CommitCheck({
+    read: () => commitNow(),
+    ciJobs: () => (this.ciJobsSeen && Date.now() - this.ciJobsSeen.at < 2 * 60_000 ? this.ciJobsSeen.n : undefined),
+    mode: () => this.currentPool()?.commitCheck ?? 'warn',
+    log: (line) => log(line),
+  });
   /** Each ffu slot's target size as the last clean-up pass measured it (w5912): the status reports it, never a du of its own. */
   private readonly ffuSizes = new Map<string, { bytes: number; at: string }>();
   /** The last `ffu-slot list --json` (w5912), read again every FFU_REPORT_MS in the background. */
@@ -923,7 +936,12 @@ export class Daemon {
     this.slots = new UnitySlots({
       dir: cfg.slotQueueDir ?? path.join(appDirOfConfig(cfg), 'slot-queue'),
       platform,
-      procs: () => pd.procs(),
+      procs: async () => {
+        const procs = await pd.procs();
+        // w6411: the same listing counts the CI jobs the commit check reserves room for (runner workers, as the bench drain does)
+        this.ciJobsSeen = { n: runnerCensus(procs).workers.length, at: Date.now() };
+        return procs;
+      },
       alive: isAlive,
       now: () => Date.now(),
       limit: () => this.currentPool()?.maxUnity,
@@ -933,6 +951,8 @@ export class Daemon {
       // w5324: a lower-priority idle editor yields its slot to a waiting higher-priority run, closed through the editor
       preempt: (p, why) => this.slotPreemptClose(p, why),
       ramPct: () => this.ramPct(),
+      ramWords: () => this.commitCheck.words(),
+      onGrant: (r) => void this.commitCheck.check(`a unity-slot grant to "${r.label}" (${r.holder})`, r.count),
       machine: cfg.id,
       // w4620: the queue goes in strict priority order, read live from the bench queue's priorities.json under this root
       root: cfg.root,
@@ -1291,7 +1311,11 @@ export class Daemon {
         liveRun: (id, sandboxPath) => this.liveRunIn(id, sandboxPath),
         log,
         // w1894: no editor starts while a person plays here (the turn closed the others; they reopen after its grace)
-        startGate: () => this.guard?.blockReason('editor') ?? this.personStartGate(),
+        startGate: () => {
+          const gate = this.guard?.blockReason('editor', { commit: this.commitCheck.words() }) ?? this.personStartGate();
+          if (!gate) this.commitCheck.check('an editor start'); // w6411: warn-only, it refuses nothing
+          return gate;
+        },
         onChange: () => this.reportSandboxes(),
         onEvent: (e) => {
           log(`sandboxes: ${e.text}`);

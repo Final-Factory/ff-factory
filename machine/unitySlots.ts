@@ -300,6 +300,8 @@ export interface AssessInput {
   now: number;
   ramPct?: number;
   ramLimitPct?: number;
+  /** w6411: Windows' commit charge beside the RAM figure in a wait ("commit 123.0 of 127.8 GB"). */
+  ramWords?: string;
   holderWaitMs?: number;
   /**
    * A waiting request's priority by its session (w4620; lothsahn: "The factory should be using strict priority queues"),
@@ -615,7 +617,7 @@ export function assess(input: AssessInput): Assessment {
       raised(r) +
       (r === head
         ? ramBlocked && r.count <= free
-          ? `RAM ${input.ramPct}% used; new Unity launches wait below ${input.ramLimitPct ?? UNITY_RAM_PCT}%`
+          ? `RAM ${input.ramPct}% used${input.ramWords ? ` (${input.ramWords})` : ''}; new Unity launches wait below ${input.ramLimitPct ?? UNITY_RAM_PCT}%`
           : `needs ${r.count}, ${Math.max(0, free)} free (${limit === undefined ? used : `${limit - Math.max(0, free) - (free < 0 ? free : 0)} of ${limit}`} in use)${heldBy.length ? `; held by ${heldBy.join(', ')}` : ''}${takes}`
         : `behind ${i} earlier request${i === 1 ? '' : 's'}`),
   }));
@@ -755,6 +757,10 @@ export interface ArbiterDeps {
   places(): Place[];
   ramPct(): number | undefined;
   ramLimitPct?: number;
+  /** w6411: Windows' commit charge for the RAM wait messages ("commit 123.0 of 127.8 GB"); undefined: not known. */
+  ramWords?(): string | undefined;
+  /** w6411: a grant is being written: the daemon's commit check says what it would have refused (warn-only). */
+  onGrant?(r: { label: string; holder: string; count: number }): void;
   holderWaitMs?: number;
   staleMs?: number;
   /**
@@ -800,7 +806,7 @@ export class UnitySlots {
   private yielded = false;
   /** Other arbiters already reported, by instance. */
   private readonly foreign = new Set<string>();
-  private last?: { a: Assessment; reqs: SlotRequest[]; ramPct?: number; at: number };
+  private last?: { a: Assessment; reqs: SlotRequest[]; ramPct?: number; ramWords?: string; at: number };
   /** w4620: the priority jumps already logged ("<winner id>><overtaken id>"), so a poll does not repeat one. */
   private readonly jumpsLogged = new Set<string>();
   private overSince = 0;
@@ -907,7 +913,8 @@ export class UnitySlots {
     const procs = await this.d.procs();
     const now = this.d.now();
     const ramPct = this.d.ramPct();
-    const a = assess({ platform: this.d.platform, procs, requests: reqs, places: this.places(), limit: this.d.limit(), now, ramPct, ramLimitPct: this.d.ramLimitPct, holderWaitMs: this.d.holderWaitMs, ...this.work() });
+    const ramWords = this.d.ramWords?.();
+    const a = assess({ platform: this.d.platform, procs, requests: reqs, places: this.places(), limit: this.d.limit(), now, ramPct, ramLimitPct: this.d.ramLimitPct, ramWords, holderWaitMs: this.d.holderWaitMs, ...this.work() });
     if (this.closed) return a;
     this.preempt(a, reqs, now);
     const byId = new Map(reqs.map((r) => [r.id, r]));
@@ -917,6 +924,7 @@ export class UnitySlots {
       const r = byId.get(id)!;
       r.grantedAt = now;
       this.d.log?.(`unity slots: granted ${r.count} to "${r.label}" (${r.holder})`);
+      this.d.onGrant?.({ label: r.label, holder: r.holder, count: r.count });
     }
     for (const x of a.deny) {
       writeAtomic(denyFile(this.d.dir, x.id), JSON.stringify({ id: x.id, why: x.why, at: new Date(now).toISOString() }));
@@ -926,7 +934,7 @@ export class UnitySlots {
       this.d.log?.(`unity slots: ${text}`);
       this.d.onEvent?.(text);
     }
-    this.last = { a, reqs, ramPct, at: now };
+    this.last = { a, reqs, ramPct, ramWords, at: now };
     this.notices(a, now);
     // Another live arbiter on this mailbox (a second daemon on the same home folder, a test's daemon) grants past the
     // limit: the orchestrator hears of it once per arbiter, so it can be stopped.
@@ -1033,7 +1041,7 @@ export class UnitySlots {
       if (!this.ramSince) this.ramSince = now;
       else if (this.ramSince > 0 && now - this.ramSince > 10 * 60_000) {
         this.ramSince = -1; // told once per episode
-        this.d.onEvent?.(`${a.waiting.length} Unity launch(es) have waited 10 min on RAM (${this.last?.ramPct}% used; they start below ${this.d.ramLimitPct ?? UNITY_RAM_PCT}%). ${line}.`);
+        this.d.onEvent?.(`${a.waiting.length} Unity launch(es) have waited 10 min on RAM (${this.last?.ramPct}% used${this.last?.ramWords ? `, ${this.last.ramWords}` : ''}; they start below ${this.d.ramLimitPct ?? UNITY_RAM_PCT}%). ${line}.`);
       }
     } else this.ramSince = 0;
   }
