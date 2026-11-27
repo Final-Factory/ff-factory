@@ -245,6 +245,8 @@ export const EDITOR_HOME_SEED = path.join(import.meta.dirname, 'editorHomeSeed.t
  */
 export async function seedEditorHomeFenced(home: string, realHome: string, runner: typeof run = run): Promise<SeedResult & { burst?: string }> {
   fs.mkdirSync(home, { recursive: true });
+  // w6358: a worker can chmod the shared home (it writes it) to fail every fenced start; the owner's rights come back first.
+  fs.chmodSync(home, (fs.statSync(home).mode & 0o7777) | 0o700);
   const node = process.execArgv.filter((a) => /^--(experimental-strip-types|experimental-transform-types|disable-warning|no-warnings)/.test(a));
   const r = await runner('python3', [FF_LANDLOCK, '--rw', home, '--', process.execPath, ...node, EDITOR_HOME_SEED, home, realHome], { timeoutMs: 60_000 });
   const line = r.stdout.trim().split('\n').pop() ?? '';

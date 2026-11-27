@@ -239,3 +239,25 @@ test('w5559: readLockArgs closes a Claude login file given with the secrets', ()
   const a = readLockArgs({ root: '/home/x/ffw', noRead: [login] });
   assert.ok(a.join(' ').includes(`--no-read ${login}`), a.join(' '));
 });
+
+test('w6358 (review of w5631): makeDotnetShm makes both folders 1777 and never chmods through a link a worker put there', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'w6358-'));
+  const own = path.join(base, 'own');
+  fs.mkdirSync(own, { mode: 0o700 });
+  const dotnet = path.join(base, '.dotnet');
+  makeDotnetShm(dotnet);
+  assert.equal(fs.statSync(dotnet).mode & 0o7777, 0o1777);
+  assert.equal(fs.statSync(path.join(dotnet, 'shm')).mode & 0o7777, 0o1777);
+  // shm a link to the person's folder: left alone
+  fs.rmSync(path.join(dotnet, 'shm'), { recursive: true });
+  fs.symlinkSync(own, path.join(dotnet, 'shm'));
+  makeDotnetShm(dotnet);
+  assert.equal(fs.statSync(own).mode & 0o7777, 0o700);
+  // .dotnet itself a link: nothing made or chmodded through it
+  const linked = path.join(base, 'linked');
+  fs.symlinkSync(own, linked);
+  makeDotnetShm(linked);
+  assert.equal(fs.statSync(own).mode & 0o7777, 0o700);
+  assert.ok(!fs.existsSync(path.join(own, 'shm')));
+  fs.rmSync(base, { recursive: true, force: true });
+});
