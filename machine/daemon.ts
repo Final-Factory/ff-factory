@@ -14,12 +14,12 @@ import WebSocket from 'ws';
 import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFactory, type SessionHandle, type SessionSink } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { SANDBOX_EXEC, fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
-import { probeFence } from './fenceProbe.ts';
+import { probeFence, probeFenceAsync } from './fenceProbe.ts';
 import { integrityArgv, measureAgentIntegrity } from './agentIntegrity.ts';
 import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
-import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
+import { liveSessionIds, lockTranscripts, probeTranscriptLockAsync, unlockTranscripts } from '../server/transcriptLabels.ts';
 import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, lowCopiesWanted, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, windowsShims, windowsShimsDir, dropOldToolsShims, lowToolsDir, quarantineStrayShims, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
@@ -793,6 +793,21 @@ export class Daemon {
   private lowMake(exe: string): string | undefined {
     const copies = this.lowCopiesNow();
     return copies && this.cfg.root ? this.asLowWrite([lowToolsDir(this.cfg.root)], () => copies.make(exe)) : undefined;
+  }
+  /**
+   * w6479: lowMake with the copy's programs (PowerShell, icacls) run off the event loop (LowCopies.makeAsync), its write to
+   * tools/low held until it is done. The daemon's start (lowSetup) makes its copies so: one held the loop 7.8 s of a 14.9 s
+   * block on LothDesktop (2026-11-27 18:10 UTC).
+   */
+  private async lowMakeAsync(exe: string): Promise<string | undefined> {
+    const copies = this.lowCopiesNow();
+    if (!copies || !this.cfg.root) return undefined;
+    const end = this.sharedWrites.begin([lowToolsDir(this.cfg.root)]);
+    try {
+      return await copies.makeAsync(exe);
+    } finally {
+      end?.();
+    }
   }
   private lowCheck(copy: string): string | undefined {
     const copies = this.lowCopiesNow();
@@ -3853,6 +3868,14 @@ export class Daemon {
    * variables (PROBE_ENV_KEYS: PATH, the profile and temp folders; never the vault tokens or daemon.json `env`, w5838
    * review) and said as a WARNING.
    */
+  /** w6479: bareProbe with its runs off the event loop (probeFenceAsync), for the daemon's start. */
+  private async bareProbeAsync(argv: string[], what: string): Promise<ReturnType<typeof probeFence>> {
+    const bare = await probeFenceAsync(argv, { timeoutMs: 60_000, env: bareEnv() });
+    if (bare.ok) return bare;
+    const more = await probeFenceAsync(argv, { timeoutMs: 60_000, env: { ...bareEnv(), ...pickEnv(PROBE_ENV_KEYS) } });
+    if (more.ok) log(`worker integrity: WARNING: ${what} did not run with a bare environment (${bare.why}) but did with Windows' own variables; its probe keeps those (w5838)`);
+    return more;
+  }
   private bareProbe(argv: string[], what: string): ReturnType<typeof probeFence> {
     const bare = probeFence(argv, { timeoutMs: 60_000, env: bareEnv() });
     if (bare.ok) return bare;
@@ -4390,11 +4413,11 @@ export class Daemon {
         this.slotCaches.retryNow();
         void this.sharedWrite(() => this.slotCaches?.tick(), this.cacheSeeds());
       }
-      const claude = this.lowMake(sdkClaude);
+      const claude = await this.lowMakeAsync(sdkClaude);
       if (!claude) {
         return this.lowFail('no Low claude copy');
       }
-      const probe = this.bareProbe([claude, '--version'], 'the Low claude');
+      const probe = await this.bareProbeAsync([claude, '--version'], 'the Low claude');
       if (!probe.ok) {
         return this.lowFail(`the Low claude could not run (${probe.why})`);
       }
@@ -4474,8 +4497,8 @@ export class Daemon {
       return false;
     }
     if (!(await lockTranscripts(projects, exec, say, { live: await liveSessionIds(exec), pins }))) return false;
-    const node = this.lowMake(process.execPath);
-    const probe = node ? probeTranscriptLock(node, projects, undefined, bareEnv()) : 'no Low node copy';
+    const node = await this.lowMakeAsync(process.execPath);
+    const probe = node ? await probeTranscriptLockAsync(node, projects, bareEnv()) : 'no Low node copy';
     log(/WRITTEN|failed|no Low/.test(probe) ? `worker integrity: WARNING: transcript lock self-test: ${probe}; Low workers may still write other conversations' transcripts (w5703)` : `transcript labels: self-test at Low: ${probe}`);
     return true;
   }
@@ -4486,9 +4509,9 @@ export class Daemon {
    * run. Its bridge status folder is read by the daemon from now on (addMcpStatusDir).
    */
   private async lowEditorFence(root: string, exec: (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<{ code: number | null; stdout: string; stderr: string }>, say: (l: string) => void): Promise<LowEditorFence | undefined> {
-    const launcher = this.lowMake(process.execPath);
+    const launcher = await this.lowMakeAsync(process.execPath);
     if (!launcher) return undefined;
-    const probe = this.bareProbe([launcher, '-e', '0'], 'the Low node launcher');
+    const probe = await this.bareProbeAsync([launcher, '-e', '0'], 'the Low node launcher');
     if (!probe.ok) {
       log(`worker integrity: the Low node launcher could not run (${probe.why}); sandbox editors stay Medium`);
       return undefined;
@@ -4516,7 +4539,7 @@ export class Daemon {
       const where = await exec('where.exe', ['gh'], { timeoutMs: 30_000 });
       const exe = where.code === 0 ? where.stdout.split(/\r?\n/).map((l) => l.trim()).find((l) => /\.exe$/i.test(l)) : undefined;
       if (!exe) return loud("gh is not on the daemon's PATH");
-      const copy = this.lowMake(exe);
+      const copy = await this.lowMakeAsync(exe);
       if (!copy) return loud('no Low copy of gh to test with');
       // w5838: nothing of the daemon's environment but the system's folders and the Low worker's gh login (bareEnv).
       // w5749: test the route a run with no vault token takes (ownerRunWiring): the machine login's token as GH_TOKEN when
@@ -4634,7 +4657,7 @@ export class Daemon {
           mode,
           labels,
           t,
-          lowNode: this.lowMake(process.execPath),
+          lowNode: await this.lowMakeAsync(process.execPath),
           mirrorDir: path.join(appDir, 'read-fence-precheck'),
           skip: this.labelSystemDrive,
           run: exec,

@@ -6,6 +6,8 @@ import path from 'node:path';
 import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, lowDiskImageWarning, lowDiskImages, toolsDiskPlan, labelNoReadUp, LowCopies, LOW_COPY_NAME, lowUnityJunctions, MEDIUM_TOOLS, pickEnv, PROBE_ENV_KEYS, isReadOnlyCopy, junctionLeadsTo, lockCopyScript, deleteFilesScript, deleteBatches, readOnlyGrants, type ExecSync, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, unlabelNoReadUp, credDeleteScript, deleteGenericCreds, NO_LABEL, type Exec } from '../machine/lowIntegrity.ts';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 import { ensureDaemonOnlyDirs } from '../machine/readFence.ts';
+import { probeFence, probeFenceAsync } from '../machine/fenceProbe.ts';
+import { probeTranscriptLock, probeTranscriptLockAsync } from './transcriptLabels.ts';
 
 /**
  * w5377: the Windows worker fence. What gets the Low label (and what must stay Medium: daemon, secrets, the daemon's
@@ -1163,4 +1165,76 @@ test('w6417: the daemon makes its LowCopies at the first ask, never only after t
     assert.ok(at >= 0, m);
     assert.match(src.slice(at, src.indexOf('\n  }', at)), /this\.lowCopiesNow\(\)/, `${m} goes through lowCopiesNow`);
   }
+});
+
+test('w6479: makeAsync runs the same programs in the same order as make, and makes the same copy', async () => {
+  for (const o of [{}, { lockFails: true }, { readOnlyFails: true, lockFails: true }]) {
+    const run = async (useAsync: boolean) => {
+      const root = tmpDir('lowcopy-');
+      const exe = path.join(root, 'claude.exe');
+      fs.writeFileSync(exe, 'v1');
+      fs.utimesSync(exe, 1_700_000_000, 1_700_000_000);
+      // an earlier run's copy at the first name, and a stray beside it: both go
+      const dir = path.join(root, 'tools', 'low');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'claude-2-1700000000000.exe'), 'v1');
+      fs.writeFileSync(path.join(dir, 'planted.dll'), 'x');
+      const f = icaclsSync(o);
+      const said: string[] = [];
+      const copies = new LowCopies(root, (l) => void said.push(l), f.exec, 'BEAST\\rydin');
+      const copy = useAsync ? await copies.makeAsync(exe) : copies.make(exe);
+      const rel = (s: string) => s.split(root).join('<root>');
+      return { copy: copy && rel(copy), calls: f.calls.map((c) => c.map((x, i) => rel(c[i - 1] === '-EncodedCommand' ? Buffer.from(x, 'base64').toString('utf16le') : x))), said: said.map(rel), files: fs.readdirSync(dir).sort(), checked: copy ? copies.check(copy) === copy : undefined };
+    };
+    assert.deepEqual(await run(true), await run(false), JSON.stringify(o));
+  }
+});
+
+test('w6479: a make while a makeAsync waits on its lock neither takes its name nor removes its .part, and both copies stay', async () => {
+  const root = tmpDir('lowcopy-');
+  const exe = path.join(root, 'node.exe');
+  fs.writeFileSync(exe, 'node');
+  const f = icaclsSync();
+  let reached!: () => void;
+  const atLock = new Promise<void>((r) => (reached = r));
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const execAsync = async (cmd: string, args: string[]) => {
+    if (cmd === 'powershell.exe' && Buffer.from(args[args.length - 1], 'base64').toString('utf16le').includes('[FfLock]::Set(')) {
+      reached();
+      await gate;
+    }
+    return f.exec(cmd, args);
+  };
+  const copies = new LowCopies(root, () => {}, f.exec, 'BEAST\\rydin', undefined, undefined, execAsync);
+  const pending = copies.makeAsync(exe);
+  await atLock;
+  const meanwhile = copies.make(exe)!;
+  release();
+  const made = (await pending)!;
+  assert.ok(made && meanwhile && made !== meanwhile, 'two names');
+  assert.ok(fs.existsSync(made) && fs.existsSync(meanwhile), 'neither removed the other');
+  assert.equal(copies.check(made), made);
+  assert.equal(copies.check(meanwhile), meanwhile);
+  assert.ok(!fs.readdirSync(path.dirname(made)).some((n) => n.endsWith('.part')), 'no .part left');
+});
+
+test('w6479: probeFenceAsync answers as probeFence does, from the spawn thread', async () => {
+  for (const argv of [[process.execPath, '-e', '0'], [process.execPath, '-e', 'process.stderr.write("no\\n"); process.exit(3)'], [path.join(os.tmpdir(), 'ff-no-such-program.exe')], []]) {
+    const a = await probeFenceAsync(argv);
+    const s = probeFence(argv);
+    assert.equal(a.ok, s.ok, argv.join(' '));
+    if (argv.length === 2 || /exit\(3\)/.test(argv.join(' '))) assert.equal(a.why, s.why);
+    if (!a.ok) assert.ok(a.why, 'says why');
+  }
+  const ended = await probeFenceAsync([process.execPath, '-e', 'setTimeout(() => {}, 60_000)'], { timeoutMs: 300 });
+  assert.equal(ended.ok, false);
+});
+
+test('w6479: probeTranscriptLockAsync answers what probeTranscriptLock does', async () => {
+  const projects = tmpDir('lockprobe-');
+  fs.mkdirSync(path.join(projects, 'p1'));
+  fs.writeFileSync(path.join(projects, 'p1', 'a.jsonl'), '');
+  assert.equal(await probeTranscriptLockAsync(process.execPath, projects), probeTranscriptLock(process.execPath, projects));
+  assert.match(await probeTranscriptLockAsync(path.join(projects, 'missing.exe'), projects), /^probe failed: /);
 });
