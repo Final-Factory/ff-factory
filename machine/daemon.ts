@@ -20,7 +20,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, windowsShims, windowsShimsDir, dropOldToolsShims, lowToolsDir, quarantineStrayShims, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, lowCopiesWanted, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, windowsShims, windowsShimsDir, dropOldToolsShims, lowToolsDir, quarantineStrayShims, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -768,11 +768,22 @@ export class Daemon {
       end?.();
     }
   }
+  /**
+   * w6417: the Low copies from the first time one is asked for, not only once lowSetup's labelling is done: after a restart
+   * LothDesktop's labelling of the shared-lock folders ran from 13:55 to past 14:25 UTC, and every copy asked for meanwhile
+   * (the players broker's installs, the slot caches) got none, said nowhere but in the caller's "no Low node copy".
+   */
+  private lowCopiesNow(): LowCopies | undefined {
+    if (!this.lowCopies && lowCopiesWanted(this.cfg, process.platform)) this.lowCopies = new LowCopies(this.cfg.root!, (l) => log(l));
+    return this.lowCopies;
+  }
   private lowMake(exe: string): string | undefined {
-    return this.lowCopies && this.cfg.root ? this.asLowWrite([lowToolsDir(this.cfg.root)], () => this.lowCopies!.make(exe)) : undefined;
+    const copies = this.lowCopiesNow();
+    return copies && this.cfg.root ? this.asLowWrite([lowToolsDir(this.cfg.root)], () => copies.make(exe)) : undefined;
   }
   private lowCheck(copy: string): string | undefined {
-    return this.lowCopies && this.cfg.root ? this.asLowWrite([lowToolsDir(this.cfg.root)], () => this.lowCopies!.check(copy)) : undefined;
+    const copies = this.lowCopiesNow();
+    return copies && this.cfg.root ? this.asLowWrite([lowToolsDir(this.cfg.root)], () => copies.check(copy)) : undefined;
   }
   /** The GitHub App shims and tokens' file (w1519, machine/ghApp.ts), once written. */
   private ghApp?: GhAppSetup;
@@ -4291,7 +4302,8 @@ export class Daemon {
       const writable = (p: string) => [root, ...allow].some((a) => !path.relative(a, p).startsWith('..') && !path.isAbsolute(path.relative(a, p)));
       if (!writable(this.slotMailbox)) log(`worker integrity: the Unity slots mailbox ${this.slotMailbox} is outside the root and not in workerIntegrityAllow; a Low worker's unity-slot run cannot ask for a slot`);
       const sdkClaude = this.cfg.claude ?? path.join(path.dirname(createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk-win32-x64/package.json')), 'claude.exe');
-      this.lowCopies ??= new LowCopies(root, say); // w5877: one per daemon run, which never takes over another run's copies
+      // w5877: one per daemon run, which never takes over another run's copies; w6417: made at the first ask (lowCopiesNow).
+      this.lowCopiesNow();
       // w6284: the slot caches' first tick may have run before the Low node copy its copies need; try what it lacks again now.
       if (this.slotCaches) {
         this.slotCaches.retryNow();
