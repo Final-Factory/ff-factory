@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runCleanup, type CleanupGuard, type CleanupItem } from './cleanup.ts';
-import { INSTALL_LEFTOVER_DEFAULTS, installLeftoverSettings, planInstallLeftovers, runnerBusyNow, type InstallLeftoverSettings, type ProcLite } from './installLeftovers.ts';
+import { INSTALL_LEFTOVER_DEFAULTS, anyBusyNow, installLeftoverSettings, linkOnPath, planInstallLeftovers, runnerBusyNow, runnerTargetLinksNow, type InstallLeftoverSettings, type ProcLite } from './installLeftovers.ts';
 import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
 import { sweptUnits, unitKeyOf } from './cargoGraphSweep.ts';
 
@@ -371,4 +371,76 @@ test('w6291: the settings parse: only off, warn and on are modes; hours and cap 
   assert.equal(installLeftoverSettings({ runnerTargetCapGB: 10_001 }).runnerTargetCapGB, 24);
   assert.equal(installLeftoverSettings({ runnerTargetCapGB: -5 }).runnerTargetCapGB, 24);
   assert.equal(installLeftoverSettings({ runnerTargetCapGB: Number.NaN }).runnerTargetCapGB, 24);
+});
+
+/** A folder outside the install folder: what a junction inside it must never lead the removal into (review w6301 of #1427). */
+function outside(t: { after: (fn: () => void) => void }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w6291-out-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 }));
+  return dir;
+}
+/** Moves `from` to `to` and leaves a junction (a directory symlink off Windows) at `from` pointing at it. */
+function junctionAway(from: string, to: string) {
+  fs.renameSync(from, to);
+  fs.symlinkSync(to, from, 'junction');
+}
+
+test('w6291 (review w6301): a junction on the way to a runner target is refused: no item, nothing outside the install folder goes', async (t) => {
+  const root = install(t);
+  const out = outside(t);
+  const w = world(root);
+  const glam = path.join(out, 'ffu', 'ffu', 'target', 'debug', 'deps', `libglam-${H.glam}.rlib`);
+  junctionAway(path.join(runnerOf(root), '_work', 'ffu'), path.join(out, 'ffu'));
+  assert.ok(fs.existsSync(glam), 'the fixture: the stale unit now lives outside, reached through the junction');
+  assert.match((await linkOnPath(root, w.target, true)) ?? '', /link or junction/, 'linkOnPath sees the junction on the path');
+  const p = await plan(root, { settings: { runnerTargetMode: 'on' } });
+  assert.deepEqual(targetItems(p), []);
+  for (const l of p.listed.filter((x) => x.path === w.target)) assert.match(l.why, /^refused \(w6291\): .*link or junction/);
+  const guard: CleanupGuard = { keep: [path.join(root, 'repo')], inUse: [], home: path.join(root, 'home') };
+  await runCleanup(p.items.filter((i) => i.rule.startsWith('ffu-runner')), guard, anyBusyNow(runnerBusyNow(async () => [listener(root, 'r1', 100)], () => NOW, () => idleLog(NOW - HOUR)), runnerTargetLinksNow(root)));
+  assert.ok(fs.existsSync(glam), 'the file outside the install folder stays');
+});
+
+test('w6291 (review w6301): a junction inside a runner target refuses the whole target in the plan', async (t) => {
+  const root = install(t);
+  const out = outside(t);
+  const w = world(root);
+  fs.mkdirSync(path.join(out, 'x'));
+  fs.writeFileSync(path.join(out, 'x', 'keep.txt'), 'a person\'s file');
+  fs.mkdirSync(path.join(w.target, 'debug', 'build'), { recursive: true });
+  fs.symlinkSync(path.join(out, 'x'), path.join(w.target, 'debug', 'build', 'x'), 'junction');
+  const p = await plan(root, { settings: { runnerTargetMode: 'on' } });
+  assert.deepEqual(targetItems(p), []);
+  const l = p.listed.find((x) => x.path === w.target);
+  assert.match(l?.why ?? '', /^refused \(w6291\): FFU runner r1's cargo target is never swept through a link or junction: .*build.x/);
+  assert.ok(fs.existsSync(path.join(out, 'x', 'keep.txt')));
+});
+
+test('w6291 (review w6301): a junction made between the plan and the removal keeps the item (runnerTargetLinksNow); the files it leads to stay', async (t) => {
+  const root = install(t);
+  const out = outside(t);
+  const w = world(root);
+  const p = await plan(root, { settings: { runnerTargetMode: 'on' } });
+  const items = targetItems(p);
+  assert.equal(items.length, 1);
+  assert.ok(items[0].members?.length);
+  junctionAway(path.join(w.target, 'debug', 'deps'), path.join(out, 'deps'));
+  const guard: CleanupGuard = { keep: [path.join(root, 'repo')], inUse: [], home: path.join(root, 'home') };
+  const run = await runCleanup(items, guard, anyBusyNow(runnerBusyNow(async () => [listener(root, 'r1', 100)], () => NOW, () => idleLog(NOW - HOUR)), runnerTargetLinksNow(root)));
+  assert.equal(run.removed.length, 0);
+  assert.match(run.failed[0]?.why ?? '', /^kept: a link or junction is in the target \(w6291\)/);
+  assert.ok(fs.existsSync(path.join(out, 'deps', `libglam-${H.glam}.rlib`)), 'the stale unit outside, behind the junction, stays');
+  // The whole-target form is walked too.
+  assert.match((await runnerTargetLinksNow(root)({ rule: 'ffu-runner-target', path: w.target })) ?? '', /link or junction/);
+  // Other rules pass this check untouched.
+  assert.equal(await runnerTargetLinksNow(root)({ rule: 'ffu-runner-work', path: w.target }), undefined);
+});
+
+test('w6291 (review w6301): the warn file is written whole through a rename, and no temp file is left beside it', async (t) => {
+  const root = install(t);
+  world(root);
+  const warnFile = path.join(root, 'daemon', 'ffu-runner-sweep-warn.json');
+  await plan(root, { warnFile });
+  assert.ok(JSON.parse(fs.readFileSync(warnFile, 'utf8')).targets);
+  assert.deepEqual(fs.readdirSync(path.dirname(warnFile)), ['ffu-runner-sweep-warn.json']);
 });

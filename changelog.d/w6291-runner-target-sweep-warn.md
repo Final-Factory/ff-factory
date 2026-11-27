@@ -5,6 +5,7 @@
     48 h window, narrowing while over a 24 GB cap, then the whole target over the cap.
   - Mode `warn` (the default) removes nothing. It lists `warn-only (runnerTargetMode warn, w6291): would take …` and
     counts misses in `ffu-runner-sweep-warn.json` in the daemon's folder. Enforcement comes in a separate PR.
+  - It never sweeps through a link or junction, on the way to the target or inside it, and it checks again right before removal (review w6301). The warn file is written to a temp file, then renamed into place.
   - `players` and `player-cache` are already bounded by their owners: the slot count, and `player_cache.py`'s 8
     entries / 24 GB. They are unchanged.
   - New: `scripts/disk-usage/diskuse.ps1`, which gives the real (union of clusters) and exclusive size per folder on

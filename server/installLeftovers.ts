@@ -954,12 +954,94 @@ export function readRunnerWarn(file: string | undefined): Record<string, RunnerW
 
 /** The warn file, written in place (a torn write is read as no record). A failed write loses the counts, nothing else. */
 function writeRunnerWarn(file: string, targets: Record<string, RunnerWarnRecord>): void {
+  // Written beside it, then renamed over it (review w6301): a daemon stopped mid-write leaves the last whole file, not a torn one.
+  const tmp = `${file}.${process.pid}.tmp`;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify({ targets }, null, 1));
+    fs.writeFileSync(tmp, JSON.stringify({ targets }, null, 1));
+    fs.renameSync(tmp, file);
   } catch {
+    fs.rmSync(tmp, { force: true });
     // the next pass starts its counts again
   }
+}
+
+const samePath = (a: string, b: string) => (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
+const errCode = (e: unknown) => (e as NodeJS.ErrnoException).code ?? (e as Error).message;
+
+/**
+ * w6291 (review w6301 of #1427): why `p` may not be removed as a path of the install folder `root`: it is outside it, a link or
+ * junction on the way leads elsewhere (its real path is not the root's real path plus the same relative path), or, with `walk`,
+ * a link or junction lies anywhere under it. A junction a Low-integrity process made reads as a plain folder to lstat (w5915), so
+ * each folder's real path is compared, not only its entry type. Undefined: none, or `p` is gone. Anything unreadable refuses.
+ */
+export async function linkOnPath(root: string, p: string, walk: boolean, realRoot?: string): Promise<string | undefined> {
+  if (!within(p, root) || norm(p) === norm(root)) return `${p} is not inside the install folder ${root}`;
+  let rr: string;
+  try {
+    rr = realRoot ?? (await fs.promises.realpath(root));
+  } catch (e) {
+    return `the install folder's real path is unreadable (${errCode(e)})`;
+  }
+  const want = (q: string) => path.join(rr, path.relative(root, q));
+  try {
+    const rp = await fs.promises.realpath(p);
+    if (!samePath(rp, want(p))) return `${p} leads through a link or junction to ${rp}`;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : `${p}: its real path is unreadable (${errCode(e)})`;
+  }
+  if (!walk || !(await fs.promises.lstat(p).catch(() => undefined))?.isDirectory()) return undefined;
+  const stack = [p];
+  while (stack.length) {
+    const d = stack.pop()!;
+    let ents: fs.Dirent[];
+    try {
+      ents = await fs.promises.readdir(d, { withFileTypes: true });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      return `${d} is unreadable (${errCode(e)})`;
+    }
+    for (const e of ents) {
+      const c = path.join(d, e.name);
+      if (e.isSymbolicLink()) return `${c} is a link or junction`;
+      if (!e.isDirectory()) continue;
+      try {
+        const rc = await fs.promises.realpath(c);
+        if (!samePath(rc, want(c))) return `${c} is a link or junction to ${rc}`;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        return `${c}: its real path is unreadable (${errCode(err)})`;
+      }
+      stack.push(c);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The re-check for runCleanup (w6291, review w6301): an ffu-runner-target item again right before its removal, by linkOnPath: the
+ * whole target walked, or each member (a folder member walked). A link or junction made since the plan keeps the item whole.
+ */
+export function runnerTargetLinksNow(root: string | undefined): (it: { rule: string; path: string; members?: string[] }) => Promise<string | undefined> {
+  return async (it) => {
+    if (it.rule !== 'ffu-runner-target') return undefined;
+    if (!root) return 'no install folder to check the target against';
+    let rr: string;
+    try {
+      rr = await fs.promises.realpath(root);
+    } catch (e) {
+      return `the install folder's real path is unreadable (${errCode(e)})`;
+    }
+    const why = await linkOnPath(root, it.path, !it.members, rr);
+    if (why) return `a link or junction is on the target's path (w6291): ${why}`;
+    for (const m of it.members ?? []) {
+      if (!within(m, it.path)) return `a member is outside the target: ${m}`;
+      const st = await fs.promises.lstat(m).catch(() => undefined);
+      const w = await linkOnPath(root, m, !!st?.isDirectory(), rr);
+      if (w) return `a link or junction is in the target (w6291): ${w}`;
+    }
+    return undefined;
+  };
 }
 
 /**
@@ -1682,6 +1764,12 @@ export async function planInstallLeftovers(o: {
     const keep = s.runnerTargetKeepHours;
     for (const target of found) {
       if (items.has(target) || !isCargoTarget(target) || neverDelete(target, relaxed(runner))) continue;
+      // Review w6301 of #1427: a junction on the way to the target, or inside it, led the removal outside the install folder.
+      const link = await linkOnPath(root, target, true);
+      if (link) {
+        listed.set(target, `refused (w6291): FFU runner ${name}'s cargo target is never swept through a link or junction: ${link}`);
+        continue;
+      }
       const bytes = await sizeOf(target);
       let sweep: CargoSweep | undefined;
       let hours = 0;
