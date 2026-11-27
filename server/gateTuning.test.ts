@@ -142,9 +142,9 @@ test('w6370: a gate-tuning run reads the history apart from the loop and gives t
 
 test('the gate_tuning query answers the newest summary and its proposals; the request has its own key and rules', async () => {
   const h = new TestHistory({ dataDir: tmp(), now: () => T0 });
-  assert.match(readyQuery(h, { query: 'gate_tuning' }, T0).title, /no run yet/);
+  assert.match((await readyQuery(h, { query: 'gate_tuning' }, T0)).title, /no run yet/);
   await new GateTuningJob({ cfg: cfg(), history: h, prHead: heads, now: () => T0 }).run();
-  const q = readyQuery(h, { query: 'gate_tuning' }, T0);
+  const q = await readyQuery(h, { query: 'gate_tuning' }, T0);
   assert.match(q.title, /^Merge-gate tuning 2026-11-20/);
   assert.deepEqual(q.rows, []);
   const source = { kind: 'master-batch' as const, untrusted: false, masterBatch: { run: 'gate-tuning', tip: '2026-11-20', kind: 'gate-miss' as const } };

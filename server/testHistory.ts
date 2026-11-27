@@ -303,6 +303,24 @@ CREATE TABLE IF NOT EXISTS gate_tuning(day TEXT PRIMARY KEY, at TEXT NOT NULL, s
 
 export type Row = Record<string, string | number | null>;
 
+const PENDING_SQL = `SELECT f.id, f.run_id AS runId, t.name AS test, t.id AS testId, r.source, r.repo, r.sha, r.base, r.branch, r.machine, r.sandbox, r.finished, r.changes
+  FROM failures f JOIN runs r ON r.id = f.run_id JOIN tests t ON t.id = f.test_id WHERE f.label IS NULL ORDER BY r.finished LIMIT ?`;
+
+/** The longest the labeller works on the loop before it lets the loop run (w6415: 0.6 to 0.8 s blocks on 2026-11-27). */
+const SLICE_MS = 40;
+
+/** A pause for the labeller: the loop runs once the slice is used up, and no label is written while the writer thread writes. */
+function breather(h: TestHistory): () => Promise<void> {
+  let since = performance.now();
+  return async () => {
+    if (performance.now() - since > SLICE_MS) {
+      await new Promise<void>((r) => setImmediate(r));
+      since = performance.now();
+    }
+    await h.idle();
+  };
+}
+
 export interface PendingFailure {
   id: number;
   runId: number;
@@ -329,17 +347,33 @@ export interface NextPass {
   changes: string | null;
 }
 
+/** What the writer thread is asked (server/testHistoryWriter.ts): one run to record, or a prune, at the caller's time. */
+export type WriterJob =
+  | { op: 'addRun'; run: RunInfo; tests: readonly TestCase[] }
+  | { op: 'addNunit'; run: RunInfo; xmlFile: string }
+  | { op: 'prune'; keepDays: number };
+export type WriterAsk = { id: number; now: number } & WriterJob;
+export type WriterAnswer = { id: number; result?: unknown; error?: string };
+
+/** A read of rows by SQL and arguments: the portal's own reads run apart (allApart), a test's may run inline. */
+export type ReadRows = (sql: string, ...args: (string | number | null)[]) => Promise<Row[]>;
+
 export class TestHistory {
   readonly file: string;
   private readonly db: DatabaseSync;
   private readonly now: () => number;
+  private writer?: Worker;
+  private nextAsk = 1;
+  private readonly asked = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private quiet: (() => void)[] = [];
 
-  constructor(o: { dataDir: string; now?: () => number; file?: string }) {
+  /** busyMs: how long a statement waits for another connection's write lock (the writer thread waits longer than the loop). */
+  constructor(o: { dataDir: string; now?: () => number; file?: string; busyMs?: number }) {
     this.file = o.file ?? path.join(o.dataDir, TEST_HISTORY_FILE);
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     this.now = o.now ?? Date.now;
     this.db = new DatabaseSync(this.file);
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;');
+    this.db.exec(`PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = ${Math.round(o.busyMs ?? 5000)};`);
     this.db.exec(SCHEMA);
     // A database made before runs.tagged (#1050's first deploy).
     if (!(this.db.prepare('PRAGMA table_info(runs)').all() as Row[]).some((c) => c.name === 'tagged')) this.db.exec('ALTER TABLE runs ADD COLUMN tagged TEXT');
@@ -347,7 +381,91 @@ export class TestHistory {
   }
 
   close() {
+    const w = this.writer;
+    this.writer = undefined;
+    if (w) void w.terminate();
+    this.failAsked(new Error('test history closed'));
     this.db.close();
+  }
+
+  // ------------------------------------------------------------ the writer thread (w6415)
+  // A run's inserts (a full suite is about 22,000 cases) took 1 to 13 s on the portal's loop on 2026-11-27. They run in one
+  // worker thread on its own connection instead, in one transaction as before (addRun, the same code), one ask at a time in
+  // the order asked. The loop's own small writes wait for it (idle) so they never wait on its lock synchronously.
+
+  private writerThread(): Worker {
+    if (this.writer) return this.writer;
+    const w = new Worker(new URL('./testHistoryWriter.ts', import.meta.url), { workerData: { file: this.file } });
+    w.on('message', (m: WriterAnswer) => {
+      const p = this.asked.get(m.id);
+      if (!p) return;
+      this.asked.delete(m.id);
+      if (m.error !== undefined) p.reject(new Error(m.error));
+      else p.resolve(m.result);
+      this.settle();
+    });
+    const gone = (e: Error) => {
+      if (this.writer !== w) return;
+      this.writer = undefined;
+      this.failAsked(e);
+    };
+    w.on('error', (e: unknown) => gone(e instanceof Error ? e : new Error(String(e))));
+    w.on('exit', (code) => gone(new Error(`test history writer stopped (exit ${code})`)));
+    w.unref();
+    this.writer = w;
+    return w;
+  }
+
+  private failAsked(e: Error) {
+    const all = [...this.asked.values()];
+    this.asked.clear();
+    for (const p of all) p.reject(e);
+    this.settle();
+  }
+
+  private settle() {
+    if (this.asked.size) {
+      this.writer?.ref();
+      return;
+    }
+    this.writer?.unref();
+    const q = this.quiet;
+    this.quiet = [];
+    for (const f of q) f();
+  }
+
+  private ask<T>(a: WriterJob): Promise<T> {
+    const id = this.nextAsk++;
+    const w = this.writerThread();
+    return new Promise<T>((resolve, reject) => {
+      this.asked.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      this.settle();
+      w.postMessage({ ...a, id, now: this.now() } as WriterAsk);
+    });
+  }
+
+  /** Resolves once the writer thread has nothing left to do: then a write on the loop cannot wait for its lock. */
+  idle(): Promise<void> {
+    if (!this.asked.size) return Promise.resolve();
+    return new Promise((r) => this.quiet.push(r));
+  }
+
+  /** addRun in the writer thread: the same run, the same rows, one transaction; answers once it is committed. */
+  addRunApart(run: RunInfo, tests: readonly TestCase[]): Promise<{ runId: number; added: boolean }> {
+    return this.ask({ op: 'addRun', run, tests });
+  }
+
+  /**
+   * An NUnit results file (CI's artifacts) read, parsed and recorded in the writer thread (its parse held the loop up to
+   * 0.9 s on 2026-11-27): answers the run as addRun does and how many cases it held; a missing file records nothing (tests 0).
+   */
+  addNunitApart(run: RunInfo, xmlFile: string): Promise<{ runId?: number; added: boolean; tests: number }> {
+    return this.ask({ op: 'addNunit', run, xmlFile });
+  }
+
+  /** prune in the writer thread (a day of old results is hundreds of thousands of rows). */
+  pruneApart(keepDays = KEEP_RESULTS_DAYS): Promise<number> {
+    return this.ask({ op: 'prune', keepDays });
   }
 
   meta(k: string): string | undefined {
@@ -382,7 +500,8 @@ export class TestHistory {
   }
 
   private tx<T>(fn: () => T): T {
-    this.db.exec('BEGIN');
+    // IMMEDIATE: the write lock is taken at the start (two connections write: the loop's and the writer thread's).
+    this.db.exec('BEGIN IMMEDIATE');
     try {
       const r = fn();
       this.db.exec('COMMIT');
@@ -402,6 +521,9 @@ export class TestHistory {
     const had = this.db.prepare('SELECT id FROM runs WHERE key = ?').get(run.key) as Row | undefined;
     if (had) return { runId: Number(had.id), added: false };
     return this.tx(() => {
+      // Again inside the lock: another connection may have recorded it since.
+      const again = this.db.prepare('SELECT id FROM runs WHERE key = ?').get(run.key) as Row | undefined;
+      if (again) return { runId: Number(again.id), added: false };
       const passed = tests.filter((t) => t.outcome === 'pass').length;
       const failed = tests.filter((t) => t.outcome === 'fail').length;
       const skipped = tests.length - passed - failed;
@@ -499,14 +621,12 @@ export class TestHistory {
 
   /** The failures no label has reached yet, oldest first. */
   pending(limit = 500): PendingFailure[] {
-    return (
-      this.db
-        .prepare(
-          `SELECT f.id, f.run_id AS runId, t.name AS test, t.id AS testId, r.source, r.repo, r.sha, r.base, r.branch, r.machine, r.sandbox, r.finished, r.changes
-           FROM failures f JOIN runs r ON r.id = f.run_id JOIN tests t ON t.id = f.test_id WHERE f.label IS NULL ORDER BY r.finished LIMIT ?`,
-        )
-        .all(limit) as unknown as PendingFailure[]
-    );
+    return this.db.prepare(PENDING_SQL).all(limit) as unknown as PendingFailure[];
+  }
+
+  /** pending, read apart (allApart): the labeller's read, off the loop. */
+  async pendingApart(limit = 500): Promise<PendingFailure[]> {
+    return (await this.allApart(PENDING_SQL, limit)) as unknown as PendingFailure[];
   }
 
   /**
@@ -672,24 +792,32 @@ const ageDays = (iso: string, now: number) => (now - Date.parse(iso)) / DAY;
  * Give every pending failure the label what happened next shows, where it shows one (labelFromChange). A failure on a line
  * that never ran the test again, or never passed it, waits DECIDE_WITHIN_DAYS and is then unknown. Answers how many it labelled.
  */
+/** A label written once the writer thread is idle, so it never waits for that thread's lock on the loop. */
+async function labelWhenIdle(h: TestHistory, ...a: Parameters<TestHistory['label']>): Promise<boolean> {
+  await h.idle();
+  return h.label(...a);
+}
+
 export async function labelFailures(h: TestHistory, prDiff: PrDiff, now = Date.now(), limit = 500): Promise<number> {
   let n = 0;
-  for (const f of h.pending(limit)) {
+  const breathe = breather(h);
+  for (const f of await h.pendingApart(limit)) {
+    await breathe();
     const old = ageDays(f.finished, now) > DECIDE_WITHIN_DAYS;
     if (f.source === 'master-batch') {
       // Its own verdict labels it (applyBatchVerdict); a failure no list named (a run cut short) is unknown after a day.
-      if (ageDays(f.finished, now) > 1) n += +h.label(f.id, 'unknown', 'master batch: named in none of its verdict lists', 'auto');
+      if (ageDays(f.finished, now) > 1) n += +(await labelWhenIdle(h, f.id, 'unknown', 'master batch: named in none of its verdict lists', 'auto'));
       continue;
     }
     const next = h.nextOnLine(f);
     if (!next.pass) {
-      if (old) n += +h.label(f.id, 'unknown', next.later ? `never passed again on its ${f.source === 'local' ? 'sandbox' : 'branch'} within ${DECIDE_WITHIN_DAYS} days` : `never ran again on its ${f.source === 'local' ? 'sandbox' : 'branch'} within ${DECIDE_WITHIN_DAYS} days`, 'auto');
+      if (old) n += +(await labelWhenIdle(h, f.id, 'unknown', next.later ? `never passed again on its ${f.source === 'local' ? 'sandbox' : 'branch'} within ${DECIDE_WITHIN_DAYS} days` : `never ran again on its ${f.source === 'local' ? 'sandbox' : 'branch'} within ${DECIDE_WITHIN_DAYS} days`, 'auto'));
       continue;
     }
     const p = next.pass;
     const notGame = notTheGame(f, p);
     if (notGame) {
-      n += +h.label(f.id, notGame.label, notGame.reason, 'auto');
+      n += +(await labelWhenIdle(h, f.id, notGame.label, notGame.reason, 'auto'));
       continue;
     }
     const again = f.source === 'local' ? 'in the next local run that passed' : `in CI at ${String(p.sha).slice(0, 9)}`;
@@ -702,7 +830,7 @@ export async function labelFailures(h: TestHistory, prDiff: PrDiff, now = Date.n
     } else if (f.sha && f.sha === p.sha) verdict = labelFromChange([], 'on a re-run at the same commit');
     else if (f.repo && f.sha && p.sha) verdict = labelFromChange(await prDiff(f.repo, f.sha, p.sha), again);
     else verdict = { label: 'unknown', reason: 'passed again, but the commits are not recorded' };
-    n += +h.label(f.id, verdict.label, verdict.reason, 'auto');
+    n += +(await labelWhenIdle(h, f.id, verdict.label, verdict.reason, 'auto'));
   }
   return n + (await labelStreaks(h, prDiff));
 }
@@ -720,19 +848,21 @@ const MASTER_LINE = "r.branch = 'master' AND r.source IN ('master-batch', 'relea
  * is one run's sha and finish time: the master batch keeps an EditMode and a smoke run side by side, and only failures.
  */
 export async function labelStreaks(h: TestHistory, prDiff: PrDiff): Promise<number> {
-  const tests = h.all(
-    `SELECT f.test_id AS id FROM failures f JOIN runs r ON r.id = f.run_id WHERE ${MASTER_LINE} AND f.label = 'fp' AND f.labelled_by = 'auto'
-     GROUP BY f.test_id`,
+  // Read apart, in two reads (w6415): the master line's failures of every test with an auto fp there, and its batches.
+  const all = await h.allApart(
+    `SELECT f.id, f.test_id, f.label, f.labelled_by, r.sha, r.finished FROM failures f JOIN runs r ON r.id = f.run_id WHERE ${MASTER_LINE}
+       AND f.test_id IN (SELECT f.test_id FROM failures f JOIN runs r ON r.id = f.run_id WHERE ${MASTER_LINE} AND f.label = 'fp' AND f.labelled_by = 'auto')
+     ORDER BY f.test_id, f.id`,
   );
-  if (!tests.length) return 0;
-  const batches = h.all(`SELECT sha, finished, max(repo) AS repo FROM runs r WHERE ${MASTER_LINE} GROUP BY sha, finished ORDER BY finished, sha`);
+  if (!all.length) return 0;
+  const byTest = new Map<number, Row[]>();
+  for (const f of all) byTest.set(Number(f.test_id), [...(byTest.get(Number(f.test_id)) ?? []), f]);
+  const batches = await h.allApart(`SELECT sha, finished, max(repo) AS repo FROM runs r WHERE ${MASTER_LINE} GROUP BY sha, finished ORDER BY finished, sha`);
   const diffs = new Map<string, Promise<string[] | undefined>>();
+  const breathe = breather(h);
   let n = 0;
-  for (const { id } of tests) {
-    const fails = h.all(
-      `SELECT f.id, f.label, f.labelled_by, r.sha, r.finished FROM failures f JOIN runs r ON r.id = f.run_id WHERE f.test_id = ? AND ${MASTER_LINE}`,
-      Number(id),
-    );
+  for (const fails of byTest.values()) {
+    await breathe();
     const at = new Map<string, Row[]>();
     for (const f of fails) at.set(`${f.sha}|${f.finished}`, [...(at.get(`${f.sha}|${f.finished}`) ?? []), f]);
     let run: Row[] = [];
@@ -753,6 +883,7 @@ export async function labelStreaks(h: TestHistory, prDiff: PrDiff): Promise<numb
             game ? 'after a change to game code: a real failure a merge fixed' : paths ? 'after only tests or other files changed' : 'and the change between them could not be read'
           }; not a flake (w5465)`;
         }
+        await h.idle();
         for (const f of flakes) n += +h.label(Number(f.id), label, reason, 'auto');
       }
       run = [];
@@ -815,7 +946,7 @@ export function table(rows: Row[], empty = '(no rows)'): string {
 }
 
 /** A ready-made query's rows (not sql: that is runSql). */
-export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { title: string; rows: Row[] } {
+export async function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now(), read: ReadRows = (sql, ...args) => h.allApart(sql, ...args)): Promise<{ title: string; rows: Row[] }> {
   const days = Math.min(3650, Math.max(1, Math.round(a.days ?? 30)));
   const limit = Math.min(200, Math.max(1, Math.round(a.limit ?? 20)));
   const since = new Date(now - days * DAY).toISOString().slice(0, 10);
@@ -831,11 +962,11 @@ export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { ti
   const runCounts = `SELECT test_id, sum(runs) AS runs, sum(total_ms) AS total_ms, max(max_ms) AS max_ms FROM test_days WHERE day >= ? AND source IN ${inSources} GROUP BY test_id`;
   switch (a.query) {
     case 'summary': {
-      const rows = h.all(
+      const rows = await read(
         `SELECT source, count(*) AS runs, sum(tests) AS results, sum(failed) AS failures, min(finished) AS first_run, max(finished) AS last_run FROM runs GROUP BY source ORDER BY source`,
       );
-      const labels = h.all(`SELECT coalesce(label, 'pending') AS label, count(*) AS failures FROM failures GROUP BY label ORDER BY failures DESC`);
-      const tests = h.all(`SELECT count(*) AS tests, sum(performance) AS performance_tests FROM tests`)[0]!;
+      const labels = await read(`SELECT coalesce(label, 'pending') AS label, count(*) AS failures FROM failures GROUP BY label ORDER BY failures DESC`);
+      const tests = (await read(`SELECT count(*) AS tests, sum(performance) AS performance_tests FROM tests`))[0]!;
       return {
         title: `Recorded since ${h.meta('recorded_since') ?? '?'}; ${tests.tests} tests (${tests.performance_tests ?? 0} Performance-tagged); coverage from ${h.meta('coverage_sha')?.slice(0, 9) ?? 'none yet'}; CI backfilled to ${h.meta('ci_oldest') ?? 'not yet'}.\nLabels: ${labels.map((l) => `${l.label} ${l.failures}`).join(', ') || 'none yet'}`,
         rows,
@@ -844,7 +975,7 @@ export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { ti
     case 'slowest':
       return {
         title: `Slowest tests by average time (${scope})`,
-        rows: h.all(
+        rows: await read(
           `SELECT t.name AS test, c.runs, round(1.0 * c.total_ms / c.runs) AS avg_ms, c.max_ms, round(c.total_ms / 1000.0) AS total_s
            FROM (${runCounts}) c JOIN tests t ON t.id = c.test_id WHERE c.runs > 0 ${perf} ${like} ORDER BY avg_ms DESC LIMIT ?`,
           since, ...likeArg, limit,
@@ -854,7 +985,7 @@ export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { ti
       const minRuns = Math.max(1, Math.round(a.minRuns ?? 5));
       return {
         title: `Most false positives ${a.byRate ? `by rate (at least ${minRuns} runs)` : 'by count'} (${scope}); fp_rate = fp / runs`,
-        rows: h.all(
+        rows: await read(
           `SELECT t.name AS test, f.fp, coalesce(c.runs, 0) AS runs, round(100.0 * f.fp / max(coalesce(c.runs, 0), 1), 2) AS fp_rate_pct, f.detect, f.unknown, f.pending, f.by_worker, f.by_person
            FROM (${fpCounts}) f JOIN tests t ON t.id = f.test_id LEFT JOIN (${runCounts}) c ON c.test_id = f.test_id
            WHERE f.fp > 0 ${perf} ${like} ${a.byRate ? 'AND coalesce(c.runs, 0) >= ?' : ''} ORDER BY ${a.byRate ? 'fp_rate_pct DESC, f.fp DESC' : 'f.fp DESC, fp_rate_pct DESC'} LIMIT ?`,
@@ -865,7 +996,7 @@ export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { ti
     case 'detections':
       return {
         title: `Most correct failure detections (${scope})`,
-        rows: h.all(
+        rows: await read(
           `SELECT t.name AS test, f.detect, f.fp, f.unknown, coalesce(c.runs, 0) AS runs, f.by_worker, f.by_person,
              (SELECT x.reason FROM failures x JOIN runs r ON r.id = x.run_id WHERE x.test_id = t.id AND x.label = 'detect' ORDER BY r.finished DESC LIMIT 1) AS last_detection
            FROM (${fpCounts}) f JOIN tests t ON t.id = f.test_id LEFT JOIN (${runCounts}) c ON c.test_id = f.test_id
@@ -876,7 +1007,7 @@ export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { ti
     case 'never_caught':
       return {
         title: `Tests that caught no real bug (no detect label) in the ${scope}, by total run time; a suggestion to review, never a removal. Recorded since ${h.meta('recorded_since') ?? '?'}.`,
-        rows: h.all(
+        rows: await read(
           `SELECT t.name AS test, c.runs, round(c.total_ms / 1000.0) AS total_s, round(1.0 * c.total_ms / c.runs) AS avg_ms, coalesce(f.fp, 0) AS fp, t.first_seen,
              (SELECT count(*) FROM coverage v WHERE v.class = t.class) AS covers_types,
              (SELECT group_concat(type, ' ') FROM (SELECT type FROM coverage v WHERE v.class = t.class ORDER BY type LIMIT 8)) AS covers
@@ -889,7 +1020,7 @@ export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { ti
       const lab = a.label === 'pending' ? 'AND f.label IS NULL' : a.label ? 'AND f.label = ?' : '';
       return {
         title: `Failures, newest first (${scope})`,
-        rows: h.all(
+        rows: await read(
           `SELECT r.finished, r.source, coalesce('#' || r.pr, r.branch) AS line, substr(r.sha, 1, 9) AS sha, r.machine, r.sandbox, r.requests, t.name AS test,
              coalesce(f.label, 'pending') AS label, f.reason, f.labelled_by, f.id AS failure_id
            FROM failures f JOIN runs r ON r.id = f.run_id JOIN tests t ON t.id = f.test_id
@@ -902,7 +1033,7 @@ export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { ti
       if (!a.test) throw new Error('query "test" needs test: a part of the test\'s full name');
       return {
         title: `Runs of tests matching "${a.test}" (${scope}), per day and source`,
-        rows: h.all(
+        rows: await read(
           `SELECT t.name AS test, d.day, d.source, d.runs, d.passes, d.fails, round(1.0 * d.total_ms / d.runs) AS avg_ms, d.max_ms
            FROM test_days d JOIN tests t ON t.id = d.test_id WHERE d.day >= ? AND d.source IN ${inSources} ${like} ORDER BY d.day DESC, t.name LIMIT ?`,
           since, ...likeArg, limit,
@@ -913,7 +1044,7 @@ export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { ti
       const req = a.request ? `AND ',' || r.requests || ',' LIKE '%,' || ? || ',%' ESCAPE '\\'` : '';
       return {
         title: `Local runs, newest first (last ${days} days${a.untagged ? ', untagged only' : ''}${a.request ? `, request ${a.request}` : ''}); tagged: session (the worker that ran it), sandbox (the one worker in that sandbox), shared (several there), none (untagged)`,
-        rows: h.all(
+        rows: await read(
           `SELECT r.finished, r.machine, r.sandbox, r.tagged, r.requests, r.sessions, r.branch, substr(r.sha, 1, 9) AS sha, r.mode, r.tests, r.passed, r.failed,
              round(r.total_ms / 1000.0) AS total_s, r.verdict
            FROM runs r WHERE r.source = 'local' AND r.finished >= ? ${a.untagged ? "AND r.tagged = 'none'" : ''} ${req} ORDER BY r.finished DESC LIMIT ?`,
@@ -924,7 +1055,7 @@ export function readyQuery(h: TestHistory, a: QueryArgs, now = Date.now()): { ti
     case 'gate_tuning': {
       // The daily merge-gate tuning (w4928, server/gateTuning.ts, docs/gate-tuning.md): the newest day's summary, its
       // move-out proposals as rows.
-      const r = h.all('SELECT summary, json FROM gate_tuning ORDER BY day DESC LIMIT 1')[0];
+      const r = (await read('SELECT summary, json FROM gate_tuning ORDER BY day DESC LIMIT 1'))[0];
       if (!r) return { title: 'Merge-gate tuning (w4928): no run yet; it runs once a day (docs/gate-tuning.md).', rows: [] };
       const t = JSON.parse(String(r.json)) as GateTuning;
       return {
@@ -1041,14 +1172,17 @@ export function allApart(file: string, sql: string, args: readonly (string | num
 
 /** The answer of the test_history tool: a ready-made query or ad-hoc SQL, as text. */
 export async function queryTestHistory(h: TestHistory, a: QueryArgs, now = Date.now(), by?: string): Promise<string> {
-  if (a.query === 'set_label') return setLabelByHand(h, a, by);
-  if (a.query === 'relabel') return relabelByHand(h, a, now, by);
+  // A hand write waits for the writer thread's runs, so it never waits on their lock on the portal's loop.
+  if (a.query === 'set_label' || a.query === 'relabel') {
+    await h.idle();
+    return a.query === 'set_label' ? setLabelByHand(h, a, by) : relabelByHand(h, a, now, by);
+  }
   if (a.query === 'sql') {
     if (!a.sql) throw new Error('query "sql" needs sql: one SELECT (tables: docs/test-history.md)');
     const r = await runSql(h.file, a.sql, a.limit ?? SQL_MAX_ROWS);
     return `${table(r.rows)}${r.more ? `\n(first ${r.rows.length} rows; add a LIMIT or narrow it)` : ''}`;
   }
-  const r = readyQuery(h, a, now);
+  const r = await readyQuery(h, a, now);
   return `${r.title}\n${table(r.rows)}`;
 }
 

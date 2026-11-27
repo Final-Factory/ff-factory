@@ -700,16 +700,22 @@ machines.testHistory = (id, sandbox, file, record) => {
   if (!r.tests.length && !r.running) return { ok: true };
   const key = localRunKey(id, sandbox, file);
   const tags = localRunTags(agents, id, sandbox, r.session, testHistory.startTags(key));
-  testHistory.addRun(
-    { ...r.info, source: 'local', key, repo: testHistorySettings(cfg).repo, machine: id, sandbox: sandbox || undefined, ...tags },
-    r.tests,
-  );
-  return { ok: true };
+  // In the writer thread (w6415: 13.2 s on the loop on 2026-11-27); the daemon is answered once the run is committed, and
+  // sends the file again later when it is not.
+  return testHistory
+    .addRunApart({ ...r.info, source: 'local', key, repo: testHistorySettings(cfg).repo, machine: id, sandbox: sandbox || undefined, ...tags }, r.tests)
+    .then(() => ({ ok: true }));
 };
 // A run's workers as it starts: the daemon sends its finished file later, maybe after the worker has left the sandbox.
 machines.testHistoryStarted = (id, sandbox, file) => {
   const tags = localRunTags(agents, id, sandbox);
-  if (tags.tagged !== 'none') testHistory.noteStart(localRunKey(id, sandbox, file), tags);
+  if (tags.tagged !== 'none') {
+    const key = localRunKey(id, sandbox, file);
+    void testHistory
+      .idle()
+      .then(() => testHistory.noteStart(key, tags))
+      .catch((e: Error) => console.warn(`test history start of ${id}: ${e.message}`));
+  }
 };
 setInterval(() => {
   try {
