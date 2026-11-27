@@ -85,7 +85,8 @@ const SHORT_NAMED = /[A-Za-z]:[\\/][^"'\s]*~[^"'\s]*/g;
  */
 export async function expandShortNamesAsync(cmd: string): Promise<string> {
   if (!cmd.includes('~')) return cmd;
-  const exists = (q: string) => fs.promises.access(q).then(() => true, () => false);
+  // stat, not access: like existsSync it follows a link, so a dangling junction reads as missing (w6560).
+  const exists = (q: string) => fs.promises.stat(q).then(() => true, () => false);
   let out = '';
   let at = 0;
   for (const m of cmd.matchAll(SHORT_NAMED)) {

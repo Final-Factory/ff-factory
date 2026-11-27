@@ -334,7 +334,13 @@ test('w6553: expandShortNamesAsync, realAsync and mentionsKnown give exactly wha
   fs.mkdirSync(target);
   const link = path.join(root, 'link');
   fs.symlinkSync(target, link, 'junction');
+  // w6560: a dangling junction under the link. existsSync calls it missing and walks up past it; so must the async one.
+  const gone = path.join(root, 'gone-target');
+  fs.mkdirSync(gone);
+  fs.symlinkSync(gone, path.join(target, 'dj'), 'junction');
+  fs.rmdirSync(gone);
   const cmds = [
+    String.raw`node "${path.join(link, 'dj')}\out~1\x.js" --watch`,
     'node run.js',
     String.raw`node ${tilde}\x.js --out "${tilde}" ${tilde}/gone/deeper.txt`,
     String.raw`C:\PROGRA~1\Git\bin\bash.exe -c "Q:\NO~1\x" D:/A~1/b`,
