@@ -1,4 +1,5 @@
 import { run } from './proc.ts';
+import { clearStaleIndexLock, gitFailure, STATUS_TIMEOUT_MS } from './staleGitLock.ts';
 import { parseStatus } from './gitStatus.ts';
 import { restoreCommittedBytes } from './committedBytes.ts';
 import { savedBranch } from './saveWork.ts';
@@ -26,7 +27,7 @@ async function git(dir: string, args: string[], timeoutMs = 120_000, net?: NodeJ
 
 async function must(dir: string, args: string[], what: string, timeoutMs?: number, net?: NodeJS.ProcessEnv) {
   const r = await git(dir, args, timeoutMs, net);
-  if (r.code !== 0) throw new Error(`${what} failed: ${(r.stderr || r.stdout).trim().split('\n').slice(-3).join(' ')}`);
+  if (r.code !== 0) throw new Error(`${what} failed: ${gitFailure(r, timeoutMs ?? 120_000)}`);
   return r.stdout;
 }
 
@@ -68,7 +69,11 @@ export async function switchBranch(opts: {
 
   // Before the dirty check: a stale CRLF copy of a -text file whose stat changed reads as an uncommitted change (w1275).
   const restored = await restoreCommittedBytes(dir, (a) => git(dir, a)).catch(() => [] as string[]);
-  const st = parseStatus(await must(dir, ['status', '--porcelain=v2', '--branch'], 'git status'));
+  // w6432: a lock a crashed git left fails the switch, and a status that must re-hash the LFS files (stale stat data, as a
+  // dedup's new times left) takes minutes at 100% CPU: w6431's start in lothdesktop/slot1 timed out at 120 s.
+  const unlocked = await clearStaleIndexLock(dir);
+  if (unlocked) notes.push(unlocked);
+  const st = parseStatus(await must(dir, ['status', '--porcelain=v2', '--branch'], 'git status', STATUS_TIMEOUT_MS));
   if (st.dirty) {
     const files = (await must(dir, ['status', '--porcelain'], 'git status')).split('\n').filter((l) => l && !l.startsWith('??'));
     throw new Error(`the working tree has ${st.dirty} uncommitted change(s) (${files.slice(0, 5).map((l) => l.slice(3)).join(', ')}${files.length > 5 ? ', …' : ''}). Commit or put them aside first; nothing was switched.`);
