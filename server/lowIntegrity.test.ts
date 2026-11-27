@@ -1133,8 +1133,8 @@ test('w6417: the daemon makes Low copies on Windows with workerIntegrity low and
   assert.equal(lowCopiesWanted({ workerIntegrity: 'low', root: '/ffw' }, 'darwin'), false);
 });
 
-test('w6417: after a restart and a node reinstall, the new daemon run makes its node copy at the first ask', (t) => {
-  const root = tmpDir('lowcopy-', t);
+test('w6417: after a restart and a node reinstall, the new daemon run makes its node copy at the first ask', () => {
+  const root = tmpDir('lowcopy-');
   const exe = path.join(root, 'node.exe');
   fs.writeFileSync(exe, 'node v22');
   const old = new LowCopies(root, () => {}, icaclsSync().exec, 'LOTH2800\loth').make(exe)!;
