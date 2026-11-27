@@ -502,6 +502,9 @@ export class HostedSession implements SessionHandle {
       return false;
     }
     this.command({ op: 'attach' });
+    // w6445: its saved state was applied without the restage check (forward false), and an idle host writes no new state
+    // line until its next message: a sharedLock switch's restart would leave it a whole turn on the old environment.
+    this.restageIfOther();
     return true;
   }
 
