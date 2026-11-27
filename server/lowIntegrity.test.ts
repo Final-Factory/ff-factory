@@ -1123,3 +1123,44 @@ test('w5959: labelLow raises the kept child and a disk Low on its own (a file la
   assert.match(label.get(sniper)!, /Low/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('w6417: the daemon makes Low copies on Windows with workerIntegrity low and a root, and nowhere else', async () => {
+  const { lowCopiesWanted } = await import('../machine/lowIntegrity.ts');
+  assert.equal(lowCopiesWanted({ workerIntegrity: 'low', root: 'V:\ffw' }, 'win32'), true);
+  assert.equal(lowCopiesWanted({ workerIntegrity: 'low' }, 'win32'), false, 'no worker root');
+  assert.equal(lowCopiesWanted({ root: 'V:\ffw' }, 'win32'), false, 'the fence is off');
+  assert.equal(lowCopiesWanted({ workerIntegrity: 'low', root: '/ffw' }, 'linux'), false);
+  assert.equal(lowCopiesWanted({ workerIntegrity: 'low', root: '/ffw' }, 'darwin'), false);
+});
+
+test('w6417: after a restart and a node reinstall, the new daemon run makes its node copy at the first ask', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const exe = path.join(root, 'node.exe');
+  fs.writeFileSync(exe, 'node v22');
+  const old = new LowCopies(root, () => {}, icaclsSync().exec, 'LOTH2800\loth').make(exe)!;
+  // The update job reinstalls node (new bytes, new size and mtime) and the daemon restarts: a new LowCopies, nothing labelled
+  // by this run yet. Its first ask (a players broker install, a slot cache tick) gets a copy of the new node.
+  fs.writeFileSync(exe, 'node v24, reinstalled');
+  fs.utimesSync(exe, new Date(), new Date(Date.now() + 60_000));
+  const said: string[] = [];
+  const copy = new LowCopies(root, (l) => void said.push(l), icaclsSync().exec, 'LOTH2800\loth').make(exe);
+  assert.ok(copy, said.join('\n'));
+  assert.notEqual(copy, old);
+  assert.equal(fs.readFileSync(copy!, 'utf8'), 'node v24, reinstalled');
+  assert.deepEqual(fs.readdirSync(path.dirname(copy!)), [path.basename(copy!)], "the earlier run's copy is removed");
+});
+
+test('w6417: the daemon makes its LowCopies at the first ask, never only after the start\'s labelling', () => {
+  const src = fs.readFileSync(path.join(import.meta.dirname, '..', 'machine', 'daemon.ts'), 'utf8');
+  // LothDesktop, 2026-11-27: lowSetup labelled the shared-lock folders from 13:55 to past 14:25 UTC, and LowCopies was made
+  // only after that, so every Low node copy asked for meanwhile was refused with "no Low node copy".
+  const sets = [...src.matchAll(/this\.lowCopies\s*(\?\?=|=(?!=))/g)];
+  assert.equal(sets.length, 1, 'LowCopies is made in one place, lowCopiesNow');
+  const now = src.indexOf('private lowCopiesNow()');
+  assert.ok(now >= 0 && sets[0].index! > now && sets[0].index! < src.indexOf('\n  }', now), 'and that place is lowCopiesNow');
+  for (const m of ['private lowMake(', 'private lowCheck(']) {
+    const at = src.indexOf(m);
+    assert.ok(at >= 0, m);
+    assert.match(src.slice(at, src.indexOf('\n  }', at)), /this\.lowCopiesNow\(\)/, `${m} goes through lowCopiesNow`);
+  }
+});
