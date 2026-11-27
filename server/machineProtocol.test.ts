@@ -187,7 +187,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // portal drops it and an older daemon never sends it (the portal then warns of no count mismatch for that machine).
 // w6050 (no bump): `tmpWriteFence` ('warn' | 'on') on the launch spec's guard, optional; an older daemon ignores it (its
 // workers then only warn after the run), and an older portal never sends it (launch.ts then reads it as warn).
-const DECIDED = { protocol: 9, fingerprint: '726eb73391f0f973' };
+// w6266 (no bump): the 'junctionRm' signal { line } (a Windows worker's junction rm warning); an older portal re-emits it with no
+// listener, and an older daemon or host never sends it.
+const DECIDED = { protocol: 9, fingerprint: '831bb95c4a0d4dfc' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

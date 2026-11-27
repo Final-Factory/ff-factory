@@ -61,7 +61,7 @@ export function tempSizeNote(total: number, biggest: TempChild[], warnedStep: nu
     step,
     note:
       `your temp folder ($TMPDIR) holds ${gb(total)} GB, over ${over} GB (w3686)${names}. Before you go on, delete what you no longer need, ` +
-      'each with its path written out: rm -rf "$TMPDIR/<name>" (a delete under $TMPDIR asks nobody). Keep a clone that holds unpushed work; ' +
+      'each with its path written out: rm -rf "$TMPDIR/<name>", on Windows cmd //c "rd /s /q $(cygpath -w "$TMPDIR/<name>")" (Git Bash\'s rm -rf goes through a junction there) (a delete under $TMPDIR asks nobody). Keep a clone that holds unpushed work; ' +
       'a Unity Library or a cargo target you still build in may stay.',
   };
 }
