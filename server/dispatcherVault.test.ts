@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PoolHeldError, Vault, fingerprintOf, newKeyText, setVaultContext, type VaultContext } from './vault.ts';
-import { accountSetupLines, dispatcherOwnAccount, dispatcherPoolPerson, hostAccount, liveOnAccount, machineRunEnv, pinnedDispatcherEntry, pinnedDispatcherEnv, poolRunEnv, reserveLines, reservedCredentials } from './secrets.ts';
+import { accountSetupLines, dispatcherOwnAccount, dispatcherPoolPerson, hostAccount, liveCounter, liveOnAccount, machineRunEnv, pinnedDispatcherEntry, pinnedDispatcherEnv, poolRunEnv, reserveLines, reservedCredentials } from './secrets.ts';
 import { checkAccountConfig } from './config.ts';
 import { normalizeSetting } from './appConfig.ts';
 import { poolLimits } from './tokenPool.ts';
@@ -264,4 +264,22 @@ test('the dispatcher takes no pool slot: liveOnAccount skips it, so the one-at-a
   // A worker already running on it does take the slot.
   const withWorker = ctxOf(vault, cfg, meters, [sessions[0], { id: 'w1', account: key, status: 'running', kind: 'worker' }]);
   assert.throws(() => worker(cfg, withWorker, 'w2'), (e: unknown) => e instanceof PoolHeldError && /one job at a time; its slot is taken \(1 running\)/.test(e.message));
+});
+
+test('w6381: liveCounter gives liveOnAccount\'s count for every key and except, from one pass', () => {
+  const sessions = [
+    { id: 'a', account: 'token:x', status: 'running', kind: 'worker' },
+    { id: 'b', account: 'token:x', status: 'idle', kind: 'orchestrator' },
+    { id: 'c', account: 'token:x', status: 'stopped', kind: 'worker' },
+    { id: 'd', account: 'token:x', status: 'running', kind: 'orchestrator', orchestratorRole: 'dispatcher' },
+    { id: 'e', account: 'token:y', status: 'error', kind: 'worker' },
+    { id: 'f', account: 'token:y', status: 'running', kind: 'worker' },
+    { id: 'g', status: 'running', kind: 'worker' },
+  ];
+  const count = liveCounter(sessions);
+  for (const key of ['token:x', 'token:y', 'token:z', ''])
+    for (const except of [undefined, 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'nobody']) assert.equal(count(key, except), liveOnAccount(sessions, key, except), `${key} except ${except}`);
+  assert.equal(count('token:x'), 2);
+  assert.equal(count('token:y'), 1);
+  assert.equal(count('token:y', 'f'), 0);
 });

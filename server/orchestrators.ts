@@ -1735,7 +1735,8 @@ It is for your part of the work, not an answer to another worker's question.`;
     const to = this.handUpTo(w, sessionId, { count: items.length, items }, '');
     return (
       `Handed up ${items.length} follow-up request${items.length === 1 ? '' : 's'} for ${w.id}${to ? ` to ${to}'s orchestrator, which files them (or asks its person first)` : ', but its requester has no orchestrator to file them: the ledger shows them on the request'}. ` +
-      `You file nothing yourself. Your DONE for ${w.id} is kept and the request closes by itself once they are filed or its person closes it (w2969).`
+      `You file nothing yourself. Your DONE for ${w.id} is kept and the request closes by itself once they are filed or its person closes it (w2969). ` +
+      `If ${w.id} waits on one of them, end your turn with a line "${w.id}: still open: blocked on the follow-up I handed up": once it is filed, FF Factory waits on it for you and resumes you, with its id, when it closes (done, cancelled or declined; w6397). Told its id mid-turn, call blocked_on with it instead.`
     );
   }
 
@@ -1903,8 +1904,29 @@ It is for your part of the work, not an answer to another worker's question.`;
       const left = handUpsPending(w);
       this.stamp(w, `follow-up ${filed.id} "${clip(filed.title, 80)}" filed for it; ${left ? `${left} still to file` : 'all its follow-ups are filed'} (w2969)`);
       this.store.putWork(w);
+      this.tellFollowUpFiled(w, filed);
       if (!left) this.recheckDone(w.id, 'its follow-up requests are filed (w2969)');
     }
+  }
+
+  /**
+   * w6397: the worker that handed up a follow-up learns its id. w6096's worker cc0f9074 asked for w6254's id at 01:29 UTC on
+   * 2026-11-27 to wait on it with blocked_on, was never told it, and w6096 sat Stalled 8 h after w6254 closed as done. A
+   * worker stopped on a line that waits on the hand-up ("blocked on the fix I handed up") needs no turn for it: the blocker
+   * watch records that wait on the filed follow-up within a minute (BlockerWatch.recordReportedWaits, handUpWaitRef) and its
+   * close resumes the worker with the id. A worker mid-turn is told now, so its blocked_on can name it; one done with the
+   * request, or stopped on anything else, is not woken for it (the request's log names the id).
+   */
+  private tellFollowUpFiled(w: WorkItem, filed: WorkItem) {
+    const sid = w.handedUp?.worker;
+    const s = sid ? this.store.sessions.get(sid) : undefined;
+    if (!sid || !s || w.done?.[sid] || !onRequest(w, sid) || !BUSY.includes(s.status)) return;
+    if (gatesOf(w).some((g) => g.kind === 'request' && g.ref?.toLowerCase() === filed.id.toLowerCase())) return;
+    const note =
+      `[follow-up filed] The follow-up you handed up for ${w.id}, "${clip(filed.title, 100)}", is filed as ${filed.id} (w6397). ` +
+      `If ${w.id} waits on it, call blocked_on with requests ["${filed.id}"] and end your turn: you are resumed when ${filed.id} closes, as done or not. ` +
+      `If nothing of yours waits on it, carry on.`;
+    if (this.wakeNow(sid, note)) this.stamp(w, `worker ${sid}, mid-turn, is told its follow-up's id ${filed.id} (w6397)`);
   }
 
   /**
@@ -7558,6 +7580,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       w.done = { ...doneOf(w), [s.id]: { at: this.now().toISOString(), report, text: (was ? `${was}\n\n${text}` : text).slice(-DONE_TEXT_CHARS) } };
       this.releaseAfterDone(w);
       if (!ops) this.dropWorkerWaitsOf(w, s.id);
+      // w6397: its follow-up's id, sent mid-turn (tellFollowUpFiled), would resume it after this DONE for nothing (w6401).
+      if (this.d.pendingWake?.(s.id)?.note.startsWith(`[follow-up filed] The follow-up you handed up for ${w.id},`)) this.d.cancelWake?.(s.id);
       const others = this.stillOn(w, s.id);
       if (others.length && !ops) this.tellLegsRunOver(w, s.id, others);
       if (others.length) {
@@ -8640,6 +8664,21 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * first board_check after a start finds them made: it made them all in one go and held the portal 3.5 s at 10:42Z on
    * 2026-11-27, minutes after the 0966c33 restart (stall profile: onBoardCheck > concepts, stem). Returns how many it made.
    */
+  /**
+   * The board check's warm-up (warmBoardTexts), started once and shared: a board_check waits for it before it answers
+   * (Providers.boardReady). w6381: the 25 ms slices of the first warm-up waited behind every other busy turn after the
+   * 12:01Z restart on 2026-11-27, and FFBox's board_check at 12:01:59Z (36 s after the start) still made every request's
+   * concepts in one go: a 2.3 s block (stall profile: onBoardCheck > concepts, stem).
+   */
+  boardWarmed(lookbackDays: number): Promise<number> {
+    this.boardWarm ??= this.warmBoardTexts(lookbackDays).catch((e) => {
+      console.warn(`board check warm-up failed: ${(e as Error).message}`);
+      return 0;
+    });
+    return this.boardWarm;
+  }
+  private boardWarm?: Promise<number>;
+
   async warmBoardTexts(lookbackDays: number, sliceMs = 25): Promise<number> {
     const before = this.boardTextsMade;
     let start = performance.now();
@@ -9627,6 +9666,17 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const w = this.store.work.get(id);
     if (!w || w.status !== 'blocked' || !w.blocked) return;
     const g = gate ?? w.blocked;
+    // w6397: a follow-up its own worker handed up and waits on, cancelled or declined: that worker decides how to go on
+    // without it, so it is resumed with the news (its resume names the follow-up and how it closed), not its person asked.
+    const followUp = g.kind === 'request' && !!g.ref && !!w.handedUp?.filed.some((x) => x.toLowerCase() === g.ref!.toLowerCase());
+    const setter = gateSetter(g);
+    if (followUp && setter && this.store.sessions.get(setter) && onRequest(w, setter)) {
+      const news = `${why}: the follow-up it handed up will not deliver, so decide how ${w.id} goes on without it (w6397)`;
+      // Its other waits go with it (it blocks again on what still holds), unless another worker set them.
+      if (gatesOf(w).every((x) => gateSetter(x) === setter)) this.unblock(w.id, news);
+      else this.gatesCleared(w.id, [g], news);
+      return;
+    }
     const text = clip(`It was blocked on ${blockerName(g, this.now().getTime())} (${g.what}), and ${why}. Is ${w.id} still needed, and what should it wait for now?`, 1000);
     w.status = 'question';
     // A gate that died is the person's to rule on (w754): none of its gates is kept through that question.

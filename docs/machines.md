@@ -213,8 +213,20 @@ before redeploying by hand.
   plus turns sent but not yet reported) by session id (`CensusWatch`, `noteCensus` in `server/machines.ts`). A
   difference that outlasts 60 s and two reports is logged as one `agent count:` warning naming each id counted on only
   one side and what the portal holds of it. The warning repeats when the set changes and every 30 minutes, and one
-  line follows when the counts agree again. Nothing is stopped, dropped or placed by it: making placement use the
-  daemon's count is a separate stage.
+  line follows when the counts agree again. Nothing is stopped, dropped or placed by it.
+- **Placement on the daemon's count** (w5985, off by default). The owner's setting `placementAgentCount` "on" (set_app_config,
+  read live) makes placement (`Agents.placesNow`, through `MachineManager.placementCount` and `placementCountOf` in
+  `server/agentCensus.ts`) count a machine as its agent cap does (`midTurnTotal`: reported mid-turn, turns sent and not
+  yet reported, standing agents too; `runningIn` per sandbox for its seats), and take the larger of that and its daemon's
+  last census while that is under 45 s old (`CENSUS_FRESH_MS`). Replayed on beast's 2026-11-26 case
+  (`server/w5985PlacementCount.test.ts`): "2 of 6" becomes 6 of 6, so placement sends nothing its daemon would refuse. It
+  only keeps work off a machine: it never stops or ends an agent (lothsahn's lockout rule). An agent only the daemon
+  counts that the portal holds on another computer (a moved request's stale copy, as 716b6111 was) stays counted until it
+  ends; stopping it is w5950's `movedAwayWorkers` "on" at its daemon's next hello, and the `agent count:` warning names
+  that setting's mode beside it. Recovery needs nobody at the machine: `placementAgentCount` "off" (or `null`) puts back
+  the old count at once, and a census gone stale (a daemon that stopped reporting) or never sent (a daemon before w5972)
+  is ignored by itself. The journal of 2026-11-26 13:24 to 2026-11-27 05:00 (local) held only lothdesktop mismatches, all
+  the portal counting more (turns sent, not yet reported) for about a minute; "on" counts those already, as capFull does.
 - **Awake.** While any agent process is live the daemon holds `caffeinate -i`.
 - **Clean-up.** The daemon cleans its machine's disk by itself (the continuous clean-up,
   [self-recovery.md](self-recovery.md#5-continuous-clean-up)): a pass every hour, every 15 minutes while

@@ -79,7 +79,7 @@ import { deleteLogin, serveLoginDeletes } from './loginDelete.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { DispatcherStop, stopMeters } from './dispatcherStop.ts';
 import { TokenSwitch, dispatcherMove, dispatcherWait, orchestratorOut, type DispatcherAccount, type RateLimitInfo } from './tokenSwitch.ts';
-import { accountSetupLines, addSecretEnv, addSecretValues, dispatcherPoolPerson, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, shownRoles } from './secrets.ts';
+import { accountSetupLines, addSecretEnv, addSecretValues, dispatcherPoolPerson, reserveLines, reserveWarnings, hostRoleOf, liveCounter, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, shownRoles } from './secrets.ts';
 import { scrubAtStart } from './scrubSecrets.ts';
 import { CliScrubber } from './cliScrub.ts';
 import { cliProjectsDir } from './cliTranscript.ts';
@@ -1107,7 +1107,7 @@ const blockerWatch = new BlockerWatch({
   compile: (repo, sha, person) => ghCompileVerdict(repo, sha, ghRunner(person, `the compile of ${sha.slice(0, 10)}`)),
 });
 // w6381: the board check's concepts made in slices soon after a start, before FFBox's first board_check needs them all at once.
-setTimeout(() => void agents.orchestrators.warmBoardTexts(intake.settings.lookbackDays).catch((e) => console.warn(`board check warm-up failed: ${(e as Error).message}`)), 5_000).unref();
+setTimeout(() => void agents.orchestrators.boardWarmed(intake.settings.lookbackDays), 5_000).unref();
 agents.blockerWatch = blockerWatch;
 // A usage gate keeps the pool's own name for its ref and the hold's end (w1126: "vault-lothsahn-1" never matched and never cleared).
 agents.usageRef = (ref) => usageRefOf(ref);
@@ -1142,6 +1142,8 @@ max.onEvent = (ev) => intake.onMaxEvent(ev);
 providers.onConversation = (c) => intake.onConversation(c);
 providers.onRequest = (m) => intake.onRequest(m);
 providers.onBoardCheck = (m) => intake.onBoardCheck(m);
+// w6381: a board_check waits for the warm-up above (started now if it has not yet) rather than making it all in one go.
+providers.boardReady = () => agents.orchestrators.boardWarmed(intake.settings.lookbackDays);
 providers.onWorkReply = (m) => intake.onWorkReply(m);
 providers.onResult = (m) => intake.onResult(m);
 // FFBox operators' ffdev turns handed over (docs/ffbox.md, "Dev requests"): filed as the operator's mapped person's own.
@@ -3083,6 +3085,11 @@ usage.personTokens = () => vault.claudeTokens();
 const vaultProblems: { at: string; line: string }[] = [];
 /** Live sessions whose process started on this credential key, not counting `except` (the asking session's own). */
 const liveOnKey = (key: string, except?: string) => liveOnAccount(store.sessions.values(), key, except);
+/** w6381: liveOn by fingerprint for one pick or one pools() read, counted in one pass over the sessions. */
+const liveOnNow = () => {
+  let count: ((key: string, except?: string) => number) | undefined;
+  return (fp: string, except?: string) => (count ??= liveCounter(store.sessions.values()))(`token:${fp}`, except);
+};
 /** Whether a vault Claude token is the dispatcher's pinned one (w971, w996), and for whom its reserve is kept. */
 function reservedFor(fingerprint: string): string | undefined {
   const c = reservedCredentials(cfg).find((x) => x.key === `token:${fingerprint}`);
@@ -3113,6 +3120,7 @@ setVaultContext({
   vault,
   usageOf: (fp) => usage.usageOf(`token:${fp}`),
   liveOn: (fp, except) => liveOnKey(`token:${fp}`, except),
+  liveOnNow,
   limits: () => poolLimits(cfg),
   reservedFor,
   payer: () => identity.systemPayer().userId,
@@ -3172,7 +3180,7 @@ function ownerPoolServes(label: string): boolean | undefined {
 }
 /** Every person's pool as a usage gate reads it (server/usageGate.ts). */
 function gatePoolsRaw() {
-  return vault.pools({ usageOf: (fp) => usage.usageOf(`token:${fp}`), liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), reservedFor });
+  return vault.pools({ usageOf: (fp) => usage.usageOf(`token:${fp}`), liveOn: liveOnNow(), limits: () => poolLimits(cfg), reservedFor });
 }
 function gatePools(): [string, GatePoolToken[]][] {
   const pools = gatePoolsRaw();
@@ -3200,7 +3208,7 @@ function accountsNow() {
   const machineList = machines.list().map((m) => ({ id: m.id, usesToken: false, onVault: true }));
   // A vault token's pool state and score, for the accounts page (w971).
   const poolOf = new Map<string, NonNullable<AccountUsage['pool']>>();
-  for (const [person, list] of vault.pools({ usageOf: (fp) => usage.usageOf(`token:${fp}`), liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), reservedFor })) {
+  for (const [person, list] of vault.pools({ usageOf: (fp) => usage.usageOf(`token:${fp}`), liveOn: liveOnNow(), limits: () => poolLimits(cfg), reservedFor })) {
     for (const t of list) poolOf.set(`token:${t.entry.fingerprint}`, { person, state: t.view.state, text: poolLabel(t.view, t.priority) });
   }
   const built = buildAccounts(usage.effectiveEntries(), {
@@ -3270,7 +3278,7 @@ const vaultLines = () => {
 function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarning[] } {
   const usageOfKey = (key: string) => usage.usageOf(key);
   const titlesOn = (key: string) => [...store.sessions.values()].filter((s) => s.account === key && s.status !== 'stopped' && s.status !== 'error').map((s) => s.title);
-  const pools = vault.pools({ usageOf: (fp) => usageOfKey(`token:${fp}`), liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), now: () => now, reservedFor });
+  const pools = vault.pools({ usageOf: (fp) => usageOfKey(`token:${fp}`), liveOn: liveOnNow(), limits: () => poolLimits(cfg), now: () => now, reservedFor });
   const lines: string[] = [];
   const warnings: TokenWarning[] = [];
   for (const [person, list] of [...pools].sort((a, b) => a[0].localeCompare(b[0]))) {
