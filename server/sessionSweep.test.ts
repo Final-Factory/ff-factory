@@ -169,3 +169,36 @@ test("w1379: the sweeper waits for the portal's welcome: until then nobody knows
   await sw.tick();
   assert.deepEqual(names(dir), ['ff-factory']);
 });
+
+test('w6553: a process naming the folder holds it as before, by its own path or its real one, with no synchronous realpath or existence check per process', async (t) => {
+  const { root, temp, guard, session } = world(t);
+  const dir = session('bbbb2222');
+  // A session folder that is a link (a junction on Windows): its real path is elsewhere.
+  const target = path.join(root, 'elsewhere', 'ffa-real');
+  fs.mkdirSync(target, { recursive: true });
+  fs.writeFileSync(path.join(target, 'a.txt'), 'x');
+  const linked = sessionTempDir(temp, 'cccc3333');
+  fs.symlinkSync(target, linked, 'junction');
+  const fwd = (p: string) => p.replace(/\\/g, '/');
+  // BEAST had a few hundred processes: none names the folder but the last, and many hold a `~` short name.
+  const crowd = Array.from({ length: 500 }, (_, i) => ({ pid: 1000 + i, ppid: 1, cmd: i % 2 ? String.raw`node C:\PROGRA~1\tool\run.js --n ${i}` : `node ${fwd(root)}/other-${i}/x.js` }));
+  let sync = 0;
+  const realpath = fs.realpathSync.native;
+  const exists = fs.existsSync;
+  t.mock.method(fs.realpathSync, 'native', (...a: Parameters<typeof realpath>) => (sync++, realpath(...a)));
+  t.mock.method(fs, 'existsSync', (...a: Parameters<typeof exists>) => (sync++, exists(...a)));
+  const plan = (d: string, cmd: string) => planSessionSweep({ dir: d, step: 1, root, guard, procs: [...crowd, { pid: 4242, ppid: 1, cmd }] });
+
+  const byPath = await plan(dir, `node ${fwd(dir)}/build-abc/run.js`);
+  assert.match(byPath.kept[0]?.why ?? '', /a process still names it \(pid 4242\)/);
+  const byReal = await plan(linked, `node "${path.join(target, 'a.txt')}"`);
+  assert.match(byReal.kept[0]?.why ?? '', /a process still names it \(pid 4242\)/, 'named by its real path');
+  const byLink = await plan(linked, `node ${linked}`);
+  assert.match(byLink.kept[0]?.why ?? '', /a process still names it \(pid 4242\)/, 'named by the link');
+  assert.equal(sync, 0, 'no synchronous realpath or existence check while it looks for a process naming the folder');
+  t.mock.restoreAll();
+
+  // A longer name that only starts the same does not hold it; nothing holds it, and it is swept as before.
+  const longer = await planSessionSweep({ dir, step: 1, root, guard, procs: [...crowd, { pid: 4242, ppid: 1, cmd: `node ${fwd(dir)}-other/run.js` }] });
+  assert.equal(longer.items.length, 6);
+});
