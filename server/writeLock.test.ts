@@ -23,7 +23,7 @@ test('a locked worker writes only the root folders workers write, and the few me
     '--sock', path.join('/run/user/1000', 'cc-socks'),
     '--deny-unix', path.join('/run/user/1000', 'bus'), '--deny-unix', path.join('/run/user/1000', 'systemd'),
     '--rw', path.join('/home/u', '.config', 'unity3d'), '--rw', path.join('/home/u', '.local', 'share', 'unity3d'),
-    '--create', '/tmp', '--rw', path.join('/tmp', '.dotnet'),
+    '--create', '/tmp', '--rw-nofollow', path.join('/tmp', '.dotnet'),
   ]);
   assert.ok(!a.includes('--rw-children'), 'no blanket grant of the root');
   for (const c of ['daemon', 'secrets', 'instances', 'demos', 'ben-factory', 'ffu-runners']) assert.ok(!a.includes(path.join(root, c)), c);
@@ -151,6 +151,35 @@ test("ff-landlock.py's create-only /tmp: new files, locks and sockets, never a w
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(r.stdout.trim().split('\n'), ['write refused', 'append refused', 'truncate refused', 'mkdir refused', 'symlink refused', 'lock ok', 'socket ok', 'dotnet ok']);
     assert.equal(fs.readFileSync(path.join(tmp, 'owners'), 'utf8'), 'mine\n', "the person's file is unchanged");
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// w6437: /tmp is everyone's, so a process outside the fence may make /tmp/.dotnet a symlink before the runtime does. The
+// rule is --rw-nofollow: a symlink there carries no write to where it leads (a plain --rw would follow it).
+test('ff-landlock.py: a /tmp/.dotnet that is a symlink grants no write where it leads (w6437)', { skip: !landlock && 'needs Linux with Landlock' }, () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'w6437-'));
+  try {
+    const tmp = path.join(base, 'systmp');
+    const outside = path.join(base, 'outside');
+    fs.mkdirSync(path.join(base, 'root'), { recursive: true });
+    fs.mkdirSync(tmp);
+    fs.mkdirSync(outside);
+    fs.symlinkSync(outside, path.join(tmp, '.dotnet'));
+    makeDotnetShm(path.join(tmp, '.dotnet'));
+    assert.ok(!fs.existsSync(path.join(outside, 'shm')), 'makeDotnetShm leaves a link alone');
+    const args = writeLockArgs({ root: path.join(base, 'root'), home: path.join(base, 'home'), tmp });
+    assert.ok(args.includes('--rw-nofollow'), JSON.stringify(args));
+    const script = [
+      'try() { if eval "$2" 2>/dev/null; then echo "$1 ok"; else echo "$1 refused"; fi; }',
+      `try via-link "touch ${tmp}/.dotnet/x"`,
+      `try outside "touch ${outside}/y"`,
+    ].join('\n');
+    const r = spawnSync('python3', [FF_LANDLOCK, ...args, '--', 'bash', '-c', script], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(r.stdout.trim().split('\n'), ['via-link refused', 'outside refused']);
+    assert.deepEqual(fs.readdirSync(outside), []);
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }

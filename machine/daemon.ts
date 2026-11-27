@@ -2722,8 +2722,11 @@ export class Daemon {
    * and one file sent by hash over an upload the portal opened. Read-only; answered even with no fixtures folder (a refusal).
    */
   private async labFixture(msg: Extract<ToDaemon, { type: 'lab_fixture' | 'lab_fixture_upload' }>) {
-    const dir = offeredDir(this.cfg.root);
     try {
+      // w6486: looked at off the event loop (BEAST: 55.8 s in the synchronous realpath). A look that fails is refused
+      // to the portal like the other errors here, where the synchronous one threw out of onMessage and answered nothing.
+      const dir = await offeredDir(this.cfg.root);
+      this.labFixturesOffered = !!dir;
       if (!dir) throw new Error('this computer holds no lab fixtures (no <worker root>/nightly-history/fixtures off drive C:)');
       if (msg.type === 'lab_fixture') {
         const files = msg.op === 'find' ? await findFixtures(dir, String(msg.sha256 ?? '')) : await listFixtures(dir);
@@ -2756,10 +2759,46 @@ export class Daemon {
 
   /** The OS and claude version probes of the last hello (w970): a reconnect within an hour reuses them. */
   private helloProbes?: { at: number; osv: { code: number; stdout: string }; claude: { code: number; stdout: string } };
+  /** Whether this computer offers the lab's fixtures, as last looked (w6486: offeredDir runs off the event loop). */
+  private labFixturesOffered?: boolean;
+  private labFixturesLooking?: Promise<boolean>;
+
+  /**
+   * offeredDir for the hello (w6486). The first hello waits for the look, as it waited on the synchronous one before, for
+   * up to LAB_FIXTURES_HELLO_WAIT_MS: a disk that never answers must not hold the hello (lockout rule), and that hello
+   * says no fixtures. A later hello says the last answer at once and looks again behind it. A look that fails offers
+   * nothing (the synchronous one threw out of hello, and no hello was sent).
+   */
+  private async labFixturesLook(): Promise<boolean> {
+    this.labFixturesLooking ??= offeredDir(this.cfg.root)
+      .then(
+        (dir) => (this.labFixturesOffered = !!dir),
+        (e: Error) => {
+          log(`lab fixtures: could not look at the fixtures folder: ${e.message}`);
+          return (this.labFixturesOffered = false);
+        },
+      )
+      .finally(() => (this.labFixturesLooking = undefined));
+    if (this.labFixturesOffered !== undefined) return this.labFixturesOffered;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => {
+        log(`lab fixtures: the fixtures folder gave no answer in ${LAB_FIXTURES_HELLO_WAIT_MS / 1000} s; this hello offers none, the next says what it finds`);
+        resolve(false);
+      }, LAB_FIXTURES_HELLO_WAIT_MS);
+    });
+    try {
+      return await Promise.race([this.labFixturesLooking, late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   private async hello() {
     // w970: beast's hello came ~20 s after its link (the 15 s `claude --version` probe on a busy Windows machine), and the
     // portal's rollout read the commit as unknown in that window. A reconnect says hello at once with the earlier probes.
+    // w6486: looked at beside the probes, off the event loop
+    const fixtures = this.labFixturesLook();
     let probed = this.helloProbes;
     if (!probed || Date.now() - probed.at > HELLO_PROBE_TTL_MS) {
       const [osv, claude] = await Promise.all([
@@ -2771,6 +2810,7 @@ export class Daemon {
       probed = { at: Date.now(), osv, claude };
     }
     const { osv, claude } = probed!;
+    const labFixtures = await fixtures;
     const selfUpdate = this.selfUpdate.offered();
     this.selfUpdateOffered = selfUpdate;
     this.send({
@@ -2800,7 +2840,7 @@ export class Daemon {
       // w1946: it plays timed runs for workers elsewhere (a worker install), and the ones it holds now.
       ...(this.timed ? { timedRuns: true, timedActive: this.timed.active() } : {}),
       // w3939: it holds the nightly lab's fixtures (<root>/nightly-history/fixtures, never on C:) for the portal to copy.
-      ...(offeredDir(this.cfg.root) ? { labFixtures: true } : {}),
+      ...(labFixtures ? { labFixtures: true } : {}),
       // w5924: it makes, reports and deletes light agent folders (machine/lightFolders.ts).
       lightFolders: true,
       ...(this.cfg.root ? { steamUpload: true, steamInstall: true } : {}),
@@ -5767,6 +5807,8 @@ export function keepAwakeCommand(platform: NodeJS.Platform, pid: number): string
 
 /** How long a hello's OS and claude probes are reused by the next one. */
 const HELLO_PROBE_TTL_MS = 60 * 60_000;
+/** How long the first hello waits for the lab fixtures' folder look (w6486). */
+const LAB_FIXTURES_HELLO_WAIT_MS = 15_000;
 
 function readVersion() {
   try {

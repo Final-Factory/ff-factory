@@ -354,3 +354,85 @@ test('w3673: the hang watch\'s clock goes on across daemons (daemon.progress), a
   h.s.send('a follow-up held mid-turn', 'orchestrator');
   await until('flagged from the saved clock', () => /no progress from its agent for 4\d min mid-turn/.test(lastSession(h)?.info.statusDetail ?? ''), 10_000);
 });
+
+test('w6486: the poll saves its offset off the event loop, and a going daemon\'s save outlasts a slow write that lands after it', { timeout: 60_000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w6486-offset-'));
+  const dir = path.join(root, 'o1');
+  const { pid, child } = await fakeHost(dir);
+  const answered: string[] = [];
+  const handlers = () => ({ read_work: async (args: unknown) => (answered.push(String((args as { n: string }).n)), 'ok') });
+  const f = hostFiles(dir);
+  const call = (n: string) => fs.appendFileSync(f.out, JSON.stringify({ op: 'rpc', id: n, method: 'read_work', args: { n } }) + '\n');
+  const size = () => fs.statSync(f.out).size;
+  // The offset file is made by the first poll's write: until then it is not there.
+  const saved = (p: string) => (fs.existsSync(p) ? Number(fs.readFileSync(p, 'utf8')) : NaN);
+  const first = hostedOn(root, 'o1', { handlers });
+  let second: ReturnType<typeof hostedOn> | undefined;
+  t.after(async () => {
+    first.s.detach();
+    second?.s.detach();
+    await cleanUp(root, pid, child);
+  });
+  assert.equal(first.s.adopt(), true);
+  call('r1');
+  await until('r1 answered and its offset saved by the poll', () => answered.includes('r1') && saved(f.offset) === size());
+  assert.equal(fs.existsSync(f.offsetStop), false, 'no stop file while no write races the going daemon');
+
+  // A slow disk (BEAST: 6-10 s a write): the poll's next write is held until after the daemon has gone.
+  const writeFile = fs.promises.writeFile;
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let slow = 0;
+  t.mock.method(fs.promises, 'writeFile', async (...a: Parameters<typeof writeFile>) => {
+    if (String(a[0]) === f.offset) {
+      slow++;
+      await held;
+    }
+    return writeFile(...a);
+  });
+  call('r2');
+  await until('r2 answered while its offset write is held', () => answered.includes('r2') && slow === 1);
+  call('r3');
+  await until('r3 answered, read while the write is still held', () => answered.includes('r3'));
+  const end = size();
+  first.s.detach();
+  assert.equal(saved(f.offset), end, 'the going daemon saves what it read, at once');
+  assert.equal(saved(f.offsetStop), end, 'and in the stop file, since a write still races it');
+  release();
+  await until('the held write landed, older', () => saved(f.offset) < end);
+  t.mock.restoreAll();
+
+  // The next daemon forwards exactly what the last one had not: r4 only.
+  answered.length = 0;
+  second = hostedOn(root, 'o1', { handlers });
+  assert.equal(second.s.adopt(), true);
+  call('r4');
+  await until('r4 answered', () => answered.includes('r4'));
+  await new Promise((r) => setTimeout(r, 500));
+  assert.deepEqual(answered, ['r4'], 'nothing forwarded twice');
+});
+
+test('w6486: a failed offset write is tried again by the next poll', { timeout: 60_000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w6486-retry-'));
+  const dir = path.join(root, 'o2');
+  const { pid, child } = await fakeHost(dir);
+  const f = hostFiles(dir);
+  const h = hostedOn(root, 'o2');
+  t.after(async () => {
+    h.s.detach();
+    await cleanUp(root, pid, child);
+  });
+  const writeFile = fs.promises.writeFile;
+  let fails = 2;
+  t.mock.method(fs.promises, 'writeFile', async (...a: Parameters<typeof writeFile>) => {
+    if (String(a[0]) === f.offset && fails > 0) {
+      fails--;
+      throw Object.assign(new Error('EBUSY: a scanner holds it'), { code: 'EBUSY' });
+    }
+    return writeFile(...a);
+  });
+  assert.equal(h.s.adopt(), true);
+  fs.appendFileSync(f.out, JSON.stringify({ op: 'beat' }) + '\n');
+  const size = fs.statSync(f.out).size;
+  await until('saved once the disk lets it', () => fails === 0 && fs.existsSync(f.offset) && Number(fs.readFileSync(f.offset, 'utf8')) === size);
+});
