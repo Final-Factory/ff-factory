@@ -798,7 +798,8 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
     const i = rest.indexOf(k);
     return i >= 0 ? rest[i + 1] : undefined;
   };
-  if (!d.session && cmd !== 'list') {
+  // w6484: the daemon's sweep (runFfuSlotSweep) has no session: it holds no slot, so every holder is another's.
+  if (!d.session && cmd !== 'list' && cmd !== 'sweep') {
     d.say(`ffu-slot: FF_SESSION_ID is not set: run it from a worker of FF Factory\n`);
     return 2;
   }
@@ -965,6 +966,22 @@ export function readFfuSlotsReport(o: { root: string; factsFile: string; max: nu
         o.log?.(`ffu slots: list --json printed no report: ${(e as Error).message}`);
         resolve(undefined);
       }
+    });
+  });
+}
+
+/**
+ * w6484: `ffu-slot sweep` for the daemon (machine/ffuSlotAutoSweep.ts), as its own process like readFfuSlotsReport, with no
+ * session of its own (so every holder is another's): what it printed and whether it exited 0. A sweep that saves work runs
+ * git add, commit and a push; 5 min is far past one (the 2026-11-27 BEAST sweep with a rescue took about 5 s, measured).
+ */
+export function runFfuSlotSweep(o: { root: string; factsFile: string; max: number; script?: string; timeoutMs?: number }): Promise<{ ok: boolean; out: string }> {
+  const env = { ...process.env, FF_WORKER_ROOT: o.root, FF_CLEANUP_FACTS: o.factsFile, FF_FFU_SLOTS_MAX: String(o.max), FF_SESSION_ID: '' };
+  const args = [...process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), o.script ?? import.meta.filename, 'sweep'];
+  return new Promise((resolve) => {
+    execFile(process.execPath, args, { env, timeout: o.timeoutMs ?? 5 * 60_000, windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      const out = `${stdout ?? ''}${stderr ?? ''}`;
+      resolve({ ok: !err, out: err && !out.trim() ? err.message : out });
     });
   });
 }

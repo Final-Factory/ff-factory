@@ -5,12 +5,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { FFU_SERVER_GROUP, FFU_SLOTS_DEFAULT_MAX, ffuServerExes, ffuSlotMain, readSlotState, slotCargoHome, realFfuSlotDeps, slotBin, slotGitEnv, slotCheckout, slotTarget, takeSlot, releaseSlot, sweepSlots, FFU_SLOT_WAIT_GRACE_MS, FFU_SLOT_IDLE_MS, FFU_SLOTS_PER_WORKER, type FfuSlotDeps } from '../machine/ffuSlots.ts';
+import { FFU_SERVER_GROUP, FFU_SLOTS_DEFAULT_MAX, ffuServerExes, ffuSlotMain, readSlotState, slotCargoHome, realFfuSlotDeps, slotBin, slotGitEnv, slotCheckout, slotTarget, takeSlot, releaseSlot, sweepSlots, slotsReport, runFfuSlotSweep, FFU_SLOT_WAIT_GRACE_MS, FFU_SLOT_IDLE_MS, FFU_SLOTS_PER_WORKER, type FfuSlotDeps } from '../machine/ffuSlots.ts';
 import type { CleanupGuard } from './cleanup.ts';
 import { installLeftoverSettings, planInstallLeftovers, type ProcLite } from './installLeftovers.ts';
 import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
 import type { ProcPlace } from './procPlaces.ts';
 import { busySlotsOf } from '../machine/ffuBusyRetry.ts';
+import { FfuSlotAutoSweep } from '../machine/ffuSlotAutoSweep.ts';
 
 /**
  * w3764: ffu slots, per-machine ffu worktrees with warm cargo targets (machine/ffuSlots.ts), and the clean-up rule for their
@@ -815,4 +816,74 @@ test('w6290: a slot a pass kept over the cap for a running build is judged again
   assert.deepEqual(ffuItems(root, idle), ffuItems(root, idlePass).filter((p) => p.startsWith('ffu-sandboxes/slot1/')));
   assert.deepEqual(ffuItems(root, idle), ['ffu-sandboxes/slot1/target/debug/incremental']);
   assert.deepEqual(busySlotsOf(idle.held, root), []);
+});
+
+/** Date a slot's take and its git files and target to `when`, as if nothing touched it since (w6484). */
+function age(root: string, id: string, when: number) {
+  const st = readSlotState(root);
+  const s = st.slots.find((x) => x.id === id)!;
+  s.takenAt = s.usedAt = new Date(when).toISOString();
+  fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify(st, null, 2));
+  const wt = slotCheckout(root, id);
+  const gd = path.resolve(wt, fs.readFileSync(path.join(wt, '.git'), 'utf8').replace(/^gitdir:\s*/, '').trim());
+  const t = when / 1000;
+  for (const f of ['index', 'HEAD', path.join('logs', 'HEAD')]) if (fs.existsSync(path.join(gd, f))) fs.utimesSync(path.join(gd, f), t, t);
+  for (const prof of ['debug', 'release', 'bench']) for (const sub of ['', '.fingerprint', 'deps']) if (fs.existsSync(path.join(slotTarget(root, id), prof, sub))) fs.utimesSync(path.join(slotTarget(root, id), prof, sub), t, t);
+}
+
+test("w6484: the daemon's report frees 2026-11-27's stale holds by itself (a finished holder's pushed slot, a stopped one's 10 uncommitted changes rescued); a live one stays", async (t) => {
+  const { root, remote } = world(t);
+  const OLD = NOW - 255 * 60_000;
+  // BEAST slot4 / m5 slot1: on no open request, its work pushed
+  assert.equal(takeSlot(at(root, 'aaaa1111', OLD, { max: 3 }), { branch: 'feat', remote }), 'slot1');
+  // BEAST slot3: stopped, unused 255 min, 10 uncommitted changes
+  assert.equal(takeSlot(at(root, 'bbbb2222', OLD, { live: ['aaaa1111', 'bbbb2222'], max: 3 }), { remote }), 'slot2');
+  for (let i = 0; i < 10; i++) fs.writeFileSync(path.join(slotCheckout(root, 'slot2'), `wip${i}.rs`), `// ${i}\n`);
+  // a live holder working in its slot now
+  assert.equal(takeSlot(at(root, 'cccc3333', NOW, { live: ['aaaa1111', 'bbbb2222', 'cccc3333'], max: 3 }), { branch: 'feat', remote }), 'slot3');
+  for (const id of ['slot1', 'slot2', 'slot3']) fs.mkdirSync(path.join(slotTarget(root, id), 'debug'), { recursive: true });
+  age(root, 'slot1', OLD);
+  age(root, 'slot2', OLD);
+  const owners = { bbbb2222: own('blocked'), cccc3333: own('active') };
+  const judge = () => {
+    const d = at(root, '', NOW, { live: ['cccc3333'], owners, max: 3 });
+    Object.assign(d.facts!, { resumable: ['bbbb2222'] });
+    return d;
+  };
+  const report = slotsReport(judge());
+  assert.deepEqual(report.slots.map((s) => [s.id, s.stale]), [['slot1', true], ['slot2', true], ['slot3', false]], JSON.stringify(report.slots.map((s) => s.why)));
+  const holders = () => readSlotState(root).slots.map((s) => s.holder ?? '-');
+  assert.deepEqual(holders(), ['aaaa1111', 'bbbb2222', 'cccc3333'], 'reading the slots frees nothing: before w6484 only a take or a hand-run sweep did');
+  const logs: string[] = [];
+  let mode: 'warn' | 'on' = 'warn';
+  const sweep = async () => {
+    const d = judge();
+    const code = ffuSlotMain(['sweep'], d);
+    return { ok: code === 0, out: d.said.join('') + d.out.join('') };
+  };
+  const auto = new FfuSlotAutoSweep({ mode: () => mode, sweep, log: (s) => void logs.push(s) });
+  assert.deepEqual(await auto.onReport(report), ['slot1', 'slot2']);
+  assert.deepEqual(holders(), ['aaaa1111', 'bbbb2222', 'cccc3333'], 'warn-only frees nothing');
+  assert.equal(logs.filter((l) => /would free/.test(l)).length, 2);
+  mode = 'on';
+  assert.deepEqual(await auto.onReport(report), ['slot1', 'slot2'], logs.join('\n'));
+  assert.deepEqual(holders(), ['-', '-', 'cccc3333'], 'both stale holds freed, the live one kept');
+  const r = readSlotState(root).rescues ?? [];
+  assert.equal(r.length, 1, 'only the stopped holder had work to save');
+  assert.ok(r[0].holder === 'bbbb2222' && r[0].pushed, JSON.stringify(r[0]));
+  const files = git(['ls-tree', '--name-only', r[0].branch], remote).split('\n').filter((f) => f.startsWith('wip'));
+  assert.equal(files.length, 10, 'all 10 uncommitted changes are on the pushed rescue branch');
+  assert.ok(logs.some((l) => l.startsWith("ffu slots: auto sweep: saved bbbb2222's work in slot2") && l.includes(`on branch ${r[0].branch}, pushed to origin`)), logs.join('\n'));
+  for (const id of ['slot1', 'slot2', 'slot3']) assert.ok(fs.existsSync(path.join(slotTarget(root, id), 'debug')), `${id}'s target stays warm`);
+});
+
+test("w6484: the daemon's sweep process (runFfuSlotSweep, no session) frees a finished holder's pushed slot from cleanup-facts.json", async (t) => {
+  const { root, remote } = world(t);
+  assert.equal(takeSlot(at(root, 'aaaa1111', NOW, { max: 3 }), { branch: 'feat', remote }), 'slot1');
+  const factsFile = path.join(root, 'cleanup-facts.json');
+  fs.writeFileSync(factsFile, JSON.stringify({ at: new Date().toISOString(), connected: true, root, tempRoot: path.join(root, 'tmp'), sandboxes: [], live: ['aaaa1111'], resumable: [], open: [], closed: [], owners: {} }));
+  const r = await runFfuSlotSweep({ root, factsFile, max: 3 });
+  assert.equal(r.ok, true, r.out);
+  assert.match(r.out, /ffu-slot: freed slot1: held by aaaa1111, which is on no open request, and its work is pushed/);
+  assert.equal(readSlotState(root).slots[0].holder, undefined);
 });

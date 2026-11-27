@@ -134,6 +134,23 @@ request CI took 123 min at the median and 190 min at p90 (measured, 92 runs, `gh
 slot last on its branch is picked first. The 2 h is a guess, long beside the ffu loop's slowest step (a cold workspace
 build, 221 to 366 s), so only a worker that moved on to other work loses its slot.
 
+**Who frees a stale slot (w6484).** Until w6484 only the next `take` or a hand-run `ffu-slot sweep` freed one: the rule
+above judged a slot free, but nothing acted on it while no worker needed a slot. So stale holds stayed "held" on the page
+for hours (BEAST slot3 for 5 h on 2026-11-26, w6179; BEAST slot3 and slot4 and m5 slot1 on 2026-11-27, 4 to 16 h), and a
+person filed a request each time to free them by hand. Now the daemon acts on its own slot report (`ffu-slot list --json`,
+every 2 min, `FFU_REPORT_MS`): when it names a stale slot, the stale-output setting `ffuSlotSweep`
+(`cleanup.staleOutput.ffuSlotSweep`) says what happens (`machine/ffuSlotAutoSweep.ts`):
+
+- `warn` (the default, warn-only first): daemon.log says `ffu slots: auto sweep (warn-only, ffuSlotSweep warn): would free
+  <slot> on <branch>: <why>`, once per slot and holder; nothing is freed.
+- `on`: the daemon runs `ffu-slot sweep` as its own process (`runFfuSlotSweep`, no session, 5 min timeout), the same rule,
+  lock and rescue as a worker's sweep, and logs each line it printed as `ffu slots: auto sweep: ...`. A failure is one log
+  line (`auto sweep failed: ...`) and never stops the daemon.
+- `off`: nothing.
+
+The portal sets it, so turning it back off needs nobody at the machine. `ffu-slot sweep` no longer needs FF_SESSION_ID
+(the daemon's sweep has none; it holds no slot, so every holder is another's).
+
 **Its holder's work is saved first, never dropped** (`rescueWork`). Before a taken slot's checkout is reset, its
 uncommitted changes are committed and its tip is kept as branch `rescue/ffu-slot/<slot>-<holder>-<sha8>` in the shared
 clone (a local branch, which `fetch --prune` never drops), then pushed to origin (ffu's CI runs on pushes to `main` and
@@ -194,7 +211,7 @@ and in `list_sandboxes` and `list_machines` (`server/ffuSlotsView.ts`): for each
 when the portal knows the session), whether it runs, stopped or is gone, its branch and commit, since when it is held and
 when it was last used, its target's size, and whether the hold is **stale**. Stale is `ffu-slot list`'s own judgement: a
 held slot `slotFree` calls free (its holder is gone with its work pushed, or stopped or waiting past `FFU_SLOT_WAIT_GRACE_MS`, or idle
-past `FFU_SLOT_IDLE_MS`, w5885); the next `take` frees it by itself, so the page has no action.
+past `FFU_SLOT_IDLE_MS`, w5885); the next `take`, or the daemon's auto sweep with `ffuSlotSweep` on (w6484), frees it, so the page has no action.
 
 - The daemon runs `ffu-slot list --json` (`slotsReport`) in a child process every 2 minutes (`FFU_REPORT_MS`,
   `readFfuSlotsReport`), so the `git rev-parse` and `git status` in each checkout never block it, and sends the result in its
