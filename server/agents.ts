@@ -130,7 +130,7 @@ import { RELEASE_RULES } from './releaseLanes.ts';
 import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
 import { steamLabel, steamLacks } from '../shared/steam.ts';
 import { desktopLabel, desktopLacks, needsWindow, pairDrivesMenus, saysNone, screenUnlockAskProblem, windowLacks } from '../shared/desktop.ts';
-import { dataDirClearedText, gameDataDirAt, type DataDirVerdict } from './gameDataDir.ts';
+import { dataDirClearedText, gameCommitAt, gameDataDirAt, type CommitVerdict, type DataDirVerdict } from './gameDataDir.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
 import { TITLE_HELP, TITLE_MAX, jobTitle } from './jobTitle.ts';
@@ -2287,6 +2287,24 @@ export class Agents {
   gameDataDirAt: (commit: string) => Promise<DataDirVerdict> = (commit) => gameDataDirAt(ghRunner(undefined, 'the FF_GAME_DATA_DIR check of a pair run'), GAME_REPO, commit);
 
   /**
+   * w6206: does the commit a pair run names exist in the game repo (server/gameDataDir.ts gameCommitAt)? undefined: not asked,
+   * which only the test runner's FF_COMMIT_CHECK=off gives (scripts/testEnv.ts); tests that check it replace this.
+   */
+  gameCommitAt: (commit: string) => Promise<CommitVerdict | undefined> = (commit) =>
+    process.env.FF_COMMIT_CHECK === 'off' ? Promise.resolve(undefined) : gameCommitAt(ghRunner(undefined, 'the commit check of a pair run'), GAME_REPO, commit);
+
+  /**
+   * w6206: refuse a pair run whose commit GitHub does not have (a mistyped sha), or answer a warning when GitHub could not be
+   * read: the run is then placed, and the warning says the commit was not checked.
+   */
+  private async pairCommitCheck(commit: string, refusal: (why: string) => string): Promise<string | undefined> {
+    const v = await this.gameCommitAt(commit).catch((e: Error): CommitVerdict => ({ known: undefined, why: `FF Factory could not check that commit ${commit} exists (${clip(e.message, 160)}; w6206)` }));
+    if (!v || v.known === true) return undefined;
+    if (v.known === false) throw new Error(refusal(v.why));
+    return `WARNING: ${v.why}; it was placed unchecked, so make sure the legs run the commit you meant.`;
+  }
+
+  /**
    * w6189: the data-folder verdict for a request_pair call that its words or legacy_data would mark pre-w5297, or undefined
    * when nothing would mark it (no GitHub call) or no commit is known (filePair then keeps the refusal and says so).
    */
@@ -2306,6 +2324,8 @@ export class Agents {
   private async requestPair(sessionId: string, a: Record<string, unknown>): Promise<string> {
     refuseInDryRun('request_pair');
     const player = typeof a.player === 'string' && a.player.trim() ? this.pairPlayer(a.player) : undefined;
+    const given = typeof a.commit === 'string' ? a.commit.trim().toLowerCase() : '';
+    const commitWarning = /^[0-9a-f]{7,40}$/.test(given) ? await this.pairCommitCheck(given, (why) => `Nothing filed: ${why}`) : undefined;
     const dataDir = await this.pairDataDir(a, player);
     const out = this.orchestrators.filePair(sessionId, {
       what: typeof a.what === 'string' ? a.what : '',
@@ -2326,7 +2346,7 @@ export class Agents {
       ...(dataDir ? { data_dir: dataDir } : {}),
     });
     this.blockerWatch?.kick();
-    return out;
+    return commitWarning ? `${out} ${commitWarning}` : out;
   }
 
   /** w4613: request_pair's player, an attachment publish_attachment made from a player cache entry, as the pair keeps it. */
@@ -6318,6 +6338,10 @@ A report is for a person who asked for one, and people want very few. File one w
     if (want && refs.length !== want) throw new Error(`${w.id} is ${pairText(w.pair!)}: give ${want} sandboxes (sandbox and ${want - 1} in pair_sandboxes), not ${refs.length}`);
     if (refs.length < 1 || refs.length > PAIR_MAX_LEGS) throw new Error(`a pair run has 1 to ${PAIR_MAX_LEGS} legs, one per computer`);
     if (a.extra_agent) throw new Error('a pair run\'s legs are game work: each goes into a FREE sandbox, never beside another agent (extra_agent)');
+    // w6206: a pair run whose commit GitHub does not have is not started (one filed before the check, or by hand); a published
+    // player's own commit came from a build, and is not asked.
+    const pc = w.pair?.commit?.trim().toLowerCase();
+    const commitWarning = pc && !w.pair?.player?.key.toLowerCase().startsWith(pc) ? await this.pairCommitCheck(pc, (why) => `${w.id}'s ${why}. Nothing was started.`) : undefined;
     // w6189: a pair run marked pre-w5297 whose commit reads FF_GAME_DATA_DIR (one filed before this check, or by hand) is
     // decided per commit here too, so start_agent and request_pair agree; a commit that does not, or that cannot be checked,
     // keeps the refusal below.
@@ -6417,7 +6441,7 @@ A report is for a person who asked for one, and people want very few. File one w
     }
     this.orchestrators.pairStarted(w.id, started, crossOs ? { crossOs } : {});
     const withFiles = files.length ? ` Each gets ${files.length === 1 ? 'the attachment' : `${files.length} attachments`} (${files.map((f) => f.id).join(', ')}) in ${INBOX_DIR}/.` : '';
-    return `Started ${w.id}'s ${legs.length === 1 ? 'one leg' : `${legs.length} legs together`}, requested by ${requestedBy.displayName}: ${lines.join('; ')}. ${names(w.requesters)}'s orchestrator is told.${withFiles}${Agents.goneLine(files)}`;
+    return `Started ${w.id}'s ${legs.length === 1 ? 'one leg' : `${legs.length} legs together`}, requested by ${requestedBy.displayName}: ${lines.join('; ')}. ${names(w.requesters)}'s orchestrator is told.${withFiles}${Agents.goneLine(files)}${commitWarning ? ` ${commitWarning}` : ''}`;
   }
 
   /**

@@ -1124,6 +1124,14 @@ without one means it is off or failing, worth a person's look.
     filed, the dispatcher is told to file it, once per request (w4225: w4207 sat Stalled 2 h on "ready for the pair run");
     a "wNNN: ready for <leg>, needs a non-<computer> computer" line from a worker with no check-in queues that leg on the
     other game computers (`Orchestrators.queueReadyLeg`), so the request reads Queued, not Stalled (w4225);
+    a `commit` that the game repo does not have is refused before anything is filed or started (w6206: w6187's run was filed
+    with a mistyped full sha, `20786882d8bd…`, whose first 10 characters matched PR #4382's real head `20786882d8c3…`, and
+    only its leg's own `gh pr view` caught it). `request_pair` and `start_agent` ask GitHub for the commit
+    (`server/gameDataDir.ts` `gameCommitAt`, the read the w6189 data-folder check uses). An unknown sha is refused with a
+    message that names it and, when its first 10 (then 7) characters name a real commit, that commit and the branches it
+    heads. A real full or short sha passes. When GitHub cannot be read, the run is placed and the reply carries a WARNING that
+    says the commit was not checked and why. A published player's own commit is not asked. The test runner turns the check
+    off (`FF_COMMIT_CHECK=off`, `scripts/testEnv.ts`); its tests replace `Agents.gameCommitAt`;
   - a worker that waits on the orchestrator for its own work stays Stalled and the line says so, adding "that is its own
     work" for a pair or two-machine check, a build, a test run or its CI (w1685). Such a worker is told at its turn's end,
     once per request (`Agents.ownWorkNudge`), and every worker's prompt says these are its own work.

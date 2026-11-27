@@ -12,6 +12,9 @@ process.env.FF_CLI_SCRUB ??= 'off';
 // w6003: an in-process test daemon on Windows never runs whoami.exe to measure its agents' level (it would read the test
 // runner's own token, which differs by machine); machine/agentIntegrity.test.ts covers the measurement.
 process.env.FF_MEASURE_INTEGRITY ??= 'off';
+// w6206: request_pair and start_agent never ask the real GitHub whether a pair run's commit exists; the tests of that
+// check replace Agents.gameCommitAt (server/gameCommit.test.ts, orchestratorsPairs.test.ts).
+process.env.FF_COMMIT_CHECK ??= 'off';
 // w5545: a test's unity-slot or bench ticket never asks the worker's real daemon (its token would file a real request).
 delete process.env.FF_DAEMON_RPC;
 delete process.env.FF_DAEMON_TOKEN;
@@ -26,6 +29,7 @@ delete process.env.FF_DAEMON_TOKEN;
 export const KEPT_FF_ENV = new Set([
   'FF_CLI_SCRUB',
   'FF_MEASURE_INTEGRITY',
+  'FF_COMMIT_CHECK',
   'FF_TIMING_TESTS',
   'FF_NETWORK_TESTS',
   'FF_TEST_FILE_TIMES',

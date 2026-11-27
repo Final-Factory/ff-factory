@@ -43,7 +43,7 @@ import { PR2395_DIFF, W1958_0459, W1958_1632, W2651_0457, W2651_2051 } from './p
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 import { afterMergeReason } from './ledgerRules.ts';
 import { doneIdsIn, legDoneIdsIn } from './ledgerRules.ts';
-import type { DataDirVerdict } from './gameDataDir.ts';
+import type { CommitVerdict, DataDirVerdict } from './gameDataDir.ts';
 import { legacyFit, roomForWork, timedLine, type Computer, type RoomNow } from './placement.ts';
 import type { Occupant } from './timedLegPlace.ts';
 import { decisionsOn } from '../shared/waiting.ts';
@@ -995,4 +995,66 @@ test('w6189: start_agent decides a marked pair run per commit too: the backport 
 test('w5965: the words that mark a pre-w5297 player', () => {
   for (const t of ['MP-activity-fingerprint on pre-1.0', 'the 0.50 line at ac80d7b0', 'build 0.50.0.47', 'its player predates w5297']) assert.equal(mentionsLegacyPlayer(t), true, t);
   for (const t of ['a 0.50 s wait', 'MP-activity-fingerprint on master', 'pre-1.05 notes', 'version 10.50.1']) assert.equal(mentionsLegacyPlayer(t), false, t);
+});
+
+// w6206 (for lothsahn): w6187's pair run was filed with a mistyped full sha (20786882d8bd6c1a…) whose first 10 characters
+// matched the real head of game PR #4382 (20786882d8c3f540…); only its leg's own `gh pr view` caught it.
+const W6206_HEAD = '20786882d8c3f54012a49c63c5073eb7c2b1f0dc';
+const W6206_TYPO = '20786882d8bd6c1a00000000000000000000beef';
+const fakeCommit = (commit: string): Promise<CommitVerdict> =>
+  Promise.resolve(W6206_HEAD.startsWith(commit) ? { known: true, full: W6206_HEAD }
+    : commit === 'cafef00d12' ? { known: undefined, why: 'FF Factory could not read commit cafef00d12 from GitHub to check that it exists in Final-Factory/FinalFactory (HTTP 502; w6206)' }
+    : { known: false, why: `commit ${commit} is not in Final-Factory/FinalFactory: GitHub has no such commit; it looks like ${W6206_HEAD}, the head of w6129-port, which shares its first 10 characters. Pass the sha the legs must run (git rev-parse HEAD on the pushed branch; w6206)` });
+
+test('w6206: request_pair refuses a commit the game repo does not have, naming the head it looks like; a real full or short sha is filed; a failed read files with a warning', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  agentsRoom(agents, []);
+  agents.gameCommitAt = fakeCommit;
+  putRequests(store, [{ id: 'w6187', by: LOTH }, { id: 'w6207', by: LOTH }, { id: 'w6208', by: LOTH }]);
+  const ask = { what: 'MP determinism check of PR #4382', brief: 'Build the PR head and run the MP scenarios.' };
+  const typo = await startedFor(env, 'w6187');
+  const before = store.work.size;
+  await assert.rejects(async () => typo.h.request_pair!({ ...ask, commit: W6206_TYPO }),
+    new RegExp(`^Error: Nothing filed: commit ${W6206_TYPO} is not in Final-Factory/FinalFactory: GitHub has no such commit; it looks like ${W6206_HEAD}, the head of w6129-port`));
+  assert.equal(store.work.size, before, 'nothing filed');
+  const full = String(await typo.h.request_pair!({ ...ask, commit: W6206_HEAD }));
+  assert.match(full, /^Filed w\d+/);
+  assert.doesNotMatch(full, /WARNING/);
+  const short = await startedFor(env, 'w6207');
+  assert.match(String(await short.h.request_pair!({ ...ask, what: 'MP check of PR #4383', commit: '20786882d8' })), /^Filed w\d+/);
+  const down = await startedFor(env, 'w6208');
+  const warned = String(await down.h.request_pair!({ ...ask, what: 'MP check of PR #4384', commit: 'cafef00d12' }));
+  assert.match(warned, /^Filed w\d+.* WARNING: FF Factory could not read commit cafef00d12 from GitHub to check that it exists .*HTTP 502.*placed unchecked/);
+});
+
+test('w6206: start_agent refuses a pair run whose commit the game repo does not have, and starts one whose short sha is real', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, dispatcher, call, agents } = env;
+  agents.gameCommitAt = fakeCommit;
+  putRequests(store, [
+    { id: 'w6188', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, commit: W6206_TYPO } },
+    { id: 'w6209', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, commit: '20786882d8' } },
+  ]);
+  const start = (id: string) => call(dispatcher().info, 'start_agent', { work_id: id, prompt: 'Run the MP scenarios.', title: 'pair', sandbox: 'pc/alpha' });
+  const typo = await start('w6188');
+  assert.equal(typo.isError, true);
+  assert.match(typo.text, new RegExp(`w6188's commit ${W6206_TYPO} is not in Final-Factory/FinalFactory.*it looks like ${W6206_HEAD}.*Nothing was started\\.`));
+  assert.deepEqual(store.work.get('w6188')!.sessionIds, []);
+  // Its requester refiles it with the right sha: the refused run no longer holds the computer for itself (w3530).
+  store.putWork({ ...store.work.get('w6188')!, status: 'cancelled' });
+  const ok = await start('w6209');
+  assert.equal(ok.isError, false, ok.text);
+  assert.doesNotMatch(ok.text, /WARNING/);
+});
+
+test('w6206: start_agent starts a pair run whose commit GitHub could not be read, with a warning that says so', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, dispatcher, call, agents } = env;
+  agents.gameCommitAt = fakeCommit;
+  putRequests(store, [{ id: 'w6210', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, commit: 'cafef00d12' } }]);
+  const down = await call(dispatcher().info, 'start_agent', { work_id: 'w6210', prompt: 'Run the MP scenarios.', title: 'pair', sandbox: 'pc/alpha' });
+  assert.equal(down.isError, false, down.text);
+  assert.match(down.text, /WARNING: FF Factory could not read commit cafef00d12 .*placed unchecked/);
+  assert.equal(store.work.get('w6210')!.sessionIds.length, 1);
 });
