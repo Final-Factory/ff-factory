@@ -29,7 +29,11 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, orchestra
   const cfg = { dataDir: dir, limits: { maxSessions: 6 }, orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false, compactIdleSeconds: 0, ...orchestrator } } as unknown as Config;
   const sessions = new SessionManager(cfg, store);
   const auto = new AutoCompactor(sessions, cfg, { settleMs, retryDelaysMs: RETRIES });
+  // w6191: what a test makes beside these (a second compactor, the next portal's manager) stops before the folder goes. In
+  // a hook of the test's own it ran after this one, so a compaction retry it armed restarted a session into the removed folder.
+  const stopFirst: (() => void)[] = [];
   t.after(async () => {
+    for (const stop of stopFirst) stop();
     auto.stop();
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 50));
@@ -48,7 +52,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, orchestra
   const make = (role: 'personal' | 'dispatcher' = 'personal') =>
     sessions.create({ kind: 'orchestrator', title: role === 'personal' ? 'lothsahn' : 'Dispatcher', permissionMode: 'default', options: () => ({ model: 'opus' }), orchestratorRole: role, ...(role === 'personal' ? { requestedBy: LOTHSAHN } : {}) });
   const say = (id: string, text: string) => sessions.send(id, text, 'human', undefined, { requestedBy: LOTHSAHN });
-  return { dir, store, sessions, auto, compactions, ends, make, say, cfg };
+  return { dir, store, sessions, auto, compactions, ends, make, say, cfg, stopFirst: (stop: () => void) => void stopFirst.push(stop) };
 }
 
 /** w1749: the retries' waits here, ms (the portal's are 10 s to 5 min). */
@@ -354,13 +358,13 @@ test('w1538: below the soft threshold, quiet changes nothing', async (t) => {
 });
 
 test('w1538: the quiet clock survives a portal restart: a new compactor reads the saved end of the last turn', async (t) => {
-  const { sessions, cfg, compactions, make, say } = quietSetup(t, 60);
+  const { sessions, cfg, compactions, make, say, stopFirst } = quietSetup(t, 60);
   const o = make();
   say(o.info.id, 'big #ctx 60000');
   await until(() => o.info.status === 'idle' && !!o.info.lastResultAt, 'the turn');
   const ended = Date.parse(o.info.lastResultAt!);
   const after = new AutoCompactor(sessions, cfg, { settleMs: 20 });
-  t.after(() => after.stop());
+  stopFirst(() => after.stop());
   assert.match(after.check(o.info.id, ended + 30_000), /^not yet: .*\(30 s more\)/, 'it knows nothing of the turn but its saved end');
   assert.equal(compactions.length, 0);
   assert.match(after.check(o.info.id, ended + 60_000), /^compacting: the context passed 50,000 tokens/);
@@ -442,7 +446,7 @@ test('w1749: closed partway through, the compaction is retried; the messages sen
 });
 
 test('w1749: a portal restart during the compaction: the next portal runs it again, then delivers what waited', async (t) => {
-  const { dir, store, sessions, auto, cfg, make, say } = setup(t);
+  const { dir, store, sessions, auto, cfg, make, say, stopFirst } = setup(t);
   const o = make();
   const compact = sessions.compact.bind(sessions);
   sessions.compact = (...args) => {
@@ -467,7 +471,7 @@ test('w1749: a portal restart during the compaction: the next portal runs it aga
   assert.deepEqual(cutOff, [], 'a compaction is no turn of a person\'s to resume');
   assert.equal(restored.queued().length, 1, 'the timer waits in the saved send queue');
   const next = new AutoCompactor(restored, cfg, { settleMs: 20, retryDelaysMs: RETRIES });
-  t.after(() => {
+  stopFirst(() => {
     next.stop();
     restored.stopAll();
   });
@@ -483,7 +487,7 @@ test('w1749: a portal restart during the compaction: the next portal runs it aga
 });
 
 test('w1749: a portal killed mid-compaction (no clean stop): the next portal says so and compacts it', async (t) => {
-  const { dir, cfg } = setup(t);
+  const { dir, cfg, stopFirst } = setup(t);
   const seed = new Store(dir);
   const base = { title: 'lothsahn', permissionMode: 'default' as const, createdAt: 'x', lastActivityAt: 'x', turns: 5, costUsd: 0, pendingPermissions: [], requestedBy: LOTHSAHN, orchestratorRole: 'personal' as const };
   seed.putSession({ ...base, id: 'o1', kind: 'orchestrator', sdkSessionId: 'fake-killed', contextTokens: 60_000, status: 'running', statusDetail: 'compacting the conversation', compactOwed: { trigger: 'tokens', reason: 'the context passed 50,000 tokens', since: new Date().toISOString(), attempts: 1, lastAttemptAt: new Date().toISOString() } });
@@ -493,7 +497,7 @@ test('w1749: a portal killed mid-compaction (no clean stop): the next portal say
   assert.deepEqual(restored.restore(() => () => ({ model: 'opus' })), []);
   assert.match(again.readTranscript('o1').map((e) => ('text' in e ? e.text : '')).at(-1)!, /restarted while this conversation was being compacted; FF Factory compacts it again now/);
   const next = new AutoCompactor(restored, cfg, { settleMs: 20, retryDelaysMs: RETRIES });
-  t.after(() => {
+  stopFirst(() => {
     next.stop();
     restored.stopAll();
   });
@@ -506,4 +510,22 @@ test('w1749: a portal killed mid-compaction (no clean stop): the next portal say
   assert.ok(index(again, 'o1', (l) => l.startsWith('Compacted: ')) < index(again, 'o1', (l) => l === 'Echo: are you there?'));
   assert.equal(r.info.compactOwed, undefined);
   again.flush();
+});
+
+test('w6191: a stopped compactor arms no retry when the sessions stop after it, so it restarts none of them', async (t) => {
+  const { sessions, auto, make, say } = setup(t);
+  const o = make();
+  const compact = sessions.compact.bind(sessions);
+  sessions.compact = (...args) => {
+    const note = compact(...args);
+    // The order teardowns took: the compactor first, then the sessions, which fails the compaction it started.
+    auto.stop();
+    sessions.stopAll();
+    return note;
+  };
+  say(o.info.id, 'big #ctx 60000');
+  await until(() => o.info.compactOwed?.lastError === 'the session was stopped', 'the attempt cut off');
+  await sleep(RETRIES[0] * 5);
+  assert.equal(o.info.status, 'stopped', 'no retry started it again');
+  assert.equal(o.info.compactOwed?.attempts, 1);
 });

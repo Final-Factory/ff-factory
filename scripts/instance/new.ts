@@ -151,11 +151,12 @@ export function portalEnv(o: Pick<NewOptions, 'name' | 'dir'>): Record<string, s
   };
 }
 
-/** <dir>/start-portal.sh, in the shape of Lens Scout's F:/ffw/lens-factory/start-portal.sh (Git Bash on Windows). */
+/** <dir>/start-portal.sh, in the shape of Lens Scout's F:/ffw/lens-factory/start-portal.sh (Git Bash on Windows), raising the portal it starts (w6221). */
 export function startScript(o: Pick<NewOptions, 'name' | 'project' | 'port' | 'dir'> & { nodeDir: string }): string {
   const env = Object.entries(portalEnv(o))
     .map(([k, v]) => (/^[\w.-]+$/.test(v) ? `${k}=${v}` : `${k}="${v}"`))
     .join(' ');
+  const log = under(o.dir, 'portal.log');
   return [
     '#!/bin/bash',
     `# Starts the ${o.project} instance's portal (${o.name}) on :${o.port}, made by scripts/instance/new.ts. Its own data, config,`,
@@ -163,10 +164,58 @@ export function startScript(o: Pick<NewOptions, 'name' | 'project' | 'port' | 'd
     `export PATH="${msysPath(o.nodeDir)}:$PATH"`,
     `export ${env}`,
     `unset ${TOKEN_VARIABLES}`,
-    `cd "${under(o.dir, 'app')}" && exec node server/index.ts >> "${under(o.dir, 'portal.log')}" 2>&1`,
+    // Not exec (w6221): the portal starts in the background so this script can raise it (PORTAL_PRIORITY_PS), then waits
+    // for it, so the task still ends with the portal's own exit code.
+    `cd "${under(o.dir, 'app')}" || exit 1`,
+    `node server/index.ts >> "${log}" 2>&1 &`,
+    'portal=$!',
+    "read -r -d '' PRIO <<'PS'",
+    PORTAL_PRIORITY_PS,
+    'PS',
+    `FF_PORTAL_PID=$(cat "/proc/$portal/winpid") powershell.exe -NoProfile -NonInteractive -EncodedCommand "$(printf '%s' "$PRIO" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)" >> "${log}" 2>/dev/null || echo "portal priority (w6221): the raise failed (exit $?); the portal runs at its task's priority" >> "${log}"`,
+    'wait $portal',
     '',
   ].join('\n');
 }
+
+// w6221: a scheduled task's default priority is 7, which starts its action at BELOW_NORMAL_PRIORITY_CLASS, IoPriorityLow and
+// MEMORY_PRIORITY_LOW (learn.microsoft.com, taskschedulerschema-priority-settingstype-element), and the portal inherits all
+// three. On a fully loaded BEAST (2026-11-26, 32 cores at 99.9%) Lens Scout's portal read class 0x4000, I/O 1, memory 2,
+// its file opens and closes took 10-35 s and /api/health answered in 18-48 s. This raises the portal's own node process to
+// ABOVE_NORMAL (0x8000), I/O normal (2) and memory normal (5) with no elevation, the calls w6163's runner raise makes. It is
+// inline text run with -EncodedCommand, not a .ps1 file: BEAST's LocalMachine policy is AllSigned, so a script file would
+// not run. Only the portal itself: the processes it starts get the Normal class (CreateProcess gives a child of a parent
+// above Normal the Normal class), and the daemon and its workers keep theirs.
+export const PORTAL_PRIORITY_PS = [
+  "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'",
+  "Add-Type -TypeDefinition @'",
+  'using System; using System.Runtime.InteropServices;',
+  'public static class FFPortalPrio {',
+  '  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint a, bool i, int p);',
+  '  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);',
+  '  [DllImport("kernel32.dll", SetLastError = true)] static extern uint GetPriorityClass(IntPtr h);',
+  '  [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetPriorityClass(IntPtr h, uint c);',
+  '  [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h, int c, ref int v, int l, out int r);',
+  '  [DllImport("ntdll.dll")] static extern int NtSetInformationProcess(IntPtr h, int c, ref int v, int l);',
+  '  [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetProcessInformation(IntPtr h, int c, ref int v, int l);',
+  '  [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetProcessInformation(IntPtr h, int c, ref int v, int l);',
+  '  static string Read(IntPtr h) { int io = 0, r = 0, m = 0; NtQueryInformationProcess(h, 33, ref io, 4, out r); GetProcessInformation(h, 0, ref m, 4); return "class 0x" + GetPriorityClass(h).ToString("X") + ", I/O " + io + ", memory " + m; }',
+  '  public static string Raise(int pid) {',
+  // PROCESS_QUERY_INFORMATION | PROCESS_SET_INFORMATION
+  '    IntPtr h = OpenProcess(0x0600, false, pid);',
+  '    if (h == IntPtr.Zero) return "could not open pid " + pid + ": error " + Marshal.GetLastWin32Error();',
+  '    try {',
+  '      string before = Read(h), err = "";',
+  '      if (!SetPriorityClass(h, 0x8000)) err += "; class: error " + Marshal.GetLastWin32Error();',
+  '      int io = 2; int s = NtSetInformationProcess(h, 33, ref io, 4); if (s != 0) err += "; I/O: 0x" + s.ToString("X8");',
+  '      int m = 5; if (!SetProcessInformation(h, 0, ref m, 4)) err += "; memory: error " + Marshal.GetLastWin32Error();',
+  '      return "pid " + pid + " from " + before + " to " + Read(h) + err;',
+  '    } finally { CloseHandle(h); }',
+  '  }',
+  '}',
+  "'@",
+  '[Console]::Out.WriteLine("portal priority (w6221): " + [FFPortalPrio]::Raise([int]$env:FF_PORTAL_PID))',
+].join('\n');
 
 const psSingle = (s: string) => `'${s.replace(/'/g, "''")}'`;
 const psDouble = (s: string) => s.replace(/[`"$]/g, (c) => `\`${c}`);
@@ -181,7 +230,8 @@ export function taskScript(o: Pick<NewOptions, 'name' | 'project' | 'port'> & { 
     "$ErrorActionPreference = 'Stop'",
     `$bash = ${psSingle(o.bash)}`,
     `$dir = ${psSingle(dir)}`,
-    '$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 `',
+    // -Priority 4 (w6221): the default 7 starts the task at BelowNormal CPU, low I/O and low memory priority; 4 is Normal in all three.
+    '$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -Priority 4 `',
     '  -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew',
     '$user = $env:USERNAME  # the plain name: over ssh USERDOMAIN reads WORKGROUP (docs/project.md, w4038)',
     '# conhost --headless: no console window on the desktop for someone to close by accident.',

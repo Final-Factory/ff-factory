@@ -20,6 +20,8 @@ on:
       - 'machine/**'
       - 'package-lock.json'
       - 'package.json'
+      - 'scripts/instance-priority.test.ts'
+      - 'scripts/instance/new.ts'
       - 'scripts/join.test.ts'
       - 'scripts/test-inflight-reporter.ts'
       - 'scripts/test-watchdog.test.ts'

@@ -20,6 +20,8 @@ import {
   type WinCiFirstMode,
   type WinCiFirstSettings,
   type WinProc,
+  sameRoot,
+  ENV_RETRY_TICKS,
 } from '../machine/ciFirstWin.ts';
 
 /**
@@ -52,6 +54,9 @@ interface RigOpts {
   hostStart?: Record<number, number>;
   noRecord?: boolean;
   onFacts?: (r: Rig) => void;
+  /** w6217: each process's FF_SESSION_ID and FF_WORKER_ROOT, by pid; given, the rig reads environments. */
+  env?: Record<number, { session?: string; root?: string }>;
+  root?: string;
 }
 type Rig = ReturnType<typeof rig>;
 
@@ -69,6 +74,8 @@ function rig(o: RigOpts = {}) {
   let held = false;
   let writeFail = false;
   let setFail = false;
+  let envFail = false;
+  const envAsked: number[][] = [];
   let record: Lowered = o.record ?? {};
   let api: Rig | undefined;
   const set: [number, number][] = [];
@@ -92,6 +99,14 @@ function rig(o: RigOpts = {}) {
       return pids.filter((p) => procs.some((x) => x.pid === p)).map((p): ProcFact => ({ pid: p, startedAt: started.get(p), cpuMs: cpuMs.get(p) ?? 0 }));
     },
     machineBusyMs: () => busy,
+    envOf: o.env
+      ? async (pids) => {
+          if (envFail) throw new Error('reading the environments timed out');
+          envAsked.push(pids);
+          return new Map(pids.flatMap((p) => (o.env![p] ? [[p, o.env![p]] as const] : [])));
+        }
+      : undefined,
+    root: o.root,
     self: DAEMON,
     mode: o.mode,
     held: () => held,
@@ -118,6 +133,8 @@ function rig(o: RigOpts = {}) {
     cf: new WinCiFirst(d),
     setWriteFail: (f: boolean) => void (writeFail = f),
     setSetFail: (f: boolean) => void (setFail = f),
+    setEnvFail: (f: boolean) => void (envFail = f),
+    envAsked,
     now: () => now,
     set,
     record: () => record,
@@ -707,4 +724,218 @@ test("Idle: a tool at BelowNormal is lowered to Idle and raised back to BelowNor
   await r.cf.tick();
   assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
   assert.equal(r.prio.get(25), P.PRIORITY_LOW, 'a Unity run is lowerBuild\'s to set, not ours');
+});
+
+/**
+ * w6217: a tool whose starter exited (a `cargo test` under a `bash /tmp/bugchecks.sh` whose parent was gone, 2026-11-26
+ * 21:54 UTC) is outside every walk from a host. Its tree is found by its environment's FF_SESSION_ID; step one only counts it.
+ */
+const ROOT = 'V:\\ffw';
+const ORPHANS: WinProc[] = [
+  ...BASE,
+  { pid: 40, ppid: 99, cmd: 'bash.exe /tmp/bugchecks.sh' }, // 99 is gone; Git Bash shows no environment
+  { pid: 41, ppid: 40, cmd: 'cargo.exe test' },
+  { pid: 42, ppid: 41, cmd: 'rustc.exe' },
+  { pid: 50, ppid: 98, cmd: 'Unity.exe -batchmode' }, // an orphaned Unity: never a tool, nor what it started
+  { pid: 51, ppid: 50, cmd: 'bee_backend.exe' },
+  { pid: 60, ppid: 97, cmd: 'python.exe other.py' }, // another FF Factory's worker (another root)
+  { pid: 70, ppid: 96, cmd: 'python.exe old.py' }, // a session that is not live here
+  { pid: 80, ppid: 95, cmd: 'svchost.exe' }, // no FF environment at all
+];
+const ORPHAN_ENV = {
+  41: { session: 'aaaa1111', root: 'v:/ffw/' },
+  42: { session: 'aaaa1111', root: ROOT },
+  50: { session: 'bbbb2222', root: ROOT },
+  51: { session: 'bbbb2222', root: ROOT },
+  60: { session: 'bbbb2222', root: 'F:\\ffw' },
+  70: { session: 'dead0000', root: ROOT },
+};
+const NORMAL_ORPHANS: [number, number][] = [40, 41, 42, 50, 51, 60, 70, 80].map((p) => [p, P.PRIORITY_NORMAL]);
+
+test("w6217: sameRoot is leftovers.ts's on Windows: no case, either slash, an unknown either side is the same", () => {
+  assert.equal(sameRoot('V:\\ffw', 'v:/ffw/'), true);
+  assert.equal(sameRoot('F:\\ffw', 'V:\\ffw'), false);
+  assert.equal(sameRoot(undefined, 'V:\\ffw'), true);
+  assert.equal(sameRoot('V:\\ffw', undefined), true);
+});
+
+test("w6217: warn: an orphaned tool tree is found by its session's environment (the shell above it is not), named, nothing lowered", async () => {
+  const r = rig({ procs: ORPHANS, env: ORPHAN_ENV, root: ROOT, prio: NORMAL_ORPHANS, mode: 'warn' });
+  const res = await r.cf.tick();
+  // 41 and 42 are aaaa1111's; 40 (no env), the Unity tree, another root's 60, the dead session's 70 and 80 are not
+  assert.equal(res?.orphans, 2);
+  assert.equal(res?.above, 3, "22 under the host, and the two orphans");
+  const said = r.lines.filter((l) => /found by their session's environment/.test(l));
+  assert.equal(said.length, 1);
+  assert.match(said[0], /2 more of the agents' tools' process\(es\) run above BelowNormal .*found by their session's environment \(w6217; 5 orphan tree\(s\) of 8 process\(es\) looked at\); enforcing would lower them \(warn only\): 41 cargo\.exe \(aaaa1111\), 42 rustc\.exe \(aaaa1111\)$/);
+  assert.match(r.lines.find((l) => /CI job\(s\) running/.test(l))!, /3 of their tools' process\(es\) run above BelowNormal, which enforcing would lower \(warn only, w6110\); 2 of them with the process that started them gone \(w6217\)/);
+  for (const pid of [40, 41, 42, 50, 51, 60, 70, 80]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid}`);
+  assert.deepEqual(r.set, []);
+  // the hosts', the job's and the daemon's own trees are never orphan roots: their environments are not read
+  assert.ok(!r.envAsked.flat().some((p) => [10, 11, 12, 20, 21, 22, 23, 30, 31].includes(p)));
+});
+
+test('w6217: enforce: the orphaned tools go to the priority with the rest, recorded with their host, and back once the job ends', async () => {
+  const r = rig({ procs: ORPHANS, env: ORPHAN_ENV, root: ROOT, prio: NORMAL_ORPHANS, mode: 'enforce' });
+  const res = await r.cf.tick();
+  assert.equal(res?.orphans, 2);
+  assert.equal(res?.lowered, 3, '22, 41 and 42');
+  for (const pid of [22, 41, 42]) assert.equal(r.prio.get(pid), P.PRIORITY_BELOW_NORMAL, `${pid}`);
+  for (const pid of [40, 50, 51, 60, 70, 80]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid} keeps its own`);
+  assert.deepEqual(r.record()['41@141'], { prev: P.PRIORITY_NORMAL, at: 1_000_000, host: 20 });
+  assert.deepEqual(r.record()['42@142'], { prev: P.PRIORITY_NORMAL, at: 1_000_000, host: 20 });
+  assert.match(r.lines.find((l) => /found by their session's environment/.test(l))!, /lowered with the rest: 41 cargo\.exe \(aaaa1111\) lowered, 42 rustc\.exe \(aaaa1111\) lowered$/);
+  assert.match(r.lines.find((l) => /ci first: lowered 3/.test(l))!, /: 22 python\.exe, 41 cargo\.exe, 42 rustc\.exe/);
+  // the job ends: everything lowered goes back, the orphans too
+  r.setProcs(ORPHANS.filter((p) => p.pid !== 11 && p.pid !== 12));
+  r.advance(60_000);
+  const after = await r.cf.tick();
+  assert.equal(after?.raised, 3);
+  for (const pid of [22, 41, 42]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid} raised`);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.deepEqual(r.record(), {});
+});
+
+test("w6217: enforce: a bench or a person's turn keeps the orphans where they are, and so does a process too new for the listing", async () => {
+  const r = rig({ procs: ORPHANS, env: ORPHAN_ENV, root: ROOT, prio: NORMAL_ORPHANS, mode: 'enforce' });
+  r.setHeld(true);
+  const res = await r.cf.tick();
+  assert.equal(res?.lowered, 0);
+  assert.equal(r.prio.get(41), P.PRIORITY_NORMAL);
+  assert.match(r.lines.find((l) => /found by their session's environment/.test(l))!, /not lowered while a bench or a person's turn holds this machine/);
+  r.setHeld(false);
+  r.advance(60_000);
+  r.started.set(42, r.now()); // 42 is a new process with that pid, started after the listing could have been taken
+  await r.cf.tick();
+  assert.equal(r.prio.get(41), P.PRIORITY_BELOW_NORMAL);
+  assert.equal(r.prio.get(42), P.PRIORITY_NORMAL);
+});
+
+test('w6217: each environment is read once; a new orphan is named once', async () => {
+  const r = rig({ procs: ORPHANS, env: ORPHAN_ENV, root: ROOT, prio: NORMAL_ORPHANS });
+  await r.cf.tick();
+  const n = r.envAsked.length;
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.envAsked.length, n, 'nothing new: nothing read');
+  assert.equal(r.lines.filter((l) => /found by their session's environment/.test(l)).length, 1, 'not said again');
+  r.advance(60_000);
+  r.setProcs([...ORPHANS, { pid: 43, ppid: 41, cmd: 'rustc.exe' }]);
+  r.started.set(43, 1_100_000);
+  r.prio.set(43, P.PRIORITY_NORMAL);
+  const res = await r.cf.tick();
+  assert.deepEqual(r.envAsked.at(-1), [43]);
+  assert.equal(res?.orphans, 3);
+  assert.match(r.lines.filter((l) => /found by their session's environment/.test(l)).at(-1)!, /^.*ci first: 1 more .*: 43 rustc\.exe \(aaaa1111\)$/);
+  // one at the priority already is not counted
+  r.advance(60_000);
+  r.prio.set(43, P.PRIORITY_BELOW_NORMAL);
+  assert.equal((await r.cf.tick())?.orphans, 2);
+});
+
+test('w6217: a failed environment read is said once and tried again only after 5 ticks; the trees it did not read are left alone', async () => {
+  const r = rig({ procs: ORPHANS, env: ORPHAN_ENV, root: ROOT, prio: NORMAL_ORPHANS, mode: 'enforce' });
+  r.setEnvFail(true);
+  const first = await r.cf.tick();
+  assert.equal(first?.jobs, 1);
+  assert.equal(first?.lowered, 1, "the hosts' own walk is untouched: 22");
+  assert.equal(first?.orphans, 0);
+  r.setEnvFail(false);
+  for (let i = 0; i < ENV_RETRY_TICKS; i++) {
+    r.advance(60_000);
+    assert.equal((await r.cf.tick())?.orphans, 0, `skipped tick ${i}`);
+  }
+  assert.deepEqual(r.envAsked, [], 'not read while it waits');
+  assert.equal(r.lines.filter((l) => /could not read the processes' environments \(tried again every 6 ticks\): reading the environments timed out/.test(l)).length, 1);
+  assert.equal(r.prio.get(41), P.PRIORITY_NORMAL);
+  r.advance(60_000);
+  const res = await r.cf.tick();
+  assert.ok(r.lines.some((l) => /environments read again/.test(l)));
+  assert.equal(res?.orphans, 2);
+  assert.equal(r.prio.get(41), P.PRIORITY_BELOW_NORMAL);
+});
+
+test('w6222 review: the orphaned wrapper above a runner listener is not an agent tool, nor what is above it', async () => {
+  const procs = ORPHANS.map((p) => (p.pid === 10 ? { ...p, ppid: 90 } : p));
+  procs.push({ pid: 90, ppid: 92, cmd: 'cmd.exe /c run.cmd' }, { pid: 92, ppid: 89, cmd: 'bash.exe' }, { pid: 93, ppid: 92, cmd: 'python.exe' }); // 89 (the agent's shell) is gone
+  const r = rig({
+    procs,
+    mode: 'enforce',
+    env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT }, 92: { session: 'aaaa1111', root: ROOT }, 93: { session: 'aaaa1111', root: ROOT } },
+    root: ROOT,
+    prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL], [92, P.PRIORITY_NORMAL], [93, P.PRIORITY_NORMAL]],
+  });
+  r.started.set(92, 50);
+  r.started.set(90, 60);
+  r.started.set(93, 70);
+  const res = await r.cf.tick();
+  assert.equal(res?.orphans, 3, '41, 42 and 93 (a sibling of the wrapper, below no listener)');
+  for (const pid of [90, 92, 10, 11, 12]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid} is the runner's or above it`);
+  assert.equal(r.prio.get(93), P.PRIORITY_BELOW_NORMAL);
+});
+
+test("w6222 review: a CI job step's orphan is not an agent tool, whatever session the runner's environment carries, nor what it started or what is above it", async () => {
+  const procs = [
+    ...ORPHANS,
+    { pid: 94, ppid: 87, cmd: 'bash.exe' }, // an agent's shell, its parent gone
+    { pid: 91, ppid: 94, cmd: 'node.exe test-server.js' }, // a job step's process (the runner's env), somehow below it
+    { pid: 85, ppid: 91, cmd: 'python.exe' },
+    { pid: 86, ppid: 88, cmd: 'node.exe stray.js' }, // started by job step 88, which ended
+  ];
+  const ci = { session: 'aaaa1111', root: ROOT, ci: true };
+  const r = rig({
+    procs,
+    mode: 'enforce',
+    env: { ...ORPHAN_ENV, 94: { session: 'aaaa1111', root: ROOT }, 91: ci, 85: { session: 'aaaa1111', root: ROOT }, 86: ci },
+    root: ROOT,
+    prio: [...NORMAL_ORPHANS, ...[91, 94, 85, 86].map((p): [number, number] => [p, P.PRIORITY_NORMAL])],
+  });
+  const res = await r.cf.tick();
+  assert.equal(res?.orphans, 2, "only 41 and 42; 91 and 86 are the job's, 85 below one, 94 above one");
+  for (const pid of [91, 94, 85, 86]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid}`);
+});
+
+test("w6225 review: a runner's run.cmd wrapper is not lowered while its listener is between runs (a relaunch, exit 2 to 4)", async () => {
+  // Runner 1's listener exited and run.cmd starts the next under the same cmd.exe, while runner 2's job (10/11/12) runs.
+  const R1 = 'V:\\ffw\\ffu-runners\\ffu-lothdesktop-1';
+  const procs = [...ORPHANS, { pid: 90, ppid: 89, cmd: `cmd.exe /c "${R1}\\run.cmd"` }]; // 89, the agent's shell that started it, is gone
+  const r = rig({ procs, mode: 'enforce', env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT } }, root: ROOT, prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL]] });
+  await r.cf.tick();
+  assert.equal(r.prio.get(90), P.PRIORITY_NORMAL, 'the next listener (and its jobs) would start at the lowered priority');
+  assert.equal(r.prio.get(41), P.PRIORITY_BELOW_NORMAL, 'the real orphaned tool is still lowered');
+});
+
+test("w6225 review: a runner's conhost.exe naming only its folder is not lowered either", async () => {
+  const procs = [...ORPHANS, { pid: 90, ppid: 89, cmd: '\\??\\C:\\Windows\\system32\\conhost.exe 0x4 V:/ffw/ffu-runners/ffu-lothdesktop-1' }];
+  const r = rig({ procs, mode: 'enforce', env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT } }, root: ROOT, prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL]] });
+  await r.cf.tick();
+  assert.equal(r.prio.get(90), P.PRIORITY_NORMAL);
+});
+
+test("w6225 review: Unity's licensing client, left running after an agent's batch Unity ended, is not lowered", async () => {
+  const procs = [...ORPHANS, { pid: 90, ppid: 89, cmd: '"C:\\Program Files\\Unity\\Hub\\Editor\\6000.0.58f2\\Editor\\Data\\Resources\\Licensing\\Client\\Unity.Licensing.Client.exe" --namedPipe Unity-LicenseClient-lothsahn' }];
+  const r = rig({ procs, mode: 'enforce', env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT } }, root: ROOT, prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL]] });
+  await r.cf.tick();
+  assert.equal(r.prio.get(90), P.PRIORITY_NORMAL, 'every Unity editor on the machine talks to it');
+});
+
+test('w6225 review: Unity Hub and a tool run from a Unity Editor install are not lowered, nor what they started', async () => {
+  const procs = [
+    ...ORPHANS,
+    { pid: 90, ppid: 89, cmd: '"C:\\Program Files\\Unity Hub\\Unity Hub.exe" --silent' },
+    { pid: 91, ppid: 90, cmd: 'node.exe hub-helper.js' },
+    { pid: 92, ppid: 88, cmd: 'C:/Program Files/Unity/Hub/Editor/6000.0.58f2/Editor/Data/Tools/Bee/bee_backend.exe' },
+  ];
+  const s = { session: 'aaaa1111', root: ROOT };
+  const r = rig({ procs, mode: 'enforce', env: { ...ORPHAN_ENV, 90: s, 91: s, 92: s }, root: ROOT, prio: [...NORMAL_ORPHANS, ...[90, 91, 92].map((p): [number, number] => [p, P.PRIORITY_NORMAL])] });
+  await r.cf.tick();
+  for (const pid of [90, 91, 92]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid}`);
+});
+
+test('w6217: without an environment reader (not a real daemon) no orphan is looked for', async () => {
+  const r = rig({ procs: ORPHANS, root: ROOT, prio: NORMAL_ORPHANS });
+  const res = await r.cf.tick();
+  assert.equal(res?.orphans, 0);
+  assert.ok(!r.lines.some((l) => /orphaned|started them gone/.test(l)));
 });

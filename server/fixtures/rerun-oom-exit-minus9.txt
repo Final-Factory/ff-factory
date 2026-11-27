@@ -1,0 +1,6 @@
+2026-11-26T17:10:01.1000000Z ##[group]Run tools/run_tests_parallel.py
+2026-11-26T17:20:11.2000000Z run_tests_parallel: FAILED: ffu-audio/test/headless (exit -9); ffu-client/bin/ffu (exit -9)
+2026-11-26T17:20:11.3000000Z ##[error]Process completed with exit code 1.
+2026-11-26T17:20:12.0000000Z ##[group]Run tools/ci-runners/runner_health.sh "$(dirname "$(dirname "$RUNNER_WORKSPACE")")"
+2026-11-26T17:20:12.9000000Z runner health (ffu-biscuit-3): available 5611 MB of 27186 MB, swap free 13 MB of 8191 MB, /tmp (tmpfs) 1580 MB used
+2026-11-26T17:20:12.9100000Z ##[warning]swap is 100 % full: under memory pressure the kernel can then only drop file pages, the runner's own among them, and a starting worker can miss its job hand-off
