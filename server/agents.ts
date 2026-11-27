@@ -131,7 +131,7 @@ import { RELEASE_RULES } from './releaseLanes.ts';
 import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
 import { steamLabel, steamLacks } from '../shared/steam.ts';
 import { desktopLabel, desktopLacks, linuxLockWarn, needsWindow, pairDrivesMenus, saysNone, screenUnlockAskProblem, windowLacks } from '../shared/desktop.ts';
-import { dataDirClearedText, gameCommitAt, otherPlayerIn, gameDataDirAt, type CommitVerdict, type DataDirVerdict } from './gameDataDir.ts';
+import { dataDirClearedText, gameCommitAt, otherPlayerInWords, pairAskWords, gameDataDirAt, type CommitVerdict, type DataDirVerdict } from './gameDataDir.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
 import { TITLE_HELP, TITLE_MAX, jobTitle } from './jobTitle.ts';
@@ -2357,7 +2357,9 @@ export class Agents {
   private async clearLegacyByCommit(w: WorkItem, by: string): Promise<boolean> {
     const commit = w.pair?.commit;
     if (!w.pair?.legacyData || !commit) return false;
-    if (otherPlayerIn(w.pair.legacyData, commit)) return false;
+    // w6451: the run's own what and brief too, for a run marked from them before request_pair kept their reason in the mark.
+    const own = pairAskWords(w);
+    if (otherPlayerInWords(commit, w.pair.legacyData, own.what, own.brief)) return false;
     const v = await this.gameDataDirAt(commit).catch((): undefined => undefined);
     if (!v?.reads || !sameCommit(v.commit, commit)) return false;
     // The read awaited GitHub: act on the request as it is now, and only while it is still marked for that same commit.
@@ -2383,6 +2385,12 @@ export class Agents {
    */
   async recheckLegacyPairs(nowMs = Date.now()): Promise<string[]> {
     const done: string[] = [];
+    // w6451 (w6442's review): forget runs that started, closed or lost their mark, so the map does not grow forever.
+    const live = new Set<string>();
+    for (const w of this.store.work.values()) {
+      if ((w.status === 'new' || w.status === 'queued') && !w.sessionIds.length && w.pair?.legacyData && w.pair.commit) live.add(`${w.id} ${w.pair.commit.toLowerCase()}`);
+    }
+    for (const key of this.legacyRechecked.keys()) if (!live.has(key)) this.legacyRechecked.delete(key);
     for (const w of [...this.store.work.values()]) {
       // Not yet started: filed (new) or waiting for room (queued); a started run's legs already passed start_agent's check.
       if ((w.status !== 'new' && w.status !== 'queued') || w.sessionIds.length || !w.pair?.legacyData || !w.pair.commit) continue;

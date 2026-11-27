@@ -84,13 +84,30 @@ export const dataDirClearedText = (commit: string): string =>
  * a digit in it (so English words such as "acceded" are none); one that is `commit` (either a prefix of the other) is the
  * checked player. Any 0.50.x.y version is a build, not a commit, so nothing here checked it. Answers why, or undefined.
  */
-export function otherPlayerIn(said: string, commit: string): string | undefined {
+export function otherPlayerIn(said: string, commit: string, where = 'legacy_data'): string | undefined {
   const c = commit.toLowerCase();
   const sha = (said.match(/\b[0-9a-f]{7,40}\b/gi) ?? []).find((h) => /\d/.test(h) && !(h.toLowerCase().startsWith(c) || c.startsWith(h.toLowerCase())));
   const version = /\b0\.50\.\d+\.\d+\b/.exec(said)?.[0];
   if (!sha && !version) return undefined;
-  return `its legacy_data names ${sha ? `commit ${sha.slice(0, 10)}` : `build ${version}`}, but FF Factory checked only ${c.slice(0, 10)} for the FF_GAME_DATA_DIR backport, so the mark stays (w6235)`;
+  return `its ${where} names ${sha ? `commit ${sha.slice(0, 10)}` : `build ${version}`}, but FF Factory checked only ${c.slice(0, 10)} for the FF_GAME_DATA_DIR backport, so the mark stays (w6235)`;
 }
+
+/**
+ * w6451 (w6442's review of PR #1477): a pair run is marked from its what or brief too (mentionsLegacyPlayer), so those words
+ * may name the other player ("the host runs Steam 0.50.0.47") with legacy_data empty. The first such reason in legacy_data,
+ * what or brief, in that order, or undefined. `legacy` "none" (saysNone) is passed by the caller as ''.
+ */
+export const otherPlayerInWords = (commit: string, legacy: string, what: string, brief: string): string | undefined =>
+  (legacy ? otherPlayerIn(legacy, commit) : undefined) ?? otherPlayerIn(what, commit, 'what') ?? otherPlayerIn(brief, commit, 'brief');
+
+/** What newPair puts after the worker's own brief in a pair run's brief: the words that follow are FF Factory's, not the worker's. */
+export const PAIR_FILED_BY = '\n\nFF Factory filed this for worker ';
+
+/** w6451: a pair run's own what and brief as the worker gave them to request_pair (newPair's title and brief, less its own words). */
+export const pairAskWords = (w: { title: string; brief: string }): { what: string; brief: string } => {
+  const cut = w.brief.lastIndexOf(PAIR_FILED_BY);
+  return { what: w.title.replace(/^Pair run for w\d+: /, ''), brief: cut >= 0 ? w.brief.slice(0, cut) : w.brief };
+};
 
 // w6206: w6187's pair run was filed with a mistyped full sha (20786882d8bd6c1a…) whose first 10 characters matched the real
 // head of game PR #4382 (20786882d8c3f540…), and only its leg's own `gh pr view` caught it. request_pair and start_agent now
