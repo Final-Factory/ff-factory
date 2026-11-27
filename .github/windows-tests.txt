@@ -25,6 +25,7 @@ server/elevation.test.ts | server/elevation.ts | the real signed-in-desktop chec
 server/opsWorker.test.ts | server/opsWorker.ts | named pipes, as on the Windows portal host
 server/orchestratorMemory.test.ts | server/orchestratorMemory.ts | the memory guard's Windows path rules on a real NTFS file system
 server/junctionDelete.test.ts | server/proc.ts, server/cleanup.ts | a junction made by cmd /c mklink /J inside a folder: rd /s /q, the clean-up's fs.promises.rm, fs.rmSync and Remove-Item remove the junction and keep its target, as the worker prompt's Windows delete advice says (w6264)
+server/junctionRmWarn.test.ts | server/junctionRmWarn.ts | a junction made by cmd /c mklink /J inside a folder: the warn-only check finds it by its folder entry within its budget, and the worker guard lets an rm -r over it run with a warning and one log line (w6266)
 server/cleanup.test.ts | server/cleanup.ts | path rules on a real Windows host, where a /-rooted path resolves under C: (abea9f5: a Windows-only bug this caught on a PR)
 server/ownLeftovers.test.ts | server/ownLeftovers.ts | the clean-up plan on a real Windows file system
 server/machineUnityMcp.test.ts | machine/sandboxes.ts | the real sandbox pool's Windows commands (realPoolDeps('win32'))
