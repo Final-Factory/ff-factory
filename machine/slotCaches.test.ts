@@ -690,6 +690,25 @@ test("sharedLockBlockers: no root is one blocker; a sandbox with no marker is na
   );
 });
 
+test("review w6374: a seed or a folder on the way that is a link holds \"on\" off, and a slot never clones through it", async (t) => {
+  const kind = process.platform === "win32" ? "junction" : "dir";
+  const root = tmp(t);
+  const outside = path.join(root, "daemon");
+  put(path.join(outside, "secret"), "daemon's");
+  fs.mkdirSync(path.join(root, "cache"), { recursive: true });
+  fs.symlinkSync(outside, path.join(root, "cache", "pip"), kind);
+  const b = sharedLockBlockers(root, []);
+  assert.equal(b.length, 1, JSON.stringify(b));
+  assert.ok(b[0].startsWith(path.join(root, "cache", "pip") + " is a junction or symlink"), b[0]);
+  const p = pool(t, [{ id: "slot1", idle: true }]);
+  fs.symlinkSync(outside, seedDir(p.root, "pip"), kind);
+  await p.caches.tick();
+  const own = path.join(slotCacheDir(p.root, "slot1"), "pip");
+  assert.ok(!fs.existsSync(path.join(own, "secret")), "nothing copied from where the link leads");
+  assert.ok(p.log.some((l) => l.includes("not cloned from (w6374)")), JSON.stringify(p.log));
+  assert.ok(fs.existsSync(path.join(slotCacheDir(p.root, "slot1"), "uv", "archive-v0", "seed1", "file")), "the other caches still cloned");
+});
+
 test('sharedLockLine: nothing for off; warn and on say w5615, and blockers hold "on" off', () => {
   assert.equal(sharedLockLine("off"), undefined);
   assert.equal(sharedLockLine("off", ["x"]), undefined);
@@ -702,7 +721,7 @@ test('sharedLockLine: nothing for off; warn and on say w5615, and blockers hold 
   );
   assert.match(
     sharedLockLine("on")!,
-    /^shared lock: "on" asked, but this release enforces nothing yet and runs as warn/,
+    /^shared lock: on \(w5615\); the shared cache seeds, players, seed .* are read-only to sandbox workers.*Undo: shared_lock off/,
   );
   const held = sharedLockLine("on", ["slot2 has no clones"])!;
   assert.match(held, /on asked, but held off .*: slot2 has no clones/);

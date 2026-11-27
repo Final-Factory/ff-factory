@@ -13,6 +13,7 @@ import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from '../server/claudeHome
 import type { SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { openChildren } from './lowIntegrity.ts';
+import { sharedLockParents } from './sharedLockPaths.ts';
 import { STORE_CHILD } from './storeLock.ts';
 import { sessionIdOf } from '../server/workerFence.ts';
 import { TRANSCRIPTS, finishNewTranscripts, linkTranscripts, ownTranscriptArgs } from './transcriptLock.ts';
@@ -65,6 +66,13 @@ export interface WriteLockPaths {
   transcriptLock?: boolean;
   /** w5614: the store lock holds (machine/storeLock.ts): the main clone (`repo`) stays read-only. */
   lockStore?: boolean;
+  /**
+   * w5615: the shared lock is on (machine/sharedLockPaths.ts): players and seed stay closed, and cache and tools are opened
+   * child by child (ff-landlock.py --rw-children), less the locked seeds and tools children, so a worker can neither write
+   * them nor rename them out of their folder. Their children are listed when each locked worker starts; one made later is
+   * not writable (the daemon makes the workers' own beforehand, makeSharedLockDirs).
+   */
+  sharedLock?: boolean;
 }
 
 /**
@@ -87,12 +95,20 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
   const except = new Set<string>(LOCKED_CHILDREN);
   if (path.dirname(app) === root) except.add(path.basename(app));
   if (p.lockStore) except.add(STORE_CHILD);
+  const parents = p.sharedLock ? sharedLockParents() : new Map<string, Set<string>>();
+  if (p.sharedLock) for (const c of ['players', 'seed', ...[...parents.keys()].filter((k) => !k.includes('/'))]) except.add(c);
   // /dev: null, tty, shm, the GPU. /proc: a process's own oom_score_adj (Unity sets it); file modes still decide the rest.
   const args = ['--rw', '/dev', '--rw', '/proc'];
   // Only the root's folders workers write (w5569, as Windows since w5539): a portal, an instances folder or any new root
   // folder stays read-only until listed. A listed folder missing at start is skipped by ff-landlock.py (read-only), so
   // the daemon makes the missing ones before each locked worker starts (makeOpenRootChildren, w5676).
   for (const c of openChildren(root, p.workFolders ?? [], except)) args.push('--rw', path.join(root, c));
+  // w5615: a folder on the way to a locked one opens its other children only; one on the way below it (cache/nuget) the same.
+  for (const [dir, locked] of parents) {
+    if (!dir.includes('/') && !openChildren(root, p.workFolders ?? [], LOCKED_CHILDREN).includes(dir)) continue;
+    args.push('--rw-children', path.join(root, ...dir.split('/')));
+    for (const n of [...locked].sort()) args.push('--except', n);
+  }
   // w5702: off, the transcripts folder is open whole, and made ahead (makeOpenRootChildren) even before any `on`, so a
   // claude locked before the switch keeps its own transcript once the switch moves them there (w5718's review).
   if (!p.transcriptLock) args.push('--rw', path.join(root, TRANSCRIPTS));
