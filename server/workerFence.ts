@@ -19,6 +19,7 @@ import { FENCE_READ_ALLOW, fenceRootReadBack } from './daemonReads.ts';
 import { openChildren } from '../machine/lowIntegrity.ts';
 import { projectSlug } from './claudeHome.ts';
 import { STORE_CHILD } from '../machine/storeLock.ts';
+import { sharedLockParents, sharedLockRel } from '../machine/sharedLockPaths.ts';
 
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 
@@ -51,6 +52,17 @@ export interface WorkerFence {
   open?: string[];
   /** w5659: refuse preference writes through cfprefsd too (PREF_RULES); daemon.json `workerPrefFence: true`. */
   prefDeny?: boolean;
+  /**
+   * w5615: the shared lock is on: these paths (resolved; machine/sharedLockPaths.ts) are read-only to workers. Seatbelt
+   * matches paths, so a deny on each covers renaming it away and making a new one in its place.
+   */
+  sharedLocked?: string[];
+  /**
+   * w5615, review w6362: the folders on the way to them (cache, cache/nuget, tools; resolved). Each is denied as itself
+   * only (`literal`): a rename or removal of it is refused, while its other children stay as the root's allow left them.
+   * That a rename of a parent counts as a write to each path under it was never measured, so it is not relied on.
+   */
+  sharedLockParents?: string[];
 }
 
 /**
@@ -174,6 +186,8 @@ export function seatbeltProfile(f: WorkerFence, own?: OwnTranscript): string {
     ...READ_ONLY_IN_ROOT.subpaths.map((p) => `  (subpath ${lit(mac.join(f.root, p))})`),
     ...READ_ONLY_IN_ROOT.files.map((p) => `  (literal ${lit(mac.join(f.root, p))})`),
     ...(f.appDir && f.appDir !== mac.join(f.root, 'daemon') ? [`  (subpath ${lit(f.appDir)})`] : []),
+    ...(f.sharedLocked ?? []).map((p) => `  (subpath ${lit(p)})`),
+    ...(f.sharedLockParents ?? []).map((p) => `  (literal ${lit(p)})`),
     ')',
     ...(f.readOff ? [";; reads: the read fence is switched off on this machine (daemon_control read-fence-off, w5546)"] : readRules(f)),
     ...SIGNAL_RULES,
@@ -231,7 +245,7 @@ const confstr = (name: string) => execFileSync('/usr/bin/getconf', [name], { enc
  * The fence for this daemon's agents, or undefined when it is off: daemon.json `workerFence` is not "seatbelt", the
  * machine is not a Mac, it has no worker root, or sandbox-exec is missing.
  */
-export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS.Platform; home: string; extraWritable?: string[]; workFolders?: (string | undefined)[]; prefDeny?: boolean; lockStore?: boolean; exists?: (p: string) => boolean; getconf?: (name: string) => string }): WorkerFence | undefined {
+export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS.Platform; home: string; extraWritable?: string[]; workFolders?: (string | undefined)[]; prefDeny?: boolean; lockStore?: boolean; sharedLock?: boolean; exists?: (p: string) => boolean; getconf?: (name: string) => string }): WorkerFence | undefined {
   if (o.setting !== 'seatbelt' || (o.platform ?? process.platform) !== 'darwin' || !o.root) return undefined;
   if (!(o.exists ?? fs.existsSync)(SANDBOX_EXEC)) return undefined;
   const get = o.getconf ?? confstr;
@@ -245,6 +259,9 @@ export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS
     darwinCache: real(get('DARWIN_USER_CACHE_DIR')),
     ...(o.extraWritable?.length ? { extraWritable: o.extraWritable.map(real) } : {}),
     ...(o.prefDeny ? { prefDeny: true } : {}),
+    ...(o.sharedLock
+      ? { sharedLocked: sharedLockRel().map((r) => mac.join(real(o.root!), r)), sharedLockParents: [...sharedLockParents().keys()].map((r) => mac.join(real(o.root!), r)) }
+      : {}),
   };
 }
 

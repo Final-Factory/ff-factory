@@ -13,6 +13,7 @@ import {
   playersRpcHandlers,
   splitPlayer,
   type BrokerLaunch,
+  type PlayersBrokerDeps,
   type PlayersMarker,
 } from "./playersBroker.ts";
 import type { PlayerFence } from "./playerFence.ts";
@@ -59,6 +60,8 @@ function broker(
     ) => Promise<{ pid: number } | { refused: string }>;
     copy?: (s: string, d: string) => Promise<void>;
     platform?: NodeJS.Platform;
+    /** w5615: more of the deps (the shared lock's stageDir and lockIn). */
+    deps?: Partial<PlayersBrokerDeps>;
   } = {},
 ) {
   const root = tmp(t);
@@ -93,6 +96,7 @@ function broker(
     alive: () => state.alive,
     log: (l) => log.push(l),
     now: () => (clock += 1000),
+    ...o.deps,
   });
   const slot = (peer = 0) => path.join(root, "players", `slot3-${peer}`);
   return { root, sandbox, light, h, copies, launches, log, state, slot };
@@ -191,6 +195,41 @@ test("install copies a Windows build's folder, the runtime files left behind, an
     buildKey(path.join(b.sandbox, "win")),
     (r as { build: string }).build,
   );
+});
+
+test('shared lock "on": install copies into the caller\'s own stage, moves it into the slot and locks it there; a refused lock leaves nothing', async (t) => {
+  const locked: string[] = [];
+  let lockOk = true;
+  const stage = (sb: string) => path.join(b.root, "cache", "slots", sb);
+  const b = broker(t, {
+    deps: {
+      stageDir: (sb) => stage(sb),
+      lockIn: async (dst) => {
+        locked.push(dst);
+        if (!lockOk) fs.rmSync(dst, { recursive: true, force: true });
+        return lockOk;
+      },
+    },
+  });
+  const app = macBuild(path.join(b.sandbox, "Build"));
+  const r = (await b.h["players/install"](ME, { player: app, sha: "abc" })) as Record<string, unknown>;
+  assert.equal(r.filled, true);
+  assert.equal(b.copies.length, 1);
+  assert.ok(b.copies[0][1].startsWith(stage("slot3") + path.sep), `copied into the stage, not ${b.copies[0][1]}`);
+  assert.deepEqual(locked, [path.join(b.slot(), "player")]);
+  assert.ok(fs.existsSync(path.join(b.slot(), "player", "Game.app", "Contents", "MacOS", "Game")));
+  assert.deepEqual(fs.readdirSync(stage("slot3")), [], "nothing is left in the stage");
+  assert.equal(marker(b.slot()).state, "ready");
+  // A launch re-checks the slot: a second name planted in it since is refused.
+  const exe = path.join(b.slot(), "player", "Game.app", "Contents", "MacOS", "Game");
+  fs.linkSync(exe, path.join(b.sandbox, "mine"));
+  await refused(() => b.h["players/launch"](ME, {}), 409, /second name/);
+  fs.rmSync(path.join(b.sandbox, "mine"));
+  // The lock refuses the next build: 500, and the slot holds no build.
+  lockOk = false;
+  await refused(() => b.h["players/install"](ME, { player: app, sha: "def" }), 500, /second name; removed again/);
+  assert.ok(!fs.existsSync(path.join(b.slot(), "player")));
+  assert.deepEqual(fs.readdirSync(stage("slot3")), []);
 });
 
 test("install of the same build again reuses the slot (no second copy); a changed build or sha fills again", async (t) => {
