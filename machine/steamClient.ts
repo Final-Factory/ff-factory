@@ -111,10 +111,10 @@ export async function readSteamClient(d: SteamClientDeps): Promise<SteamClient> 
 /**
  * The desktop session once (w2459, shared/desktop.ts; w2460's rerun 2: a Mac with a locked screen takes no menu clicks).
  * macOS: CGSessionCopyCurrentDictionary through osascript (macDialogs.ts SESSION_SCRIPT, as the dialog watch reads it).
- * Windows: whether LogonUI.exe, the lock screen, runs (tasklist). Elsewhere, or when it cannot be read: unknown (undefined),
- * which locks no computer out. Never throws.
+ * Windows: whether LogonUI.exe, the lock screen, runs (tasklist). Linux (w6311): readLinuxDesktop. When a Mac or Windows
+ * reading fails: unknown (undefined), which locks no computer out. Never throws.
  */
-export async function readDesktopSession(d: Pick<SteamClientDeps, 'run' | 'platform' | 'now'>): Promise<DesktopSession | undefined> {
+export async function readDesktopSession(d: Pick<SteamClientDeps, 'run' | 'platform' | 'now'>, env: LinuxSessionEnv = linuxSessionEnv()): Promise<DesktopSession | undefined> {
   const checkedAt = d.now().toISOString();
   try {
     if (d.platform === 'darwin') {
@@ -129,10 +129,56 @@ export async function readDesktopSession(d: Pick<SteamClientDeps, 'run' | 'platf
       if (t.code !== 0) return undefined;
       return { checkedAt, ...(/^"LogonUI\.exe"/im.test(t.stdout) ? { locked: true } : {}) };
     }
+    if (d.platform === 'linux') return await readLinuxDesktop(d, env);
   } catch {
     // unknown
   }
   return undefined;
+}
+
+/** What the Linux reading needs from the daemon's own process: its uid, and its session bus when the environment names one. */
+export interface LinuxSessionEnv {
+  uid?: number;
+  env: NodeJS.ProcessEnv;
+}
+
+export const linuxSessionEnv = (): LinuxSessionEnv => ({ ...(typeof process.getuid === 'function' ? { uid: process.getuid() } : {}), env: process.env });
+
+/**
+ * A Linux desktop's lock (w6311: w6282's windowed pair leg went on biscuit behind a locked GNOME desktop and drew no frames).
+ * First GNOME's own answer, `gdbus call --session --dest org.gnome.ScreenSaver ... GetActive`: "(true,)" while the lock
+ * shield is up, "(false,)" when not (on the user's session bus: /run/user/<uid>/bus when the daemon's environment names
+ * none). Without GNOME, loginctl: the user's graphical session (show-user Display) and its
+ * LockedHint or IdleHint, either "yes" counting as locked. Neither: via "none", which placement counts as locked for work
+ * that draws a window (shared/desktop.ts heeded).
+ */
+export async function readLinuxDesktop(d: Pick<SteamClientDeps, 'run' | 'now'>, s: LinuxSessionEnv): Promise<DesktopSession> {
+  const checkedAt = d.now().toISOString();
+  const runtime = s.uid !== undefined ? `/run/user/${s.uid}` : s.env.XDG_RUNTIME_DIR;
+  const bus = s.env.DBUS_SESSION_BUS_ADDRESS || (runtime ? `unix:path=${runtime}/bus` : undefined);
+  const env = bus ? { ...s.env, DBUS_SESSION_BUS_ADDRESS: bus } : s.env;
+  try {
+    const g = await d.run('gdbus', ['call', '--session', '--dest', 'org.gnome.ScreenSaver', '--object-path', '/org/gnome/ScreenSaver', '--method', 'org.gnome.ScreenSaver.GetActive'], { ...RUN, env });
+    const m = g.code === 0 ? /^\(\s*(true|false)\s*,?\s*\)$/.exec(g.stdout.trim()) : null;
+    if (m) return { checkedAt, via: 'gnome', ...(m[1] === 'true' ? { locked: true } : {}) };
+  } catch {
+    // no gdbus: loginctl
+  }
+  try {
+    const who = s.uid !== undefined ? String(s.uid) : s.env.USER;
+    if (who) {
+      const u = await d.run('loginctl', ['show-user', who, '-p', 'Display', '--value'], RUN);
+      const session = u.code === 0 ? u.stdout.trim() : '';
+      if (/^[\w-]+$/.test(session)) {
+        const r = await d.run('loginctl', ['show-session', session, '-p', 'LockedHint', '-p', 'IdleHint'], RUN);
+        const hint = (k: string) => new RegExp(`^${k}=(yes|no)$`, 'm').exec(r.stdout)?.[1];
+        if (r.code === 0 && (hint('LockedHint') || hint('IdleHint'))) return { checkedAt, via: 'loginctl', ...(hint('LockedHint') === 'yes' || hint('IdleHint') === 'yes' ? { locked: true } : {}) };
+      }
+    }
+  } catch {
+    // no loginctl: unknown
+  }
+  return { checkedAt, via: 'none' };
 }
 
 /** The daemon's watch of its Steam client: reads it every READ_EVERY_MS, sends it when it changed, and again after each hello. */

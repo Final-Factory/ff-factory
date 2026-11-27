@@ -130,7 +130,7 @@ import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
 import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
 import { steamLabel, steamLacks } from '../shared/steam.ts';
-import { desktopLabel, desktopLacks, needsWindow, pairDrivesMenus, saysNone, screenUnlockAskProblem, windowLacks } from '../shared/desktop.ts';
+import { desktopLabel, desktopLacks, linuxLockWarn, needsWindow, pairDrivesMenus, saysNone, screenUnlockAskProblem, windowLacks } from '../shared/desktop.ts';
 import { dataDirClearedText, gameDataDirAt, type DataDirVerdict } from './gameDataDir.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
@@ -6742,6 +6742,9 @@ A report is for a person who asked for one, and people want very few. File one w
       // w2459 (w2460's rerun 2): a leg that clicks the game's menus is never started behind a locked screen.
       const locked = pairDrivesMenus(w.pair) ? desktopLacks(l.machine, m?.desktop) : undefined;
       if (locked) throw new Error(`${leg}: ${locked}, and ${w.id}'s legs click the game's menus, which take no clicks there: its legs go only on computers whose screen is unlocked (${fitNow()}). Nothing was started.`);
+      // w6311: a Linux reading is warn-only until LINUX_LOCK_ENFORCED; the portal log says what it would refuse.
+      const wouldNot = pairDrivesMenus(w.pair) ? linuxLockWarn(l.machine, m?.desktop) : undefined;
+      if (wouldNot) console.log(`${w.id} ${leg}: ${wouldNot}`);
     }
     if (w.pair?.steam) {
       // w2459: two legs on one Steam account cannot meet in a lobby (one account is signed in on one computer at a time).
@@ -7857,6 +7860,9 @@ A report is for a person who asked for one, and people want very few. File one w
             // w4868: work that draws a window never starts on a computer whose screen is locked (unfitWhy says the same).
             const lockedNo = pinOn && w && needsWindow(w, a.prompt) ? windowLacks(pinOn, this.store.machines.get(pinOn)?.desktop) : undefined;
             if (lockedNo) throw new Error(`${w!.id} draws a window (a capture, a screenshot, play mode, the FFU client's window; read from its words, or decide_work window true) and ${lockedNo}: a window there draws no frames (w4868, lothsahn: "Only run work on m3 it can do with the screen locked"). Start it on a computer whose screen is unlocked, or leave it Queued (decide_work queue): it waits for one, never for a person. If it runs headless (batchmode, EditMode tests, code), say so with decide_work window false and start it here.`);
+            // w6311: a Linux reading is warn-only until LINUX_LOCK_ENFORCED; the portal log says what it would refuse.
+            const wouldNot = pinOn && w && needsWindow(w, a.prompt) ? linuxLockWarn(pinOn, this.store.machines.get(pinOn)?.desktop) : undefined;
+            if (wouldNot) console.log(`${w!.id} on ${pinOn}: ${wouldNot}`);
             // w3396: no new FFU (cargo) worker on a sandbox drive under 30 GB free; it stays Queued (unfitWhy says the same).
             const cargoOn = ctx.role === 'dispatcher' && w && isCargoRepo(w.repo) && !a.disk_cleanup ? (lightOn ?? this.newWorkOn(a.sandbox, a.machine)) : undefined;
             const cargoNo = cargoOn ? cargoShortOf(this.machines.diskRoom(cargoOn)?.freeBytes) : undefined;
