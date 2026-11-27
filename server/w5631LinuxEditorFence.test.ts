@@ -206,3 +206,10 @@ test('w6356 (review of w5631): under Landlock the seeding child seeds the home a
   assert.ok(!fs.existsSync(path.join(real, 'x')));
   fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+test('w5631: the Linux editor fence is off unless daemon.json says editorFence true (Landlock aborts a windowed editor in GTK)', () => {
+  const src = fs.readFileSync(path.join(import.meta.dirname, '..', 'machine', 'daemon.ts'), 'utf8');
+  const body = src.slice(src.indexOf('private linuxEditorFence()'), src.indexOf('this.linuxEditorMemo = { fence }'));
+  assert.match(body, /if \(this\.cfg\.editorFence !== true\) log\(/);
+  assert.ok(body.indexOf('editorFence !== true') < body.indexOf('linuxEditorFenceFor('), 'decided before any rules are made');
+});
