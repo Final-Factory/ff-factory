@@ -228,3 +228,13 @@ test('w5223: the backfill keeps people-asked and cost reports, and hides unmarke
   assert.equal(t('FFU M5 run-cost refresh', { report: undefined, humanAsked: false }), 'people');
   assert.equal(t('Profile', undefined), 'people');
 });
+
+test('w6382: warmExcerpts works out every excerpt ahead, and all() then lists the same', async (t) => {
+  const { store, open } = setup(t);
+  store.file({ title: 'Late-game frame time', kind: 'profile', body: '# Result\n\n**Measured**: 41 ms a frame on [M3](http://x).' }, w2531, 'sess-1');
+  store.file({ title: 'Belt UI options', kind: 'design', body: 'Three options.' }, w2600, 'sess-2');
+  const fresh = open();
+  assert.equal(await fresh.warmExcerpts(0), 2);
+  assert.deepEqual(fresh.all(), open().all());
+  assert.equal(fresh.all().find((r) => r.id === 'r1')?.excerpt, 'Result Measured: 41 ms a frame on M3.');
+});
