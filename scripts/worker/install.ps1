@@ -60,6 +60,11 @@
   With -Update (w6305, docs/worker-root.md "After a sharedLock switch"): set what the daemon does with an idle agent
   adopted across a sharedLock switch in daemon.json (hostRestage), as ops_worker machine_update host_restage does: on
   ends that agent between turns, never mid-turn, so its next message starts a host on the new mode; warn (the default)
+.PARAMETER LongRuns
+  With -Update (w6367, machine/longRuns.ts): set the long-run route in daemon.json (longRuns), as ops_worker machine_update
+  long_runs does: the route that starts a sanctioned long run (the nightly) outside its worker's agent host; warn (the
+  default) logs and refuses so the caller starts it as before, on starts it, off refuses; warn or off is the way back.
+  Left out: the install keeps what it has.
   only logs it (the recovery). Left out: the install keeps what it has.
 .PARAMETER DaemonTmpdir
   With -Update (w6000, docs/worker-root.md): set the daemon's own temp folder in daemon.json (daemonTmpdir), as ops_worker
@@ -142,6 +147,7 @@ param(
     [ValidateSet('off', 'warn', 'on')][string]$StoreLock,
     [ValidateSet('off', 'warn', 'on')][string]$SharedLock,
     [ValidateSet('warn', 'on')][string]$HostRestage,
+    [ValidateSet('off', 'warn', 'on')][string]$LongRuns,
     [ValidateSet('warn', 'on')][string]$MediumAgentFolders,
     [ValidateSet('on', 'off')][string]$DaemonTmpdir,
     [ValidateSet('warn', 'on')][string]$ToolsDiskLock,
@@ -316,6 +322,7 @@ if ($Update) {
     if ($StoreLock) { $argv += @('--store-lock', $StoreLock) }
     if ($SharedLock) { $argv += @('--shared-lock', $SharedLock) }
     if ($HostRestage) { $argv += @('--host-restage', $HostRestage) }
+    if ($LongRuns) { $argv += @('--long-runs', $LongRuns) }
     if ($MediumAgentFolders) { $argv += @('--medium-agent-folders', $MediumAgentFolders) }
     if ($DaemonTmpdir) { $argv += @('--daemon-tmpdir', $DaemonTmpdir) }
     if ($ToolsDiskLock) { $argv += @('--tools-disk-lock', $ToolsDiskLock) }

@@ -102,6 +102,56 @@ anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macO
   reason added to it, so the refusal says which. `start_agent` makes the same check for a marked pair run that has a commit
   (one filed before w6189, or by hand) and clears the mark on the request before its legs are checked.
 
+## Long runs the daemon starts for a worker (w6367, Windows)
+
+The nightly e2e worker starts the night and stops between check-ins, while the night runs for hours. On LothDesktop, the
+nights of 2026-11-26 and 11-27 died within a second of the daemon replacing their worker's agent host for a code update
+(w2625, the daemon log line "agent host 0e4d75cd: a message for FF Factory code ..."). Neither night ran its exit trap
+(w6360).
+
+The worker job (winJob.cs) has no kill-on-close, so the job itself does not kill the night. What kills it is this:
+
+- Claude Code's Bash tool runs each command inside the kill-on-close job that Node's libuv makes for its children.
+- A `nohup ... & disown` night survived that only while Git Bash could break it away.
+- Since w5554 (a1db8f04) the worker caps' job allows no breakaway.
+
+So the night ended with claude, whatever ended claude: a host swap, a usage limit, a stop to move the worker, or a
+paused machine's deadline. That is why holding the swap back (option c of w6367) would not have been enough.
+
+The route (`machine/longRuns.ts`, RPC `runs/start` and `runs/status`) leaves that fence closed. The **daemon** starts the run,
+so the run is not a process of the worker's host, its claude or their jobs. It is still fenced like its worker:
+
+- **Low integrity**, through the Low node copy, as the players broker's players are. With no Low copy the call is refused;
+  the run is never started at the daemon's Medium integrity.
+- **A job of its own**, with the worker caps' mode and limits: no breakaway, and under `enforce` the commit and process
+  limits. A keeper node joins that job (ffjob.exe says ready) before it gets "go" and starts the run as its child, so
+  everything the run starts lands in the job. If no job can be made, there is no run: the keeper is killed before "go".
+- **No FF_SESSION_ID or FF_FOR_PERSON**, so the leftovers sweep and the worker's own `ff-leftovers end` leave it alone.
+  `FF_LONG_RUN=<id>` names it instead. The record of each run is in `<appDir>/long-runs/<id>.json`, and the daemon log has
+  "long runs: started <id> ...".
+- **Only fixed routes**, a sandbox worker's only, at most 2 live per sandbox:
+  - `nightly` runs the game repo's `scripts/nightly/nightly_run.sh` in the caller's own sandbox, as a plain file there (no
+    link out). It is allowed only for a session the portal marks exempt "nightly", meaning it works an open nightly-run
+    request. Its environment comes from an env file the worker writes under the worker root; the daemon reads that file,
+    removes it, and drops the variables above from it.
+  - `probe` is the daemon's own few lines: an exit trap and an "alive" line every minute, for at most 6 hours, written
+    under `<root>/tmp` or the sandbox. It runs with a bare environment. It exists to prove the route on a machine.
+  - Nothing else a worker names is run.
+
+daemon.json `longRuns` (`ops_worker machine_update long_runs off|warn|on`):
+
+- `warn` is the default (lothsahn's lockout rule). Every check is made and the daemon logs "long runs (warn): would start
+  ... ready" (or "could not now: <why>"). It then answers `started: false`, and the caller starts the run itself as before.
+- `on` starts the run.
+- `off` refuses at once.
+
+The game's client falls back to its old start on any refusal or error, so `warn` or `off` is the way back, with nobody at the
+machine. On macOS and Linux the route refuses for now and the caller starts the run itself (only the Windows case was
+measured).
+
+Not covered: a run started this way still ends if the daemon's own job is ended. The daemon is not restarted by a worker's
+host swap, so that limit does not affect the case above.
+
 ## How it works
 
 `server/workerFence.ts`. The daemon's `runSpec` (machine/daemon.ts) adds `fence` to a sandbox agent's spec; `buildOptions`

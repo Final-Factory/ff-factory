@@ -37,11 +37,12 @@ import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } fr
 import { DaemonWrites, SlotCaches, asDaemonWrite, idleForRefresh, inFolder, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
 import { playersRpcHandlers } from './playersBroker.ts';
 import { brokerLauncher } from './playersLaunch.ts';
+import { longRunsRpcHandlers, longRunsSetting } from './longRuns.ts';
 import { playerFenceFor, type PlayerFence } from './playerFence.ts';
 import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, unlinkShimBinLink, watchShimBin, retryShimWrite, type ShimModeGuard } from './pathFence.ts';
 import { isSlotRepo } from './slotRepo.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState, restageModeOf } from './agentHost.ts';
-import { capsModeOf } from './workerCaps.ts';
+import { capsModeOf, jobHelper } from './workerCaps.ts';
 import { junctionRmSignalLine } from '../server/junctionRmWarn.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
@@ -349,6 +350,13 @@ export interface DaemonConfig {
    * FF_PLAYER_BROKER): "warn" (default) logs it; "on" ends its agent between turns so its next message starts a new host.
    */
   hostRestage?: 'warn' | 'on';
+  /**
+   * w6367: the long-run route (machine/longRuns.ts): the daemon starts a sanctioned long run (the nightly) for a worker,
+   * outside that worker's host and jobs, so it outlives the host. "warn" (default) checks and logs what it would start and
+   * refuses, so the caller starts it itself as before; "on" starts it; "off" refuses at once. Set remotely by
+   * `ops_worker machine_update long_runs`; warn or off is the way back.
+   */
+  longRuns?: 'off' | 'warn' | 'on';
   /** The sandbox pool (add_machine sandbox_root and limits; docs/machines.md "Machine sandboxes"); the portal's welcome overrides it. */
   sandboxes?: SandboxPoolSettings;
   /** Stop a sandbox editor after this long without agent activity there (default 120; 0: never). */
@@ -2327,7 +2335,7 @@ export class Daemon {
       key: this.rpcKey,
       infoFile: rpcInfoFile(appDirOfConfig(this.cfg)),
       alsoInfoFile: legacyRpcInfoFile(appDirOfConfig(this.cfg)),
-      handlers: { ...slotRpcHandlers(this.slots.dir, { filed: () => void this.slots.tick() }), ...(this.benchProxy?.handlers() ?? {}), ...this.playersHandlers() },
+      handlers: { ...slotRpcHandlers(this.slots.dir, { filed: () => void this.slots.tick() }), ...(this.benchProxy?.handlers() ?? {}), ...this.playersHandlers(), ...this.longRunsHandlers() },
       ...(this.cfg.root ? { benchLock: benchLockDir(this.cfg.root) } : {}),
       log: (line) => log(line),
     });
@@ -3932,6 +3940,25 @@ export class Daemon {
       log: (l) => log(l),
     });
     return Object.fromEntries(Object.entries(handlers).map(([k, h]): [string, RpcHandler] => [k, (c, b) => this.sharedWrite(() => h(c, b), [path.join(root, 'players')])]));
+  }
+
+  /** w6367: the long-run route (machine/longRuns.ts), behind daemon.json `longRuns` (warn by default). */
+  private longRunsHandlers(): Record<string, RpcHandler> {
+    const root = this.cfg.root;
+    if (!root) return {};
+    const appDir = appDirOfConfig(this.cfg);
+    return longRunsRpcHandlers({
+      root,
+      dir: path.join(appDir, 'long-runs'),
+      mode: () => longRunsSetting(this.cfg.longRuns),
+      capsMode: () => capsModeOf(this.cfg.workerCaps),
+      sandboxPath: (id) => this.pool.list().find((sb) => sb.id === id)?.path,
+      isNightly: (session) => this.benchMarks[session]?.exempt === 'nightly',
+      lowNode: () => this.lowMake(process.execPath),
+      bash: () => agentGitBash(root),
+      jobHelper: () => jobHelper(appDir, (l) => log(l)),
+      log: (l) => log(l),
+    });
   }
 
   private fenceMemo?: { fence?: WorkerFence; why?: string };

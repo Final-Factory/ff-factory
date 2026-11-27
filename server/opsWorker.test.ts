@@ -1124,6 +1124,17 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['-HostRestage on']);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['--host-restage on'], 'every OS');
   assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined), [], 'unset: no flag');
+  // w6367: long runs, off, warn or on and nothing else, every OS; the link and ssh routes both carry it.
+  for (const bad of ['enforce', 'ON', '']) assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', longRuns: bad as never }), /long_runs: off, warn or on/);
+  for (const m of ['off', 'warn', 'on'] as const) {
+    ops.machineInstall(ben, { machine: 'beast', workId: 'w847', longRuns: m });
+    await new Promise((r) => setTimeout(r, 300));
+    const lrWin = store.readTranscript(OPS_ID, 340).filter((e) => e.kind === 'user').at(-1) as { text: string };
+    assert.ok(lrWin.text.includes(`-LongRuns ${m}"'`), lrWin.text);
+  }
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['-LongRuns on']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'off'), ['--long-runs off'], 'every OS');
+  assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined), [], 'unset: no flag');
   ops.close();
 });
 
