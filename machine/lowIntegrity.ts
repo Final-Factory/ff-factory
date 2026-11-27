@@ -626,6 +626,18 @@ export function lockCopyScript(p: string): string {
 const psqLock = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
 /**
+ * w6321: a PowerShell script that removes these files with .NET's File.Delete (DeleteFileW: DELETE access alone, which the
+ * folder's delete-child right gives where the file's own access list is read and run only), and says `gone <i>` or
+ * `err <i> <why>` for each. Exported for tests.
+ */
+export function deleteFilesScript(paths: readonly string[]): string {
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    ...paths.map((p, i) => `try { [System.IO.File]::Delete(${psqLock(p)}); if ([System.IO.File]::Exists(${psqLock(p)})) { 'kept ${i}' } else { 'gone ${i}' } } catch { 'err ${i} ' + $_.Exception.GetBaseException().Message }`),
+  ].join('\n');
+}
+
+/**
  * The Low-labelled copies of claude, node and gh in `<root>\tools\low` the daemon runs (w5333, w5540, w5430): a process
  * started from a Low-labelled file runs at Low. Each is named by its source's size and mtime, so a new claude gets a new
  * copy; copies of older builds are removed when nothing runs them.
@@ -651,13 +663,17 @@ export class LowCopies {
   private exec: ExecSync;
   private account: string | undefined;
   private hash: (p: string) => string;
+  private remove: (p: string) => void;
+  /** w6321: the old copies already said kept (still running) in this daemon run. */
+  private keptSaid = new Set<string>();
 
-  constructor(root: string, say: (line: string) => void, exec: ExecSync = execSync, account: string | undefined = currentAccount(), hash: (p: string) => string = fileHash) {
+  constructor(root: string, say: (line: string) => void, exec: ExecSync = execSync, account: string | undefined = currentAccount(), hash: (p: string) => string = fileHash, remove: (p: string) => void = removeEntry) {
     this.root = root;
     this.say = say;
     this.exec = exec;
     this.account = account;
     this.hash = hash;
+    this.remove = remove;
   }
 
   private sourceHash(exe: string): string {
@@ -687,26 +703,22 @@ export class LowCopies {
       const base = path.basename(exe, path.extname(exe));
       const stem = `${base}-${st.size}-${Math.floor(st.mtimeMs)}`;
       const want = this.sourceHash(exe);
-      let copy: string | undefined;
-      for (let n = 0; n < COPY_SLOTS && !copy; n++) {
-        const p = path.join(dir, `${stem}${n ? `-${n}` : ''}${path.extname(exe)}`);
-        if (!fs.existsSync(p)) {
-          copy = p;
-          break;
-        }
-        const ours = this.copies.get(p)?.source === exe;
-        if (ours && this.sameAs(p, want)) return p;
+      const names = Array.from({ length: COPY_SLOTS }, (_, n) => path.join(dir, `${stem}${n ? `-${n}` : ''}${path.extname(exe)}`));
+      for (const p of names) if (this.copies.get(p)?.source === exe && fs.existsSync(p) && this.sameAs(p, want)) return p;
+      // w6321: every taken name is an earlier run's copy or not its source's bytes, so all of them go in one pass (one
+      // PowerShell call where Node cannot remove them, removeCopies); one still running is kept and its name skipped.
+      const taken = names.filter((p) => fs.existsSync(p));
+      for (const p of taken) {
         if (!this.sameAs(p, want)) this.say(`worker integrity: WARNING: the Low copy ${p} is not ${exe} (its bytes differ, or it cannot be read); made again (w5838)`);
         else this.say(`worker integrity: ${p} was made by an earlier daemon run; made again, never taken over (w5838)`);
-        try {
-          removeEntry(p);
-          this.copies.delete(p);
-          copy = p;
-        } catch {
-          /* still running from an earlier daemon run: the next name, and the next start removes it */
-        }
       }
-      if (!copy) throw new Error(`no free name for it in ${dir} (${COPY_SLOTS} copies of it still running?)`);
+      const kept = this.removeCopies(taken);
+      for (const [p, why] of kept) {
+        this.keptSaid.add(p);
+        this.say(`worker integrity: could not remove ${p} (${why}); its name is skipped (w6321)`);
+      }
+      const copy = names.find((p) => !fs.existsSync(p));
+      if (!copy) throw new Error(`no free name for it in ${dir}: ${COPY_SLOTS} copies of it could not be removed (still running?); the last said: ${[...kept.values()].pop() ?? 'nothing'} (w6321)`);
       const part = `${copy}.part`;
       fs.rmSync(part, { force: true });
       fs.copyFileSync(exe, part);
@@ -729,21 +741,75 @@ export class LowCopies {
       // Checked once it is labelled and read-only, so nothing written before that is run.
       if (this.hash(copy) !== want) throw new Error(`its bytes differ from ${exe} after copying`);
       this.copies.set(copy, { source: exe, readOnly });
-      for (const old of fs.readdirSync(dir)) {
-        if (old !== path.basename(copy) && old.startsWith(`${base}-`)) {
-          try {
-            fs.rmSync(path.join(dir, old), { force: true });
-            this.copies.delete(path.join(dir, old));
-          } catch {
-            /* still running: the next start removes it */
-          }
-        }
-      }
+      this.prune(dir, copy);
       return copy;
     } catch (e) {
       this.say(`worker integrity: could not make a Low copy of ${exe}: ${(e as Error).message}`);
       return undefined;
     }
+  }
+
+  /**
+   * w6321: removes earlier copies (its own older ones and every earlier daemon run's) of claude, node and gh, all but
+   * `keep`: the names and the disk come back by themselves. Windows refuses to remove a file a live process runs (measured
+   * on LothDesktop: Node's rmSync and .NET's File.Delete both, EPERM / access denied), so one still running stays and is
+   * tried again after the next copy is made; it is said once per daemon run, not at every make.
+   */
+  private prune(dir: string, keep: string): void {
+    // This run's copies of other programs stay (each still its program's copy); its own older one of `keep`'s program goes.
+    const current = new Set([...this.copies].filter(([p, c]) => p !== keep && c.source !== this.copies.get(keep)?.source).map(([p]) => p));
+    const old = fs.readdirSync(dir).filter((n) => LOW_COPY_NAME.test(n)).map((n) => path.join(dir, n)).filter((p) => p !== keep && !current.has(p));
+    for (const [p, why] of this.removeCopies(old)) {
+      if (this.keptSaid.has(p)) continue;
+      this.keptSaid.add(p);
+      this.say(`worker integrity: kept the old Low copy ${p} (${why}; still running?); tried again after the next copy is made (w6321)`);
+    }
+  }
+
+  /**
+   * w6321: removes these copies; answers the ones still there, each with why. Node 22's unlink (libuv) opens a file for
+   * FILE_WRITE_ATTRIBUTES as well as DELETE, which a read-only copy's access list (OWNER RIGHTS:(RX)) refuses, so it
+   * answers EPERM (measured on LothDesktop: Node 22.17.1 EPERM, Node 24.22.1 removes it); .NET's File.Delete
+   * (DeleteFileW) asks for DELETE alone, which the folder's delete-child right gives, so those go in one PowerShell call.
+   * A copy a live process runs is refused by Windows either way (measured), so it is never removed.
+   */
+  private removeCopies(paths: readonly string[]): Map<string, string> {
+    const kept = new Map<string, string>();
+    const retry: { p: string; why: string }[] = [];
+    for (const p of paths) {
+      try {
+        this.remove(p);
+        this.copies.delete(p);
+      } catch (e) {
+        const err = e as NodeJS.ErrnoException;
+        const why = err.code ?? err.message;
+        let file = false;
+        try {
+          file = fs.lstatSync(p).isFile();
+        } catch {
+          /* gone after all */
+        }
+        if (file && (err.code === 'EPERM' || err.code === 'EACCES')) retry.push({ p, why });
+        else if (fs.existsSync(p)) kept.set(p, `${why}: ${err.message}`.slice(0, 300));
+        else this.copies.delete(p);
+      }
+    }
+    if (!retry.length) return kept;
+    const r = this.exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(deleteFilesScript(retry.map((x) => x.p)), 'utf16le').toString('base64')]);
+    const said = new Map<number, string>();
+    for (const l of r.stdout.split(/\r?\n/)) {
+      const m = /^(gone|kept|err) (\d+) ?(.*)$/.exec(l.trim());
+      if (m) said.set(Number(m[2]), m[1] === 'err' ? m[3] : m[1]);
+    }
+    retry.forEach(({ p, why }, i) => {
+      if (said.get(i) === 'gone' && !fs.existsSync(p)) {
+        this.copies.delete(p);
+        return;
+      }
+      const ps = said.get(i) ?? ((r.stderr || r.stdout).trim().slice(-200) || `no answer (exit ${r.code})`);
+      kept.set(p, `Node: ${why}; File.Delete: ${ps}`.slice(0, 300));
+    });
+    return kept;
   }
 
   /**
