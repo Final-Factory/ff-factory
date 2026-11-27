@@ -308,7 +308,7 @@ test('runner: hourly, every 15 minutes below the soft threshold, one notice a da
   assert.equal(low?.belowSoft, true);
   assert.equal(low?.failed, 1);
   assert.equal(notices.length, 1);
-  assert.match(notices[0], /freed 2\.0 GB \(1 item\(s\)\) but only 100\.0 GB is free on disk, below the soft threshold of 120 GB/);
+  assert.match(notices[0], /freed 2\.0 GB \(1 item\(s\)\) but only 100\.0 GB is free on disk(?: \([^)]*\))?, below the soft threshold of 120 GB/);
   assert.match(notices[0], /Biggest remaining: C:\/Users\/rydin\/FFAlt 110\.0 GB/);
   assert.match(notices[0], /FFAlt\/Library \(400 days\)/);
   for (let i = 0; i < 4; i++) {
@@ -399,7 +399,7 @@ test('runner: a RAM-backed temp folder (the VM\'s tmpfs /tmp) is never the disk;
   assert.equal(low?.trigger, 'low-space');
   assert.equal(low?.freeBytes, 50 * GB);
   assert.equal(low?.belowSoft, true);
-  assert.match(notices[0], /only 50\.0 GB is free on disk, below the soft threshold of 60 GB/);
+  assert.match(notices[0], /only 50\.0 GB is free on disk(?: \([^)]*\))?, below the soft threshold of 60 GB/);
 
   // A temp folder on the disk's own volume (Ubuntu 24.04, or tmp.mount masked) is not listed again.
   vols['/srv/fff/data'] = { ...vols['/srv/fff/data'], free: 101 * GB };
@@ -552,5 +552,33 @@ test("w1918: the soft threshold is at most a quarter of the volume's size, never
   free = 15 * GB;
   const low = await r.run('hourly');
   assert.equal(low?.belowSoft, true);
-  assert.match(notices[0], /only 15\.0 GB is free on disk, below the soft threshold of 20 GB/);
+  assert.match(notices[0], /only 15\.0 GB is free on disk(?: \([^)]*\))?, below the soft threshold of 20 GB/);
+});
+
+test('w6551: the notice reports free space read when a long pass ends, says when, and notes the overrun', async () => {
+  let free = 10 * GB;
+  let now = 0;
+  const notices: string[] = [];
+  const r = new CleanupRunner({
+    settings: () => ({ everyMinutes: 30, softFreeGB: 30 }),
+    diskPaths: () => ['/d'],
+    statfs: async () => ({ total: 200 * GB, free }),
+    pass: async () => {
+      now += 52 * 60_000; // the pass takes 52 min, and space recovers meanwhile
+      free = 11 * GB;
+      return { removed: [], failed: [], bytes: 0 };
+    },
+    consumers: async () => {
+      free = 10.9 * GB;
+      return [];
+    },
+    log: () => undefined,
+    done: (_s, n) => void (n && notices.push(n)),
+    now: () => now,
+  });
+  const s = await r.run('hourly');
+  assert.equal(s?.freeBytes, 10.9 * GB, 'the figure from the end, not the start (10 GB)');
+  assert.equal(s?.overranMinutes, 30);
+  assert.match(notices[0], /only 10\.9 GB is free on disk \(read at 00:52:00Z, when the pass ended\)/);
+  assert.match(notices[0], /ran 52\.0 min, longer than its 30 min interval/);
 });

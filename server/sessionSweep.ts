@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { hasLocalWork, neverDelete, runCleanup, touchedSince, within, type CleanupGuard, type CleanupItem, type CleanupRun } from './cleanup.ts';
 import { descendants, type ProcLite } from './installLeftovers.ts';
-import { mentions } from './ownLeftovers.ts';
+import { expandShortNamesAsync, mentionsKnown, realAsync } from './ownLeftovers.ts';
 
 /**
  * A worker's own temp folder, swept by the daemon once the worker has left (w913, lothsahn, 2026-10-10: "Random clean up
@@ -91,7 +91,12 @@ export async function planSessionSweep(o: {
   const self = new Set(o.self ?? []);
   if (!within(o.dir, o.root) || path.resolve(o.dir) === path.resolve(o.root) || !/^ffa-/i.test(path.basename(o.dir))) return plan;
   // A process that names the folder (a build started in it, a watcher): the whole folder waits.
-  const holders = (o.procs ?? []).filter((p) => !self.has(p.pid) && mentions(p.cmd, o.dir));
+  // w6553: the folder's real path once, and every file system look off the event loop (BEAST's daemon held its loop 891 s
+  // in synchronous realpaths of this folder, one per process, 2026-11-27 22:06-22:21Z).
+  const others = (o.procs ?? []).filter((p) => !self.has(p.pid));
+  const realDir = others.length ? await realAsync(o.dir) : o.dir;
+  const holders: ProcLite[] = [];
+  for (const p of others) if (mentionsKnown(await expandShortNamesAsync(p.cmd), o.dir, realDir)) holders.push(p);
   if (holders.length) {
     const live = new Set<number>();
     for (const h of holders) for (const p of [h, ...descendants(o.procs ?? [], h.pid)]) live.add(p.pid);
