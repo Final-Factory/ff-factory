@@ -597,6 +597,7 @@ export class BlockerWatch {
     const said = Date.parse(s.lastResultAt ?? s.lastActivityAt) || 0;
     const t = this.d.store.work.get(on.toLowerCase());
     const actedSince = t?.sessionIds.some((sid) => {
+      if (!onRequest(t, sid)) return false;
       const x = this.d.store.sessions.get(sid);
       return x?.kind === 'worker' && (Date.parse(x.lastResultAt ?? '') || 0) > said;
     });

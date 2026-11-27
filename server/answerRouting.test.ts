@@ -14,6 +14,8 @@ import type { Requester, SessionInfo, UserInfo, WorkItem } from '../shared/types
 import { isWith, latestWorker } from '../shared/blockers.ts';
 import { holdsOf } from '../shared/workState.ts';
 import { BlockerWatch } from './blockerWatch.ts';
+import { readScope } from './workRead.ts';
+import { holdsWorker } from '../shared/waiting.ts';
 
 /**
  * w6047 (the w6253 review asked for it): one table of where answerNeedsYou sends a person's [answer], over every shape the
@@ -501,4 +503,47 @@ test('R4-C a report of its merged-back moved-off worker does not count as the re
   const f = bw!.facts(new Map(), new Map(), new Map());
   assert.equal(f.reportedSince(w, since, { notCheckIn: true }), false, 'a worker off w5869 since its move does not count as its worker reporting');
   assert.equal(f.deliveredSince(w, since), false, 'nor as its worker delivering (deliveredSince)');
+});
+
+// The w6331 review of #1430 (round 5): routes the rule had not named.
+test('W6331-P1 SUPERSEDED from a merged-back moved-off worker does not close the request', async (t) => {
+  const env = await setup(t, 'on');
+  aloneMergedBack(env);
+  const o = env.agents.orchestrators;
+  o.workerTurnEnded(env.store.sessions.get(E)!, 'It is covered by w1234.\n\nSUPERSEDED: w5869 by w1234');
+  const w = env.store.work.get('w5869')!;
+  assert.notEqual(w.status, 'cancelled', `closed: ${w.outcome}`);
+});
+test('W6331-P1b SUPERSEDED with a hand-back', async (t) => {
+  const env = await setup(t, 'on');
+  handedBackMergedBack(env);
+  env.agents.orchestrators.workerTurnEnded(env.store.sessions.get(E)!, 'It is covered by w1234.\n\nSUPERSEDED: w5869 by w1234');
+  const w = env.store.work.get('w5869')!;
+  assert.notEqual(w.status, 'cancelled', `closed: ${w.outcome}`);
+});
+test('W6331-P2 workersOn (start_agent / startTimedLeg duplicate check) leaves out a merged-back moved-off worker', async (t) => {
+  const env = await setup(t, 'on');
+  const w = handedBackMergedBack(env);
+  const s = env.store.sessions.get(E)!; s.status = 'idle' as SessionInfo['status']; env.store.putSession(s);
+  const on = (env.agents as unknown as { workersOn: (w: WorkItem) => string[] }).workersOn(w);
+  assert.deepEqual(on, [], `start would be refused: "already has ${on.join(', ')}"`);
+});
+test('W6331-P3 LEG DONE from a merged-back moved-off worker is not recorded', async (t) => {
+  const env = await setup(t, 'on');
+  aloneMergedBack(env);
+  env.agents.orchestrators.workerTurnEnded(env.store.sessions.get(E)!, 'My leg.\n\nLEG DONE: w5869 my leg');
+  assert.ok(!env.store.work.get('w5869')!.done?.[E], 'leg recorded as done');
+});
+test('W6331-P4 runningLegs leaves out a merged-back moved-off worker', async (t) => {
+  const env = await setup(t, 'on');
+  const w = aloneMergedBack(env);
+  const s = env.store.sessions.get(E)!; s.status = 'running' as SessionInfo['status']; env.store.putSession(s);
+  assert.deepEqual(env.agents.orchestrators.runningLegs(w), []);
+});
+test('w6331 sweep: a merged-back moved-off worker gets no read scope of it and is held by none of its waits (readScope, holdsWorker)', async (t) => {
+  const env = await setup(t, 'on');
+  const w = aloneMergedBack(env);
+  assert.ok(!readScope([...env.store.work.values()], E).own.includes('w5869'), 'readScope');
+  const waits = [{ id: E, kind: 'worker', status: 'idle', waitingOn: { who: 'lothsahn', what: 'an OK', at: OLD, request: 'w5869' } }] as SessionInfo[];
+  assert.equal(holdsWorker(w, waits), false, 'holdsWorker');
 });

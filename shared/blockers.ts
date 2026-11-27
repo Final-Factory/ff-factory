@@ -261,6 +261,12 @@ export function offSince(w: Pick<WorkItem, 'sessionIds' | 'links' | 'movedOff'>,
  *   is woken for it (gateOwner, deployHeld, resumeAfterDeploy, held check-ins), carries it in a move (movableWorkOf),
  *   uses a worker tool on it (workerRequest), closes it with DONE, and its reports clear `w`'s gates (BlockerWatch
  *   reportedSince, deliveredSince). None of these for a merged-back moved-off worker (w2079).
+ * The rule in one line: such a worker is treated as one not listed on `w`, except that it is heard. Every reader that
+ * asks who is on `w` reads onRequest; only the resume of a person's words (staleResume, asPutBack, a person's FFBox
+ * follow-up relayed to busy workers) and what keeps its reply (itemsOf) read heardOn. Closing (DONE, LEG DONE,
+ * SUPERSEDED), starting beside it (workersOn, otherWorkerOn, busyIn), legs, crash facts, gates and their hand-over,
+ * grants and read scope, heirs, wakes for builds, intake twins and FFBox, and the Waiting board all read onRequest
+ * (the w6331 sweep of every sessionIds reader).
  */
 export function heardOn(w: Pick<WorkItem, 'sessionIds'>, sid: string): boolean {
   return w.sessionIds.includes(sid);
@@ -662,8 +668,11 @@ export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | '
       return b.ref && CI_REF.test(b.ref) ? undefined : 'blocker.ref: the pull request, "owner/repo#123"';
     case 'steam':
       return f.work(self)?.pair?.steam ? undefined : `${self} is no pair run that needs Steam: a steam gate holds only one (w2459)`;
-    case 'worker':
-      return b.ref && f.work(self)?.sessionIds.includes(b.ref) ? undefined : `blocker.ref: a worker's session id on ${self} (w2476)`;
+    case 'worker': {
+      // w6309: a worker on it (onRequest), not one moved off it that a merge listed again.
+      const t = f.work(self);
+      return b.ref && t && onRequest(t, b.ref) ? undefined : `blocker.ref: a worker's session id on ${self} (w2476)`;
+    }
     case 'disk':
       if (!b.ref) return 'blocker.ref: the machine id';
       if (f.online && f.online(b.ref) === undefined) return `no machine "${b.ref}"`;

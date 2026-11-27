@@ -4,6 +4,7 @@
 import { FLAG_LABEL, questionFor, WORK_OPEN, type OpenAsk, type SessionInfo, type WorkItem } from './types.ts';
 import { openAsksOf, sameAsk, sameWords } from './waitSummary.ts';
 import { handUpCardOf, type WorkLive } from './workState.ts';
+import { onRequest } from './blockers.ts';
 
 const OPEN = new Set<string>(WORK_OPEN);
 
@@ -188,9 +189,10 @@ export type HoldingSession = Pick<SessionInfo, 'id' | 'kind' | 'status' | 'pendi
  * unanswered [needs you] of a worker that still exists). A stopped or errored worker holds nothing; the dispatcher's own
  * question or an intake approval holds no worker either.
  */
-export function holdsWorker(w: Pick<WorkItem, 'sessionIds' | 'needsYou'> | undefined, sessions: readonly HoldingSession[]): boolean {
+export function holdsWorker(w: Pick<WorkItem, 'sessionIds' | 'needsYou' | 'links'> & Partial<Pick<WorkItem, 'movedOff'>> | undefined, sessions: readonly HoldingSession[]): boolean {
   if (!w) return false;
-  const mine = sessions.filter((s) => s.kind === 'worker' && w.sessionIds.includes(s.id) && s.status !== 'stopped' && s.status !== 'error');
+  // w6309 (the w6331 review): a worker moved off it that a merge listed again is held by none of its waits (onRequest).
+  const mine = sessions.filter((s) => s.kind === 'worker' && onRequest(w, s.id) && s.status !== 'stopped' && s.status !== 'error');
   if (mine.some((s) => s.pendingPermissions?.length || s.waitingOn)) return true;
   const r = w.needsYou;
   return !!r && !r.answered && !!r.worker && r.kind !== 'question' && mine.some((s) => s.id === r.worker);
