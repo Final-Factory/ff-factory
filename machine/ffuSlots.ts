@@ -37,6 +37,7 @@ import { MEDIUM_AGENT_VAR } from './mediumFolders.ts';
 import type { FfuSlotsReport, FfuSlotView } from '../shared/types.ts';
 import { workerCargoHome } from './sharedCaches.ts';
 import { guardRemoteSync } from '../server/remoteGuard.ts';
+import { isMainModule } from './isMain.ts';
 
 export const FFU_REMOTE = 'https://github.com/Final-Factory/ffu.git';
 export const FFU_SLOTS_DIR = 'ffu-sandboxes';
@@ -81,6 +82,8 @@ export interface FfuSlot {
   branch?: string;
   takenAt?: string;
   usedAt?: string;
+  /** w6484: the holder a sweep freed it from, so work found in it later is rescued under that holder's name and told to it. */
+  freedFrom?: string;
 }
 
 /** w5885: work a freed slot's holder had left in it, kept on a branch of the shared clone (and pushed to origin when it could be). */
@@ -411,12 +414,23 @@ function holderState(f: CleanupFacts, holder: string): 'finished' | 'waiting' | 
 
 const mins = (ms: number) => `${Math.round(ms / 60_000)} min`;
 
+/** w6484: whether `holder` still runs, as fresh cleanup facts say; not known counts as running (nothing is freed on a guess). */
+function holderRuns(d: FfuSlotDeps, holder: string): boolean {
+  const f = d.facts;
+  return !f?.at || d.now() - Date.parse(f.at) > FACTS_FRESH_MS || f.live.includes(holder);
+}
+
 /**
  * Whether another worker may take `s` now, and if not why. `rescue` is set when the slot is free only once its holder's work
  * is saved (rescueWork): a finished holder, or one stopped, waiting or idle past its limit (w5885).
  */
 export function slotFree(d: FfuSlotDeps, s: FfuSlot): { free: boolean; why: string; rescue?: string } {
-  if (!s.holder) return { free: true, why: 'released' };
+  if (!s.holder) {
+    // w6484 (w6510's review of #1500): a holder a sweep freed while it was stopped may resume and edit its old checkout, which
+    // the next take would reset; work found in a released slot is saved on a rescue branch first.
+    const left = s.freedFrom ? checkoutWork(d, s.id) : undefined;
+    return left ? { free: true, why: `released; ${left} (${s.freedFrom}'s, after a sweep freed it), saved on a rescue branch first`, rescue: left } : { free: true, why: 'released' };
+  }
   if (s.holder === d.session) return { free: true, why: `yours${s.branch ? ` (on ${s.branch})` : ''}` };
   const f = d.facts;
   if (!f || !f.at || d.now() - Date.parse(f.at) > FACTS_FRESH_MS) return { free: false, why: `held by ${s.holder} (whether it runs is not known: no fresh cleanup-facts.json)` };
@@ -472,7 +486,7 @@ export function slotsReport(d: FfuSlotDeps): FfuSlotsReport {
 export function rescueWork(d: FfuSlotDeps, s: FfuSlot): FfuRescue {
   const wt = slotCheckout(d.root, s.id);
   const repo = repoDir(d.root);
-  const holder = s.holder ?? 'unknown';
+  const holder = s.holder ?? s.freedFrom ?? 'unknown';
   const from = d.git(['symbolic-ref', '--quiet', '--short', 'HEAD'], wt).out.trim() || undefined;
   if (d.git(['status', '--porcelain', '--untracked-files=normal'], wt).out.trim()) {
     must(d.git(['add', '-A'], wt), 'git add');
@@ -700,6 +714,7 @@ export function takeSlot(d: FfuSlotDeps, o: TakeOptions = {}): string {
     const at = new Date(d.now()).toISOString();
     if (pick.holder !== d.session) pick.takenAt = at;
     pick.holder = d.session;
+    delete pick.freedFrom;
     pick.usedAt = at;
     // A rescue is listed a fortnight; its branch stays until someone deletes it.
     if (st.rescues) st.rescues = st.rescues.filter((r) => d.now() - Date.parse(r.at) < 14 * 24 * 3_600_000);
@@ -730,17 +745,24 @@ export function takeSlotWaiting(d: FfuSlotDeps, o: TakeOptions, minutes: number)
   }
 }
 
-/** w5885: free every slot a worker may take now (a finished or long-unused holder's), saving its work first; the ids freed. */
+/**
+ * w5885: free every slot a worker may take now (a finished or long-unused holder's), saving its work first; the ids freed.
+ * w6484 (review of #1500): the daemon's sweep (no session) frees only holders that no longer run. A running holder freed with
+ * no take behind it would keep writing in a released slot, and the next take resets that checkout with nothing to rescue;
+ * a take frees it and hands it over in one locked step, so a running holder's slot is left to a take.
+ */
 export function sweepSlots(d: FfuSlotDeps): string[] {
   return withLock(d, () => {
     const st = readSlotState(d.root);
     const out: string[] = [];
     for (const s of st.slots) {
       if (!s.holder || s.holder === d.session) continue;
+      if (!d.session && holderRuns(d, s.holder)) continue;
       const f = slotFree(d, s);
       if (!f.free) continue;
       if (f.rescue) (st.rescues ??= []).push(rescueWork(d, s));
       d.say(`ffu-slot: freed ${s.id}: ${f.why}\n`);
+      s.freedFrom = s.holder;
       delete s.holder;
       out.push(s.id);
     }
@@ -798,7 +820,8 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
     const i = rest.indexOf(k);
     return i >= 0 ? rest[i + 1] : undefined;
   };
-  if (!d.session && cmd !== 'list') {
+  // w6484: the daemon's sweep (runFfuSlotSweep) has no session: it holds no slot, so every holder is another's.
+  if (!d.session && cmd !== 'list' && cmd !== 'sweep') {
     d.say(`ffu-slot: FF_SESSION_ID is not set: run it from a worker of FF Factory\n`);
     return 2;
   }
@@ -969,8 +992,30 @@ export function readFfuSlotsReport(o: { root: string; factsFile: string; max: nu
   });
 }
 
+/**
+ * w6484: `ffu-slot sweep` for the daemon (machine/ffuSlotAutoSweep.ts), as its own process like readFfuSlotsReport, with no
+ * session of its own (so every holder is another's, and it frees only holders that no longer run): what it printed and
+ * whether it exited 0. The 2026-11-27 BEAST sweep with a rescue took about 5 s (measured). It is not killed on a timer
+ * (review of #1500): killed inside the lock it would leave the lock held for LOCK_STALE_MS and its git running in the
+ * checkout. It ends by itself instead: its wait for the lock stops at LOCK_WAIT_MS and each git call at its own 20 min
+ * timeout, and FfuSlotAutoSweep starts no second sweep while one runs. `timeoutMs` is for tests.
+ */
+/** No kill timer on the daemon's sweep (0: never killed), for the reason above; a test holds it so. */
+export const FFU_SLOT_SWEEP_KILL_MS = 0;
+
+export function runFfuSlotSweep(o: { root: string; factsFile: string; max: number; script?: string; timeoutMs?: number }): Promise<{ ok: boolean; out: string }> {
+  const env = { ...process.env, FF_WORKER_ROOT: o.root, FF_CLEANUP_FACTS: o.factsFile, FF_FFU_SLOTS_MAX: String(o.max), FF_SESSION_ID: '' };
+  const args = [...process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), o.script ?? import.meta.filename, 'sweep'];
+  return new Promise((resolve) => {
+    execFile(process.execPath, args, { env, timeout: o.timeoutMs ?? FFU_SLOT_SWEEP_KILL_MS, windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      const out = `${stdout ?? ''}${stderr ?? ''}`;
+      resolve({ ok: !err, out: err && !out.trim() ? err.message : out });
+    });
+  });
+}
+
 // Run when started directly (the ffu-slot shim).
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+if (isMainModule(import.meta.filename)) {
   try {
     process.exit(ffuSlotMain(process.argv.slice(2), realFfuSlotDeps()));
   } catch (e) {

@@ -439,7 +439,7 @@ export const CATALOG = {
       .object({ windows: z.string().max(400).optional(), mac: z.string().max(400).optional(), linux: z.string().max(400).optional() })
       .optional()
       .describe("upload: each platform's run folder (build-release.sh's: release.json, build.log, release/player), in your sandbox or temp folder."),
-    live: z.string().max(40).optional().describe('upload: the Steam branch to set live, only the one the release names (development for a master main release); leave out for none.'),
+    live: z.string().max(40).optional().describe('upload: the Steam branch to set live, only the one the release names (development for a master main release, pre-release for a 0.50.x pre-1.0 main release); leave out for none.'),
     preview: z.boolean().optional().describe('upload: steamcmd --preview, a dry run that uploads nothing and sets nothing live.'),
     guard_code: z.string().max(8).optional().describe("check: the code from Steam Guard's email, when a check stopped for one."),
     job: z.string().max(40).optional().describe('status: a job id (default: the job running on this computer).'),

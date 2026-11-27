@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { forgetDataDirChecks, gameDataDirAt, GAME_DATA_PATHS, otherPlayerIn, readsDataDirSource } from './gameDataDir.ts';
+import { forgetDataDirChecks, gameDataDirAt, GAME_DATA_PATHS, lastWordOf, otherPlayerIn, readsDataDirSource } from './gameDataDir.ts';
 import type { Runner } from './githubTokens.ts';
 
 const REPO = 'Final-Factory/FinalFactory';
@@ -113,4 +113,72 @@ test('w6467: Steam and a short version keep the mark; the PR\'s own release or S
     'the pre-1.0 release branch']) {
     assert.equal(otherPlayerIn(t, NEW), undefined, t);
   }
+});
+
+// w6485 (497345e4's reviews of PR #1492): plurals, and the version named before Steam, keep the mark too.
+test('w6485: plural Steam builds and a version named before Steam keep the mark; the PR\'s own Steam builds and a lobby do not', () => {
+  assert.match(otherPlayerIn('0.50 from Steam', NEW) ?? '', /names a build no commit is \("0\.50 from Steam"\)/);
+  for (const t of ['the Steam players and builds of the PR head', 'Steam builds and the clients on the PR head', '0.50 from Steam', 'pre-1.0 on Steam',
+    'the 0.50 Steam client', 'Steam v0.50', 'Steam (pre-1.0)', 'the host runs the Steam copies', 'the 0.50 Steam client of the PR head', 'v0.50.1 via Steam']) {
+    assert.ok(otherPlayerIn(t, NEW), t);
+  }
+  for (const t of ['a Steam lobby on 0.50', 'the Steam build of the PR head', 'the Steam builds of the PR head', 'Build a release player of the PR head',
+    'join through a Steam lobby', 'join with the Steam game client of the PR build']) {
+    assert.equal(otherPlayerIn(t, NEW), undefined, t);
+  }
+});
+
+// w6488's review of PR #1499 (measured lifting the mark at 03344c09).
+test('w6485: plurals of every build pattern, a word or punctuation around Steam and its version, and a curly apostrophe keep the mark', () => {
+  for (const t of ['the published builds', 'shipped players', 'the live copies', 'pre-1.0 releases', '0.50 releases',
+    '0.50 build from Steam', 'the 0.50 version on Steam', 'pre-1.0 from the Steam client', '0.50 from the Steam store', '0.50 off Steam',
+    '0.50 (from Steam)', '0.50, from Steam', '0.50-Steam',
+    'Steam [pre-1.0]', 'Steam [0.50]', 'Steam: 0.50', 'Steam, pre-1.0', 'Steam - 0.50', 'Steam-0.50', 'Steam-pre-1.0', 'Steam ver 0.50',
+    'Steam on pre-1.0', 'Steam at 0.50', 'the Steam-0.50 build of the PR head', 'the 0.50-Steam client of the PR head',
+    'Steam’s 0.50', 'Steam’s build']) {
+    assert.ok(otherPlayerIn(t, NEW), t);
+  }
+  for (const t of ['a Steam lobby on 0.50', 'the Steam builds of the PR head', 'Steam’s build of the PR head', 'join through a Steam lobby',
+    'the pre-1.0 release branch', 'a debug or release build', 'Build a release player of the PR head']) {
+    assert.equal(otherPlayerIn(t, NEW), undefined, t);
+  }
+});
+
+// w6497's review of PR #1499 (measured lifting the mark at 9bdf2539): any punctuation counts as the separator.
+test('w6485: any punctuation around Steam and its version, and any apostrophe, keeps the mark', () => {
+  for (const t of ['Steam — 0.50', 'Steam –0.50', 'Steam / 0.50', 'Steam; 0.50', 'Steam. 0.50', "Steam 'pre-1.0'", 'Steam "0.50"', 'Steam <0.50>',
+    'Steam‑0.50', '0.50 / Steam', '0.50 — Steam', '0.50 [Steam]', '0.50: Steam', 'Steam‘s 0.50', 'Steam`s 0.50', 'Steam ’s build']) {
+    assert.ok(otherPlayerIn(t, NEW), t);
+  }
+  for (const t of ['a Steam lobby on 0.50', 'the Steam build of the PR head', 'Steam’s build of the PR head', 'join through a Steam lobby',
+    'join with the Steam game client of the PR build', 'Build a release player of the PR head']) {
+    assert.equal(otherPlayerIn(t, NEW), undefined, t);
+  }
+});
+
+// w6516's review of PR #1499: the separator alone counts after Steam, "_" is one too, and a long run of punctuation after
+// "Steam" stays linear (the head before took 11 s on 100,000 hyphens).
+test('w6485: a separator alone after Steam keeps the mark, and a long run of punctuation after Steam is quick', () => {
+  for (const t of ['Steam — build', 'Steam / builds', 'Steam_0.50']) assert.ok(otherPlayerIn(t, NEW), t);
+  for (const c of ['-', '.', '_', '— ']) {
+    const t0 = performance.now();
+    otherPlayerIn(`the client runs steam${c.repeat(50_000)}`, NEW);
+    const ms = performance.now() - t0;
+    assert.ok(ms < 500, `steam followed by 50,000 ${JSON.stringify(c)} took ${ms.toFixed(0)} ms`);
+  }
+});
+
+// w6544: excusedBuild's last-word lookup was a quadratic regex on a long run with no whitespace before a match; it is a
+// backwards scan now. No wall-clock bound here (CI keeps no timing assertions): a quadratic one would show as a stalled run.
+test('w6544: a long run with no whitespace before a match keeps the mark', () => {
+  for (const said of ['-'.repeat(50000) + 'steam build', 'steam—'.repeat(8000) + ' build']) assert.ok(otherPlayerIn(said, NEW));
+});
+
+test('w6544: lastWordOf is the word before trailing whitespace, else empty', () => {
+  assert.equal(lastWordOf('the published '), 'published');
+  assert.equal(lastWordOf('a  b \n'), 'b');
+  assert.equal(lastWordOf('the published'), '');
+  assert.equal(lastWordOf(''), '');
+  assert.equal(lastWordOf('   '), '');
+  assert.equal(lastWordOf('-'.repeat(50000) + ' '), '-'.repeat(50000));
 });

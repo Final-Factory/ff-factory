@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
@@ -29,23 +29,24 @@ import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCAT
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
 import { StallProfiler } from '../server/stallProfile.ts';
-import { useSpawnThread } from '../server/spawnThread.ts';
+import { freezeWatchSettings, startFreezeWatch, type FreezeWatch } from './freezeWatch.ts';
+import { execFileOffThread, useSpawnThread } from '../server/spawnThread.ts';
 import { warmScopeProbes } from './linuxScope.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
-import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnRefusal, readFenceProbeTargets, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
+import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnHeld, readFenceProbeTargets, readRulesForNewRun, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
 import { DaemonWrites, SlotCaches, asDaemonWrite, idleForRefresh, inFolder, within, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheDir, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
 import { makeSharedLockDirs } from './sharedLockPaths.ts';
 import { lockIn } from './lockIn.ts';
-import { playersRpcHandlers } from './playersBroker.ts';
+import { playersRpcHandlers, processStartTimes } from './playersBroker.ts';
 import { brokerLauncher } from './playersLaunch.ts';
 import { longRunsRpcHandlers, longRunsSetting } from './longRuns.ts';
 import { playerFenceFor, type PlayerFence } from './playerFence.ts';
 import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, unlinkShimBinLink, watchShimBin, retryShimWrite, type ShimModeGuard } from './pathFence.ts';
 import { isSlotRepo } from './slotRepo.ts';
-import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState, restageModeOf } from './agentHost.ts';
+import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostStartedAtAsync, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState, restageModeOf } from './agentHost.ts';
 import { capsModeOf, jobHelper } from './workerCaps.ts';
 import { junctionRmSignalLine } from '../server/junctionRmWarn.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
@@ -64,7 +65,7 @@ import { describeCounted, type AgentCensus, type CensusAgent } from '../server/a
 import { batchUnityIn, holdParts, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
 import { liveRunGuardModeOf } from './liveRunGuard.ts';
 import { gitPackagesModeOf } from './gitPackages.ts';
-import { UnitySlots, editorInstancePid, gamePlayers, unityProcesses, writeShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
+import { UnitySlots, editorInstancePid, editorInstancePidAsync, gamePlayers, unityProcesses, writeShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
 import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
@@ -107,9 +108,10 @@ import { movedRequestsOf, type SessionOwner } from '../server/resumable.ts';
 import { LeftoverReaper, answerProcsAsk, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
 import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBroker.ts';
 import { installPrShim } from './prFlow.ts';
-import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim, readFfuSlotsReport } from './ffuSlots.ts';
+import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim, readFfuSlotsReport, runFfuSlotSweep } from './ffuSlots.ts';
+import { FfuSlotAutoSweep } from './ffuSlotAutoSweep.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
-import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, sayOwnerLabels, ownerLabelTargets, ghLoginStorage, machineGhStatusEnv, ghLoginToFile, ghLoginToKeyring, realGhRun, OWNER_GH_MOVED_NOTE, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
+import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, sayOwnerLabels, ownerLabelTargets, ownerLabelMode, ghLoginStorage, machineGhStatusEnv, ghLoginToFile, ghLoginToKeyring, realGhRun, OWNER_GH_MOVED_NOTE, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { installPythonShim, trustedGh } from './evidenceGate.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
@@ -153,6 +155,7 @@ import { BenchProxy } from './benchProxy.ts';
 import { MEDIUM_AGENT_VAR, fixUserPath, planMediumCaches, planMediumFolders, type MediumCaches, type MediumCachesMode, type MediumFolders, type MediumFoldersMode } from './mediumFolders.ts';
 import { UvCachePruner, applyMediumUvToolDir, findUv, mediumUvCacheDir, mediumUvCacheFor, runQuiet, runQuietEnv, sandboxUvEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
 import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type FfuSlotsReport, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
+import { isMainModule } from './isMain.ts';
 
 export interface DaemonConfig {
   /**
@@ -385,6 +388,11 @@ export interface DaemonConfig {
   sandboxCacheTrim?: Partial<TrimPolicy> | false;
   /** The sweep of a stopped session's temp folder (server/sessionSweep.ts, w913): graceMin, cloneKeepHours, quietMin. */
   sessionSweep?: Partial<{ graceMin: number; cloneKeepHours: number; quietMin: number }>;
+  /**
+   * The freeze watch (machine/freezeWatch.ts, w6555): a thread that logs a main event loop frozen for `afterMin` minutes
+   * (default 3) while it is frozen, with the main thread's stack, and again every `repeatMin` (default 5). `false`: off.
+   */
+  freezeWatch?: Partial<{ afterMin: number; repeatMin: number }> | false;
   /**
    * The MCP-for-Unity server agents here get as "UnityMCP", each confined to its own editor (machine/unityMcp.ts).
    * Default: the UnityMCP entry the machine's own Claude Code has in ~/.claude.json.
@@ -625,6 +633,8 @@ const HOME = os.homedir();
 /** A knob's later moves within this long amend its line in the conversation instead of adding one (a drag is one line). */
 const LIVE_LINE_MERGE_MS = 5000;
 const STATS_MS = 15_000;
+/** w6595: how old a session's cached host start (hostSinceCached) may be before it is read again, off the loop. */
+const HOST_SINCE_MS = 20_000;
 /** w5615: how often the clone keeper looks for a sandbox whose caches to make, merge back or refresh. */
 const SLOT_CACHES_EVERY_MS = 10 * 60_000;
 /** w6393: how long a light folder's create waits for its cache clones before it answers: below the portal's 60 s for the create (server/machines.ts createLightFolder). */
@@ -689,6 +699,8 @@ export class Daemon {
   /** The daemon's own event-loop watch (w4926): a block is a line in daemon.log, beside what ran around it. */
   private loopWatch?: LoopWatch;
   private stallProfiler?: StallProfiler;
+  /** w6555: the thread that sees the loop frozen while it is frozen (the loop watch can say so only after). */
+  private freezeWatch?: FreezeWatch;
   private stopped = false;
   /** What keeps the machine awake while agents run: caffeinate on a Mac, a PowerShell holding SetThreadExecutionState on Windows. */
   private caffeinate?: ChildProcess;
@@ -835,6 +847,12 @@ export class Daemon {
   private ffuReport?: FfuSlotsReport;
   private ffuReportAt = 0;
   private ffuReporting = false;
+  /** w6484: frees the stale slots each report names (staleOutput.ffuSlotSweep: on by default, warn or off from the portal). */
+  private readonly ffuAutoSweep = new FfuSlotAutoSweep({
+    mode: () => staleOutputSettings(this.cleanupSettings.staleOutput).ffuSlotSweep,
+    sweep: () => runFfuSlotSweep({ root: this.cfg.root!, factsFile: cleanupFactsFile(appDirOfConfig(this.cfg)), max: FFU_SLOTS_DEFAULT_MAX }),
+    log,
+  });
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
   readonly cleaner: CleanupRunner;
   private ffuRetry?: FfuBusyRetry;
@@ -857,6 +875,31 @@ export class Daemon {
   private readonly mcpScopes = new McpScopes();
   /** w5746: the machine's top-level Unity processes at the last McpScopes look (refreshMcpScopes); undefined: not read yet. */
   private mcpEditors?: { pid: number; project?: string }[];
+  /**
+   * w6595: when each session's current agent host started (host.json), for the leftovers sweep's wait-loop rule. The sweep
+   * asks once per process it looks at, and those reads of host.json held the loop 7 s on LothDesktop's busy disk
+   * (2026-11-27 23:00Z): a session's first ask reads it here, later ones answer from this and read it again off the loop
+   * when it is HOST_SINCE_MS old (a host started since then counts from the next sweep after that).
+   */
+  private hostSinces = new Map<string, { at: number; since: number | undefined; reading?: boolean }>();
+  private hostSinceCached(id: string): number | undefined {
+    const dir = path.join(this.hostsRoot, id);
+    const now = Date.now();
+    const c = this.hostSinces.get(id);
+    if (!c) {
+      const since = hostStartedAt(dir);
+      this.hostSinces.set(id, { at: now, since });
+      if (this.hostSinces.size > 2000) this.hostSinces.delete(this.hostSinces.keys().next().value!);
+      return since;
+    }
+    if (now - c.at >= HOST_SINCE_MS && !c.reading) {
+      c.reading = true;
+      void hostStartedAtAsync(dir).then((since) => this.hostSinces.set(id, { at: Date.now(), since }), () => (c.reading = false));
+    }
+    return c.since;
+  }
+  /** w6595: each sandbox's EditorInstance.json pid as refreshMcpScopes last read it off the loop, by project path. */
+  private mcpInstancePids = new Map<string, number | undefined>();
   /** Windows: the folder Git Bash maps /tmp to, never cleaned up and made again when missing (server/gitBashTmp.ts, w603). */
   private bashTmp?: string;
 
@@ -1088,7 +1131,7 @@ export class Daemon {
       wakeAt: (id) => this.wakes.get(id),
       // w3715: a stopped worker's detached bench script keeps the machine's bench lock; its far check-in must not keep it
       holdsTicket: (id) => cfg.root !== undefined && holdsOwnTicket(this.sweepTickets(cfg.root), id),
-      hostSince: (id) => (this.hosted && /^[\w-]+$/.test(id) ? hostStartedAt(path.join(this.hostsRoot, id)) : undefined),
+      hostSince: (id) => (this.hosted && /^[\w-]+$/.test(id) ? this.hostSinceCached(id) : undefined),
       liveSandboxes: () => new Set([...this.entries.values()].filter((e) => e.s.live && e.spec?.sandbox).map((e) => e.spec!.sandbox!)),
       ready: () => this.welcomed,
       slotRoots,
@@ -1197,7 +1240,7 @@ export class Daemon {
         ? {
             start: async (root: string) => {
               const r = await new Promise<{ code: number; out: string; err: string }>((resolve) =>
-                execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', runnerRestartScript(root)], { timeout: 60_000 }, (e, out, err) => resolve({ code: e ? ((e as { code?: number }).code ?? 1) : 0, out: String(out), err: String(err) })),
+                execFileOffThread('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', runnerRestartScript(root)], { timeout: 60_000 }, (e, out, err) => resolve({ code: e ? ((e as { code?: number }).code ?? 1) : 0, out: String(out), err: String(err) })),
               );
               if (r.code !== 0) throw new Error((r.err || r.out || `exit ${r.code}`).trim());
               return r.out.trim() || 'started';
@@ -1241,7 +1284,7 @@ export class Daemon {
       },
       systemctl: (args) =>
         new Promise((resolve, reject) =>
-          execFile('systemctl', ['--user', ...args], { timeout: 60_000 }, (err, stdout, stderr) => (err ? reject(new Error(`systemctl --user ${args.join(' ')}: ${(stderr || err.message).trim()}`)) : resolve(stdout))),
+          execFileOffThread('systemctl', ['--user', ...args], { timeout: 60_000 }, (err, stdout, stderr) => (err ? reject(new Error(`systemctl --user ${args.join(' ')}: ${(stderr || err.message).trim()}`)) : resolve(stdout))),
         ),
       freeBytes: async (p) => (await volumeStat(p))?.free,
       floorGB: () => this.currentPool()?.diskCriticalGB ?? DISK_CRITICAL_GB_DEFAULT,
@@ -1263,9 +1306,11 @@ export class Daemon {
           workerRoot: cfg.root,
           home: os.homedir(),
           uid: process.getuid?.() ?? 0,
+          // w6554: started (and, past its timeout, ended) from the spawn thread: on 2026-11-27 BEAST's loop was held 24.5 s
+          // in a kill under RunnerEnv's step, the timeout of one of these PowerShell runs ending it on the loop
           exec: (runnerEnvCmd, args) =>
             new Promise((resolve, reject) =>
-              execFile(runnerEnvCmd, args, { timeout: 120_000, windowsHide: true, maxBuffer: 8 << 20 }, (err, stdout, stderr) => (err ? reject(new Error(`${runnerEnvCmd} ${args[0] ?? ''}: ${(String(stderr) || err.message).trim().slice(0, 400)}`)) : resolve(String(stdout)))),
+              execFileOffThread(runnerEnvCmd, args, { timeout: 120_000, windowsHide: true, maxBuffer: 8 << 20 }, (err, stdout, stderr) => (err ? reject(new Error(`${runnerEnvCmd} ${args[0] ?? ''}: ${(String(stderr) || err.message).trim().slice(0, 400)}`)) : resolve(String(stdout)))),
             ),
         }),
         held: (r) => {
@@ -1283,7 +1328,7 @@ export class Daemon {
     // w5322: on a CI-first machine (CI_FIRST: biscuit) FF Factory's own scopes run below its CI runners (machine/ciFirst.ts)
     const userctl = (args: string[]) =>
       new Promise<string>((resolve, reject) =>
-        execFile('systemctl', ['--user', ...args], { timeout: 60_000 }, (err, stdout, stderr) => (err ? reject(new Error(`systemctl --user ${args.join(' ')}: ${(stderr || err.message).trim()}`)) : resolve(stdout))),
+        execFileOffThread('systemctl', ['--user', ...args], { timeout: 60_000 }, (err, stdout, stderr) => (err ? reject(new Error(`systemctl --user ${args.join(' ')}: ${(stderr || err.message).trim()}`)) : resolve(stdout))),
       );
     this.ciFirst = new CiFirst({
       settings: real && process.platform === 'linux' ? CI_FIRST[cfg.id.toLowerCase()] : undefined,
@@ -1569,7 +1614,7 @@ export class Daemon {
     return plan;
   }
 
-  /** w6290: the busy ffu slots' re-check (machine/ffuBusyRetry.ts), every ffuBusyRetryMinutes, warn-only unless ffuBusyRetry is on. */
+  /** w6290: the busy ffu slots' re-check (machine/ffuBusyRetry.ts), every ffuBusyRetryMinutes; removes when ffuBusyRetry and the stale-output mode are on. */
   private makeFfuRetry(): FfuBusyRetry | undefined {
     if (!this.cfg.root) return undefined;
     const roots = [this.cfg.root, ...(this.cfg.extraRoots ?? [])];
@@ -1602,8 +1647,13 @@ export class Daemon {
   /** The released ffu slots' first step (w6044), its plan at `low` and its log line; `mid` names a step run apart from a pass. */
   private ffuFirstStep(low: boolean, guard: CleanupGuard, mid: string) {
     return {
-      plan: async () =>
-        planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard, procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-slots', low }),
+      plan: async () => {
+        const p = await planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard, procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-slots', low });
+        // w6524: what the low first step would take of the FFU runners' job folders, in warn mode, said where the log shows it.
+        const warned = (p.listed ?? []).filter((l) => l.why.startsWith('warn-only (runnerFirstMode'));
+        if (warned.length) log(`clean-up: ffu slots first${mid} (w6524): ${warned.length} runner job folder(s) listed, none removed: ${warned.slice(0, 4).map((l) => `${l.path} (${l.why.slice(0, 200)})`).join('; ')}`);
+        return p;
+      },
       report: (items: CleanupItem[], ms: number, run?: CleanupRun) =>
         log(
           `clean-up: ffu slots first${mid} (w6044): ${items.length} item(s) planned in ${(ms / 1000).toFixed(1)} s${run ? `, ${run.removed.length} removed (${(run.bytes / 1024 ** 3).toFixed(1)} GB)${run.failed.length ? `, ${run.failed.length} kept: ${run.failed.slice(0, 4).map((f) => `${f.path} (${f.why.slice(0, 160)})`).join('; ')}` : ''}` : items.length ? ', none removed (stale-output mode is not on)' : ''}${items.length ? `: ${items.slice(0, 8).map((i) => `${i.path} (${i.why.slice(0, 160)})`).join('; ')}` : ''}`,
@@ -1943,7 +1993,9 @@ export class Daemon {
         return (e as NodeJS.ErrnoException).code === 'EPERM' ? pid : undefined;
       }
     };
-    const places = mcpPlaces(this.pool.list(), alive, editorInstancePid, this.mcpEditors);
+    // w6595: the pids refreshMcpScopes read off the loop (at most 5 s old); a sandbox not read yet is read here once.
+    const instancePid = (project: string) => (this.mcpInstancePids.has(project) ? this.mcpInstancePids.get(project) : editorInstancePid(project));
+    const places = mcpPlaces(this.pool.list(), alive, instancePid, this.mcpEditors);
     this.mcpScopes.sync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line));
   }
 
@@ -1958,6 +2010,11 @@ export class Daemon {
       this.mcpEditors = undefined;
       log(`unity mcp: reading the processes: ${(e as Error).message}`);
     }
+    // w6595: each sandbox's Library/EditorInstance.json, read off the loop (read in syncMcpScopes, these held it 6.6 s on
+    // LothDesktop's busy disk, 2026-11-27 23:00Z).
+    const projects = this.pool.list().map((sb) => sb.path);
+    const pids = await Promise.all(projects.map((p) => editorInstancePidAsync(p)));
+    this.mcpInstancePids = new Map(projects.map((p, i) => [p, pids[i]]));
     this.syncMcpScopes();
   }
 
@@ -2315,6 +2372,15 @@ export class Daemon {
     if (this.cfg.root) void refreshTrustedBenchAsync({ appDir: appDirOfConfig(this.cfg), background: true }, this.cfg.root);
     this.timers.push(setInterval(loopLabel('timer warmScopeProbes', () => void warmScopeProbes()), 60_000));
     this.loopWatch = new LoopWatch({ log: (l) => log(l), who: 'the daemon', stallLogMs: DAEMON_STALL_LOG_MS }).start();
+    // w6555: BEAST's loop was held 891 s on 2026-11-27 (w6546) and its log said nothing until it ended; this thread says it during.
+    const fw = freezeWatchSettings(this.cfg.freezeWatch);
+    if (fw && process.env.FF_FREEZE_WATCH !== 'off') {
+      try {
+        this.freezeWatch = startFreezeWatch({ afterMs: fw.afterMin * 60_000, repeatMs: fw.repeatMin * 60_000, onError: (e) => log(`freeze watch: its thread failed: ${e.message}`) });
+      } catch (e) {
+        log(`freeze watch: not started: ${(e as Error).message}`);
+      }
+    }
     // w6077: a block LoopWatch can name only by "last ran" (code after an await, under no label) gets the functions that held
     // the loop from V8's sampling profiler, as the portal's do (server/stallProfile.ts); profiles in <app>/profiles, the newest few.
     if (this.cfg.root && process.env.FF_STALL_PROFILE !== 'off') {
@@ -2444,6 +2510,7 @@ export class Daemon {
     for (const t of this.timers) clearInterval(t);
     this.loopWatch?.stop();
     this.stallProfiler?.stop();
+    this.freezeWatch?.stop();
     this.slots.close();
     // Not on purpose (a redeploy, a restart, logging off): each agent keeps its restart marks (turnOpenSince), so the
     // portal knows which ones were mid-turn and resumes them when the daemon is back (MachineManager.resumeCutOff).
@@ -2715,8 +2782,11 @@ export class Daemon {
    * and one file sent by hash over an upload the portal opened. Read-only; answered even with no fixtures folder (a refusal).
    */
   private async labFixture(msg: Extract<ToDaemon, { type: 'lab_fixture' | 'lab_fixture_upload' }>) {
-    const dir = offeredDir(this.cfg.root);
     try {
+      // w6486: looked at off the event loop (BEAST: 55.8 s in the synchronous realpath). A look that fails is refused
+      // to the portal like the other errors here, where the synchronous one threw out of onMessage and answered nothing.
+      const dir = await offeredDir(this.cfg.root);
+      this.labFixturesOffered = !!dir;
       if (!dir) throw new Error('this computer holds no lab fixtures (no <worker root>/nightly-history/fixtures off drive C:)');
       if (msg.type === 'lab_fixture') {
         const files = msg.op === 'find' ? await findFixtures(dir, String(msg.sha256 ?? '')) : await listFixtures(dir);
@@ -2749,10 +2819,46 @@ export class Daemon {
 
   /** The OS and claude version probes of the last hello (w970): a reconnect within an hour reuses them. */
   private helloProbes?: { at: number; osv: { code: number; stdout: string }; claude: { code: number; stdout: string } };
+  /** Whether this computer offers the lab's fixtures, as last looked (w6486: offeredDir runs off the event loop). */
+  private labFixturesOffered?: boolean;
+  private labFixturesLooking?: Promise<boolean>;
+
+  /**
+   * offeredDir for the hello (w6486). The first hello waits for the look, as it waited on the synchronous one before, for
+   * up to LAB_FIXTURES_HELLO_WAIT_MS: a disk that never answers must not hold the hello (lockout rule), and that hello
+   * says no fixtures. A later hello says the last answer at once and looks again behind it. A look that fails offers
+   * nothing (the synchronous one threw out of hello, and no hello was sent).
+   */
+  private async labFixturesLook(): Promise<boolean> {
+    this.labFixturesLooking ??= offeredDir(this.cfg.root)
+      .then(
+        (dir) => (this.labFixturesOffered = !!dir),
+        (e: Error) => {
+          log(`lab fixtures: could not look at the fixtures folder: ${e.message}`);
+          return (this.labFixturesOffered = false);
+        },
+      )
+      .finally(() => (this.labFixturesLooking = undefined));
+    if (this.labFixturesOffered !== undefined) return this.labFixturesOffered;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => {
+        log(`lab fixtures: the fixtures folder gave no answer in ${LAB_FIXTURES_HELLO_WAIT_MS / 1000} s; this hello offers none, the next says what it finds`);
+        resolve(false);
+      }, LAB_FIXTURES_HELLO_WAIT_MS);
+    });
+    try {
+      return await Promise.race([this.labFixturesLooking, late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   private async hello() {
     // w970: beast's hello came ~20 s after its link (the 15 s `claude --version` probe on a busy Windows machine), and the
     // portal's rollout read the commit as unknown in that window. A reconnect says hello at once with the earlier probes.
+    // w6486: looked at beside the probes, off the event loop
+    const fixtures = this.labFixturesLook();
     let probed = this.helloProbes;
     if (!probed || Date.now() - probed.at > HELLO_PROBE_TTL_MS) {
       const [osv, claude] = await Promise.all([
@@ -2764,6 +2870,7 @@ export class Daemon {
       probed = { at: Date.now(), osv, claude };
     }
     const { osv, claude } = probed!;
+    const labFixtures = await fixtures;
     const selfUpdate = this.selfUpdate.offered();
     this.selfUpdateOffered = selfUpdate;
     this.send({
@@ -2793,7 +2900,7 @@ export class Daemon {
       // w1946: it plays timed runs for workers elsewhere (a worker install), and the ones it holds now.
       ...(this.timed ? { timedRuns: true, timedActive: this.timed.active() } : {}),
       // w3939: it holds the nightly lab's fixtures (<root>/nightly-history/fixtures, never on C:) for the portal to copy.
-      ...(offeredDir(this.cfg.root) ? { labFixtures: true } : {}),
+      ...(labFixtures ? { labFixtures: true } : {}),
       // w5924: it makes, reports and deletes light agent folders (machine/lightFolders.ts).
       lightFolders: true,
       ...(this.cfg.root ? { steamUpload: true, steamInstall: true } : {}),
@@ -2898,7 +3005,11 @@ export class Daemon {
     this.ffuReporting = true;
     this.ffuReportAt = Date.now();
     void readFfuSlotsReport({ root: this.cfg.root, factsFile: cleanupFactsFile(appDirOfConfig(this.cfg)), max: FFU_SLOTS_DEFAULT_MAX, sizes: this.ffuSizes, log })
-      .then((r) => void (this.ffuReport = r))
+      .then(async (r) => {
+        this.ffuReport = r;
+        // w6484: a stale slot is freed here (or, warn-only, said), not only by the next worker's take; then read again.
+        if ((await this.ffuAutoSweep.onReport(r)).length && staleOutputSettings(this.cleanupSettings.staleOutput).ffuSlotSweep === 'on') this.ffuReportAt = 0;
+      })
       .finally(() => void (this.ffuReporting = false));
   }
 
@@ -4052,6 +4163,8 @@ export class Daemon {
         await this.sharedWrite(() => removeTree(dir), [dir]);
       },
       launch: brokerLauncher({ root, playerFence: () => (fence ??= playerFenceFor()), lowNode: () => this.lowMake(process.execPath) }),
+      // w6549: a lease whose pid a later process took is dead (one Win32_Process or ps query per check of a slot).
+      startedAt: (pids) => processStartTimes(pids),
       // w5615: under "on" workers cannot write players: the copy is staged in the caller's own cache folder, then locked in.
       ...(this.sharedLock === 'on' ? { stageDir: (sb: string) => slotCacheDir(root, sb), lockIn: (dst: string) => this.lockShared(dst) } : {}),
       log: (l) => log(l),
@@ -4560,9 +4673,12 @@ export class Daemon {
    * refused (lothsahn's rule for this work: warn-only first, enforce only after measured zero failures).
    */
   private readFenceEnforced(): boolean {
-    // w5748: on Linux also only once the probe found every owner socket (the Secret Service, the ssh and gpg agents) refused.
+    // w6434: on Linux only once the daemon's code sits behind the code link (scripts/worker/linuxCode.ts), so an update leaves
+    // runs already going their code. w5748: and only once the probe found every owner socket refused. Below Landlock ABI 9
+    // a run reaches systemd's (`systemd-run --user` starts a job outside every rule, w5463) and the Secret Service, so the
+    // file rules would claim the Claude and gh logins closed while one command reads them (w6443's review, B1).
     const sockets = process.platform !== 'linux' || this.ownerSocketsOpen.length === 0;
-    return !!this.cfg.root && readFenceMode(appDirOfConfig(this.cfg)) === 'on' && !this.readProbeBlocks && sockets && !readFenceOnRefusal();
+    return !!this.cfg.root && sockets && readRulesForNewRun(appDirOfConfig(this.cfg), !this.readProbeBlocks);
   }
 
   /**
@@ -4650,8 +4766,9 @@ export class Daemon {
         return;
       }
       this.readProbeBlocks = v.wronglyRefused.length > 0 || v.unknown.length > 0 || tools.blocks;
-      if (mode === 'on' && readFenceOnRefusal()) log(`read fence (on): not enforced here, warn only: ${readFenceOnRefusal()}`);
-      else if (mode === 'on' && process.platform === 'linux' && this.ownerSocketsOpen.length) log('read fence (on): a fenced run still reaches an owner socket (the line above says which); runs start without read rules until a probe finds every one refused, which needs Landlock ABI 9, Linux 7.1 (w5748; warn, not a lockout)');
+      if (mode === 'on' && readFenceOnHeld(appDir)) log(`read fence (on): not enforced here, warn only: ${readFenceOnHeld(appDir)}`);
+      else if (mode === 'on' && process.platform === 'linux' && this.ownerSocketsOpen.length)
+        log(`read fence (on): not enforced here, warn only: a fenced run still reaches ${this.ownerSocketsOpen.length} owner socket(s) (the line above says which; systemd's starts a job outside the lock), which only Landlock ABI 9 (Linux 7.1) can refuse; runs start without read rules until a probe finds every one refused (w5748, w6443)`);
       else if (mode === 'on' && this.readProbeBlocks) log('read fence (on): the probe found a path workers need refused, could not judge one, or a tool leg failed; runs start without read rules until a probe passes (warn, not a lockout)');
     } catch (e) {
       this.readProbeBlocks = true;
@@ -4732,9 +4849,11 @@ export class Daemon {
    * (unlabelNoReadUp: no explicit label, as before) and, when the note says the daemon moved it, the login goes back into
    * Credential Manager. Other machines: nothing, and nothing on their system drive is looked at.
    */
-  private async applyOwnerLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
+  private async applyOwnerLabels(fenceMode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
     const plan = ownerLabelTargets({ platform: process.platform, home: os.homedir(), env: process.env, machineId: this.cfg.id });
     if (!plan.label.length) return;
+    // w6569: a warn-only machine (BEAST's warn stage) runs the warn branch, the way back, in on too: nothing is labelled or moved.
+    const mode = ownerLabelMode(fenceMode, plan);
     const note = path.join(appDirOfConfig(this.cfg), OWNER_GH_MOVED_NOTE);
     const tell = (l: string) => say(`worker integrity: owner secrets: ${l}`);
     if (mode === 'on') {
@@ -4880,8 +4999,6 @@ export class Daemon {
    * 60 s wait. Until it passes, runs start without read rules (readProbeBlocks), as at start.
    */
   async setReadFence(mode: ReadFenceMode): Promise<void> {
-    const refused = mode === 'on' ? readFenceOnRefusal() : undefined;
-    if (refused) throw new Error(refused);
     const appDir = appDirOfConfig(this.cfg);
     writeReadFenceMode(appDir, mode);
     this.readProbeBlocks = true;
@@ -5756,6 +5873,8 @@ export function keepAwakeCommand(platform: NodeJS.Platform, pid: number): string
 
 /** How long a hello's OS and claude probes are reused by the next one. */
 const HELLO_PROBE_TTL_MS = 60 * 60_000;
+/** How long the first hello waits for the lab fixtures' folder look (w6486). */
+const LAB_FIXTURES_HELLO_WAIT_MS = 15_000;
 
 function readVersion() {
   try {
@@ -5777,7 +5896,7 @@ export function githubNetEnv(token: string | undefined): NodeJS.ProcessEnv | und
 }
 
 // Run when started directly (not when imported by the tests).
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+if (isMainModule(import.meta.filename)) {
   const file = process.argv[2] ?? path.join(HOME, '.ff-factory', 'daemon.json');
   const text = fs.readFileSync(file, 'utf8');
   // configFile: where a relocate keeps the portal's new URL (w466). A BOM (an editor's) is not JSON.

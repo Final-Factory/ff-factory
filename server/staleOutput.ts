@@ -43,11 +43,18 @@ export interface StaleOutputSettings {
   /**
    * w6290: an ffu slot's cargo target a pass kept over ffuSlotTargetCapGB because a build or a test ran from it is judged again
    * every ffuBusyRetryMinutes until the next pass (machine/ffuBusyRetry.ts), by the same rule, so the trim lands in the first idle
-   * gap between builds. warn: plan and log what it would trim, remove nothing (docs/worker-fence.md: warn-only first); on:
-   * remove (with the stale-output mode on too); off: no re-check.
+   * gap between builds. on (the default since w6290's enforce step, after a day of warn lines with zero bad plans): remove (with
+   * the stale-output mode on too); warn: plan and log what it would trim, remove nothing; off: no re-check.
    */
   ffuBusyRetry: 'off' | 'warn' | 'on';
   ffuBusyRetryMinutes: number;
+  /**
+   * w6484: a stale ffu slot (its holder finished, stopped or idle past its limit; machine/ffuSlots.ts slotFree) is freed by the
+   * daemon's own `ffu-slot sweep` after the slot report names it (machine/ffuSlotAutoSweep.ts), not only by the next take.
+   * on (the default since w6484's enforce step; lothsahn: "Turn it on everywhere: free stale slots by themselves."): sweep;
+   * warn: log what it would free, free nothing; off: nothing.
+   */
+  ffuSlotSweep: 'off' | 'warn' | 'on';
 }
 
 export const STALE_OUTPUT_DEFAULTS: StaleOutputSettings = {
@@ -59,8 +66,9 @@ export const STALE_OUTPUT_DEFAULTS: StaleOutputSettings = {
   logRetentionDays: 14,
   tempHours: 6,
   nightlyKeep: 2,
-  ffuBusyRetry: 'warn',
+  ffuBusyRetry: 'on',
   ffuBusyRetryMinutes: 5,
+  ffuSlotSweep: 'on',
 };
 
 /** The settings in force: the defaults under whatever config gave (unknown or ill-typed values ignored). */
@@ -78,6 +86,7 @@ export function staleOutputSettings(raw: unknown): StaleOutputSettings {
     nightlyKeep: n('nightlyKeep', 1, 20),
     ffuBusyRetry: r.ffuBusyRetry === 'off' || r.ffuBusyRetry === 'warn' || r.ffuBusyRetry === 'on' ? r.ffuBusyRetry : STALE_OUTPUT_DEFAULTS.ffuBusyRetry,
     ffuBusyRetryMinutes: n('ffuBusyRetryMinutes', 1, 60),
+    ffuSlotSweep: r.ffuSlotSweep === 'off' || r.ffuSlotSweep === 'warn' || r.ffuSlotSweep === 'on' ? r.ffuSlotSweep : STALE_OUTPUT_DEFAULTS.ffuSlotSweep,
     ...(Array.isArray(r.nightlyRoots) ? { nightlyRoots: r.nightlyRoots.filter((x): x is string => typeof x === 'string' && x.trim() !== '') } : {}),
   };
 }

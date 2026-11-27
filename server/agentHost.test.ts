@@ -12,7 +12,7 @@ import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager, isMidTurn, type SessionHandle, type TurnEndMeta } from './sessions.ts';
 import { MachineManager, RESUME_DELAY_MS } from './machines.ts';
-import { LineTail, hostAlive, hostFiles, pidAlive } from '../machine/agentHost.ts';
+import { LineTail, hostAlive, hostFiles, offsetText, pidAlive } from '../machine/agentHost.ts';
 import type { Config } from './config.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
 import type { MachineSandbox } from '../shared/types.ts';
@@ -195,7 +195,7 @@ test("w2625: a host started before a daemon update that added a worker tool: the
   // the next message to the old host, still closing, which started the agent again inside itself, on its own code and the
   // launch spec it was started with. The tool stayed missing, and the worker waited two hours for a restart nobody could do.
   let tools: { name: CatalogTool; description: string }[] = [{ name: 'wake_me', description: 'Come back later.' }];
-  const { sessions, mm, daemon, kill, hostPid, cleanup, logs } = await setup({ mcp: () => ({ server: 'machine', tools }) });
+  const { store, sessions, mm, daemon, kill, hostPid, cleanup, logs } = await setup({ mcp: () => ({ server: 'machine', tools }) });
   t.after(cleanup);
   const turnEnds: string[] = [];
   sessions.events.on('turnEnd', (_s: SessionHandle, text: string) => turnEnds.push(text));
@@ -236,9 +236,63 @@ test("w2625: a host started before a daemon update that added a worker tool: the
   };
   sessions.send(id, '#tools');
   await until('its next turn', () => turnEnds.length === 2, 60_000, logs);
-  assert.ok(moved, `its process was started again (the portal asked: ${asked.join('; ') || 'never'})`);
-  assert.equal(turnEnds[1], 'Tools: list_ffbox_files, wake_me', 'the next turn sees the tool the update added');
-  assert.notEqual(hostPid(id), pid, 'in a new host, on the code the machine runs now');
+  // What the move saw, for any assert below that fails, printed too: Linux CI's log of run 46073307022 kept no assert
+  // text, and its cause (the first turn's end sent twice by the next daemon, w6548) was found from timestamps alone.
+  const saw = () => `moved=${moved}; the portal asked: ${asked.join('; ') || 'never'}; turn ends: ${JSON.stringify(turnEnds)}; host pid ${pid} then ${hostPid(id)}\ntranscript: ${JSON.stringify(store.readTranscript(id).map((e) => `${e.kind}: ${(e as { text?: string }).text ?? ''}`.slice(0, 160)))}\n${logs()}`;
+  if (!moved || turnEnds[1] !== 'Tools: list_ffbox_files, wake_me' || hostPid(id) === pid) console.log(`w2625: what the test saw: ${saw()}`);
+  assert.ok(moved, `its process was started again: ${saw()}`);
+  assert.equal(turnEnds[1], 'Tools: list_ffbox_files, wake_me', `the next turn sees the tool the update added: ${saw()}`);
+  assert.notEqual(hostPid(id), pid, `in a new host, on the code the machine runs now: ${saw()}`);
+});
+
+test("w6548: a daemon killed before its offset save landed: the next daemon reads the host's lines again from that offset, and its turn end reaches the portal once", { timeout: 180_000 }, async (t) => {
+  const { sessions, mm, daemon, kill, hostDir, hostPid, cleanup, logs } = await setup();
+  t.after(cleanup);
+  const turnEnds: string[] = [];
+  sessions.events.on('turnEnd', (_s: SessionHandle, text: string) => turnEnds.push(text));
+  const d1 = daemon();
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined, 60_000, logs);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
+  const id = s.info.id;
+  sessions.send(id, 'hello');
+  await until('its turn', () => turnEnds.includes('Echo: hello'), 60_000, logs);
+  await until('idle', () => s.info.status === 'idle');
+  const pid = hostPid(id);
+  await kill(d1);
+  // The daemon's offset save runs off its loop after each poll (w6486), so a kill can land before it: here the whole of
+  // out.jsonl, its turn end included, was forwarded and none of it saved (Linux CI run 46073307022, the w2625 test).
+  const f = hostFiles(hostDir(id));
+  fs.writeFileSync(f.offset, offsetText(0));
+  fs.rmSync(f.offsetStop, { force: true });
+  daemon();
+  await until('back online', () => mm.isOnline('mx'), 60_000, logs);
+  await until('reported live again', () => s.live, 20_000, logs);
+  assert.equal(hostPid(id), pid, 'the same host, taken back');
+  // The new daemon has read the host's lines again to their end once it saved that offset.
+  const end = fs.statSync(f.out).size;
+  await until('read to the end', () => Number(fs.readFileSync(f.offset, 'utf8')) === end, 20_000, logs);
+  assert.deepEqual(turnEnds, ['Echo: hello'], 'one turn, one turn end');
+  sessions.send(id, 'again');
+  await until('its next turn', () => turnEnds.length === 2, 60_000, logs);
+  assert.deepEqual(turnEnds, ['Echo: hello', 'Echo: again'], 'a turn after it still ends as it should');
+});
+
+test('w6548: LineTail says where each line it hands on ends, in bytes, across reads and a half line', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-linetail-'));
+  try {
+    const file = path.join(dir, 'out.jsonl');
+    const ends: [string, number][] = [];
+    const tail: LineTail = new LineTail(file, (l) => ends.push([l, tail.lineEnd]));
+    fs.appendFileSync(file, 'one\r\nzwei ü\nhal');
+    tail.poll();
+    fs.appendFileSync(file, 'f\n\nlast\n');
+    tail.poll();
+    // 'ü' is two bytes; the empty line is skipped but counted.
+    assert.deepEqual(ends, [['one', 5], ['zwei ü', 13], ['half', 18], ['last', 24]]);
+    assert.equal(tail.position, fs.statSync(file).size);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('w605: LineTail reads whole lines only, any length, from an offset kept across restarts', () => {

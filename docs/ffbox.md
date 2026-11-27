@@ -92,11 +92,15 @@ per rolling 24 hours; operators are not capped.
 - **Releases.** A commit on master whose `FFVersion.cs` differs from its first parent's
   is a release (a version bump merged into master; w1137) (game repo `.github/workflows/main.yml`, `scripts/trigger-ci-release.sh`). The host
   decides whether to grant it (`scripts/release_lane.py`), checks the players, uploads both apps to
-  Steam once the run's tests pass, sets the main app live on `development` (`scripts/release_lane.py` `SETLIVE`; nothing sets
-  `pre-release` or the default branch: Ben or Lothsahn move those by hand), and
-  opens a PR for any files the build regenerated. `ff-agents:ci-release` drives it. A requested
-  release is done only when it is live on its branch (landed on the branch the lane sets, `development` included: the
-  notes never wait for `pre-release` or the default, w2444) and its patch notes are posted once, as Max,
+  Steam once the run's tests pass, sets the main app live on `development` (`scripts/release_lane.py` `SETLIVE`), and
+  opens a PR for any files the build regenerated. A version bump merged into `pre-1.0` (the 0.50.x hotfix line) is built
+  and uploaded the same way and sets its main app live on `pre-release`, only for a 0.50.x version (`SETLIVE_VERSIONS`:
+  a 1.0 build never goes there; ffbox e42c3c7, w6522, 2026-11-27; lothsahn: "Can it set that whenever a .50 release is
+  made?"). A failed or skipped upload leaves `pre-release` where it was, and FFBox's notice in #release-build-announce
+  says so. Nothing sets the default branch: Ben or Lothsahn move it by hand. The urgent lane (`steam_upload`) sets the same:
+  development for master, pre-release for a 0.50.x pre-1.0 main release (w6534; `docs/steam-upload.md`). `ff-agents:ci-release` drives it. A requested
+  release is done only when it is live on its branch (landed on the branch the lane sets: `development` for master,
+  `pre-release` for a 0.50.x hotfix; the notes never wait for the default, nor a master release's for `pre-release`, w2444) and its patch notes are posted once, as Max,
   in #dev-patch-notes (from any machine, with `post_as_max`: FFBox posts, [Posting as Max](#posting-as-max-w901)).
 
 ## Crash and desync intake

@@ -26,6 +26,7 @@ import { personHoldReason } from './personPlay.ts';
 import { batchUnityLogFile } from './sharedCaches.ts';
 import { beeAccessDenied, compilerServerAdvice, compilerServers, logFileArg, logTail } from './compilerServer.ts';
 import { rpcAvailable, rpcCall, RpcRefused, RpcUnavailable, type Caller } from './daemonRpc.ts';
+import { isMainModule } from './isMain.ts';
 
 /**
  * The pointer a worker-root install (w513, scripts/worker/worker.ts) leaves for scripts outside the daemon: its mailbox
@@ -111,9 +112,22 @@ export function editorHomeEnv(rest: string[], env: NodeJS.ProcessEnv, platform: 
 
 /** w5324: the pid Unity wrote to a project's Library/EditorInstance.json at boot ({"process_id": n, ...}), or undefined. */
 export function editorInstancePid(projectPath: string): number | undefined {
-  const pid = readJson<{ process_id?: unknown }>(path.join(projectPath, 'Library', 'EditorInstance.json'))?.process_id;
-  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined;
+  return instancePidOf(readJson<{ process_id?: unknown }>(path.join(projectPath, 'Library', 'EditorInstance.json')));
 }
+
+/** editorInstancePid off the loop (w6595). */
+export async function editorInstancePidAsync(projectPath: string): Promise<number | undefined> {
+  try {
+    return instancePidOf(JSON.parse(await fs.promises.readFile(path.join(projectPath, 'Library', 'EditorInstance.json'), 'utf8')) as { process_id?: unknown });
+  } catch {
+    return undefined;
+  }
+}
+
+const instancePidOf = (j: { process_id?: unknown } | undefined) => {
+  const pid = j?.process_id;
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined;
+};
 
 // ---------------------------------------------------------------- which processes are Unity editors
 
@@ -1984,7 +1998,7 @@ export function writeShims(bin: string, node = process.execPath, nodeArgs = proc
 }
 
 // Run when started directly (the shim, or node machine/unitySlots.ts ...).
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+if (isMainModule(import.meta.filename)) {
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),
     (e) => {

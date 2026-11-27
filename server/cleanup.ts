@@ -156,10 +156,55 @@ export interface CleanupRun {
 // Windows paths ("C:/x", "\\\\server\\x") are judged as Windows paths and "/x" as POSIX paths on any OS (CI runs
 // on Linux and Windows).
 const P = (p: string) => (/^[a-zA-Z]:[\\/]|^\\\\/.test(p) ? path.win32 : p.startsWith('/') ? path.posix : path);
+const normOf = (p: string) => P(p).resolve(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+/**
+ * norm's answers for the absolute paths, which no working folder changes: a drive path, a POSIX path, and a UNC path
+ * with its server and share. w6508: a UNC path with no share (`\\`, `\\server`, `\\\x`) resolves against the working
+ * folder's drive, so it is worked out each time, as a relative one is. w6486: BEAST's daemon spent 13 s of one block in
+ * norm and within, called pairwise by planInstallLeftovers. Emptied when it grows past NORM_CACHE_MAX.
+ */
+const ABSOLUTE = /^[a-zA-Z]:[\\/]|^\\\\[^\\/]+[\\/]+[^\\/]|^\//;
+/** Whether norm keeps its answer for `p` (for the tests). */
+export const normKept = (p: string) => ABSOLUTE.test(p);
+const normCache = new Map<string, string>();
+const NORM_CACHE_MAX = 50_000;
 /** A path as compared: resolved, forward slashes, no trailing slash, lower case. */
-export const norm = (p: string) => P(p).resolve(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+export const norm = (p: string) => {
+  if (!ABSOLUTE.test(p)) return normOf(p);
+  let n = normCache.get(p);
+  if (n === undefined) {
+    if (normCache.size >= NORM_CACHE_MAX) normCache.clear();
+    normCache.set(p, (n = normOf(p)));
+  }
+  return n;
+};
 /** Whether `p` is `root` or inside it. */
-export const within = (p: string, root: string) => norm(p) === norm(root) || norm(p).startsWith(norm(root) + '/');
+export const within = (p: string, root: string) => {
+  const n = norm(p);
+  const r = norm(root);
+  return n === r || n.startsWith(r + '/');
+};
+
+/**
+ * Drops each key that is within another key still there, in the map's order: the keys
+ * `for (const p of [...m.keys()]) if ([...m.keys()].some((q) => q !== p && within(p, q))) m.delete(p)` drops (of two keys
+ * that name one path, the first), without comparing every pair (w6486).
+ */
+export function dropNested<T>(m: Map<string, T>): void {
+  const keys = [...m.keys()];
+  const normed = keys.map((k) => norm(k));
+  const alive = new Map<string, number>();
+  for (const n of normed) alive.set(n, (alive.get(n) ?? 0) + 1);
+  keys.forEach((k, i) => {
+    const n = normed[i];
+    let inside = alive.get(n)! > 1;
+    // within(p, q) for another q: q's form is p's cut at one of p's '/' (the empty form, a POSIX root's, included)
+    for (let at = n.indexOf('/'); !inside && at !== -1; at = n.indexOf('/', at + 1)) inside = (alive.get(n.slice(0, at)) ?? 0) > 0;
+    if (!inside) return;
+    m.delete(k);
+    alive.set(n, alive.get(n)! - 1);
+  });
+}
 const glob = (pattern: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 'i');
 
 /** Folder names that mark what is never removed, wherever they are. */
@@ -1562,7 +1607,7 @@ export class CleanupRunner {
         }
       }
       const critical = trigger === 'critical' || (before !== undefined && s.criticalFreeGB !== undefined && before < s.criticalFreeGB * GB);
-      const t0 = Date.now();
+      const t0 = this.now();
       const startedAt = this.now();
       if (!dryRun) {
         this.d.started?.(trigger, low);
@@ -1576,9 +1621,9 @@ export class CleanupRunner {
       // No report-only quick plan first any more (w5795): on LothDesktop it took 21 min of a low pass before anything was
       // removed, and no pass that ran it ever finished to report it. Each step of the pass removes its own plan at once.
       const r = await this.d.pass(low, { stale: withStale, dryRun, ...(critical ? { critical } : {}), ...(step ? { step } : {}) });
-      const passMs = Date.now() - t0;
+      const passMs = this.now() - t0;
       const vols = await this.volumes();
-      const after = vols.free;
+      let after = vols.free;
       const soft = softFreeBytes(s.softFreeGB, this.d.fitSoftToVolume ? vols.total : undefined);
       const belowSoft = after !== undefined && after < soft;
       const summary: CleanupSummary = {
@@ -1601,6 +1646,8 @@ export class CleanupRunner {
         ...(r.media ? { media: r.media } : {}),
         ...(r.phasesMs ? { phasesMs: r.phasesMs } : {}),
         passMs,
+        freeReadAt: new Date(this.now()).toISOString(),
+        ...(s.everyMinutes > 0 && passMs > s.everyMinutes * 60_000 ? { overranMinutes: s.everyMinutes } : {}),
       };
       if (dryRun) {
         this.d.log({ ...summary, freeBeforeBytes: before, plannedAll: r.planned, listedAll: r.listed, heldAll: r.held });
@@ -1609,11 +1656,24 @@ export class CleanupRunner {
       const stale = await this.d.stale?.().catch(() => []);
       if (stale?.length) summary.staleLibraries = stale.sort((a, b) => b.days - a.days).slice(0, 10);
       let notice: string | undefined;
-      if (!belowSoft) this.noticeAt = 0;
+      // w6551: free space is read again when the pass ends, after the slow steps (stale scan, consumers), so a pass of
+      // 52 min never reports the figure it started with.
+      const reread = async () => {
+        const again = await this.volumes();
+        if (again.free === undefined) return;
+        summary.freeBytes = again.free;
+        summary.belowSoft = again.free < softFreeBytes(s.softFreeGB, this.d.fitSoftToVolume ? again.total : undefined);
+        summary.freeReadAt = new Date(this.now()).toISOString();
+      };
+      await reread();
+      if (!summary.belowSoft) this.noticeAt = 0;
       else if (!this.noticeAt || this.now() - this.noticeAt > NOTICE_REPEAT_HOURS * 3_600_000) {
-        this.noticeAt = this.now();
         summary.consumers = await this.d.consumers().catch(() => []);
-        notice = describeShortfall(summary);
+        await reread(); // the consumer scan can be slow too
+        if (summary.belowSoft) {
+          this.noticeAt = this.now();
+          notice = describeShortfall(summary);
+        } else this.noticeAt = 0;
       }
       this.d.log({ ...summary, freeBeforeBytes: before, removedAll: r.removed, failedAll: r.failed.slice(0, 50), plannedAll: r.planned, listedAll: r.listed, heldAll: r.held });
       this.last = summary;
@@ -1663,6 +1723,8 @@ const gb = (b: number) => `${(b / GB).toFixed(1)} GB`;
 /** The notice text: what the pass freed, how far below the soft threshold it still is, and what holds the space. */
 export function describeShortfall(s: CleanupSummary): string {
   const free = s.freeBytes === undefined ? '?' : gb(s.freeBytes);
+  const readAt = s.freeReadAt ? ` (read at ${s.freeReadAt.slice(11, 19)}Z, when the pass ended)` : '';
+  const overran = s.overranMinutes !== undefined && s.passMs !== undefined ? ` This pass ran ${(s.passMs / 60_000).toFixed(1)} min, longer than its ${s.overranMinutes} min interval.` : '';
   const root = s.root;
   const tag = (p: string) => (root ? (strictlyWithin(p, root) ? ' [inside the install folder]' : ' [outside it: measure only]') : '');
   // On Windows nothing off the install drive is named (w1755): a C: folder in the notice is a worker's cue to measure it.
@@ -1675,7 +1737,7 @@ export function describeShortfall(s: CleanupSummary): string {
     : installDrive(root)
       ? ` Clean-up work on this computer deletes only inside its worker install folder ${root} (w896), and on Windows it reads, measures and deletes only on the install drive ${root.slice(0, 2).toUpperCase()}, never on C: (lothsahn, 2026-10-22, w1755: "Fix the instructions for Windows boxes to only look at v:"): nothing on C: is measured or named here, and a worker never looks there; it reports what it freed in the folder and what is still short.`
       : ` Clean-up work on this computer deletes only inside its worker install folder ${root} (w896). What is outside it (the home folder, AppData, system temp, caches, the game's data folder) a worker only measures and reports, with sizes, and it lists any setting or script that makes FF Factory write there so it can be moved inside the folder; it deletes nothing outside, whatever the sizes below suggest.`;
-  return `Clean-up freed ${gb(s.freedBytes ?? 0)} (${s.removed} item(s)) but only ${free} is free on disk, below the soft threshold of ${s.softFreeGB} GB. What is left is not on the clean-up's lists: file clean-up work for a worker on that computer to remove FF Factory's own leftovers among it and report what it freed; never ask its owner to free space (w626).${rule}${biggest}${staleLine(s)}`;
+  return `Clean-up freed ${gb(s.freedBytes ?? 0)} (${s.removed} item(s)) but only ${free} is free on disk${readAt}, below the soft threshold of ${s.softFreeGB} GB. What is left is not on the clean-up's lists: file clean-up work for a worker on that computer to remove FF Factory's own leftovers among it and report what it freed; never ask its owner to free space (w626).${overran}${rule}${biggest}${staleLine(s)}`;
 }
 
 /** The stale Unity Libraries, as a sentence (empty without any). */

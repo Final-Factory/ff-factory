@@ -37,11 +37,50 @@ my own inference.
 - **Scripts:** in the w1576 worker's temp folder (`Phys.cs`, `dups.py`). They were not kept. w6291 rewrote the
   cluster-map measurement and kept it: `scripts/disk-usage/diskuse.ps1` (with `DiskUse.cs`). It is read-only. It prints
   logical, physical (the union of the clusters) and exclusive GB per folder, plus their union. Usage:
-  `powershell -File scripts\disk-usage\diskuse.ps1 -Children V:\ffw` (it skips `steam` and `secrets`), or
+  `powershell -File scripts\disk-usage\diskuse.ps1 -Children V:\ffw` (it always skips `steam` and `secrets`, and names the folders it cannot list), or
   `-Folders a,b`. On LothDesktop on 2026-11-27 it walked all of `V:\ffw` (4.0 M files) in 391 to 642 s, measured.
   `du` of `V:\ffw\tmp` alone ran past 500 s, and it counts every clone again: 502.7 GB logical against 314.1 GB
   physical. `players` was 9.56 GB physical but only 2.55 GB exclusive, because its slots hard-link the builds in
   `player-cache`.
+
+## Space no folder holds (w6552)
+
+On ReFS, "used" (df, `DriveInfo`) is more than the files. diskuse.ps1 now ends with the split:
+`Used 288.6 GB = folders measured 249.2 GB + ReFS metadata 17.6 GB + not in them 21.8 GB`, then the folders it did not
+measure (LothDesktop, 2026-11-27 22:46Z, measured). Before w6552 the gap people quoted (31.0, 44.7 and 39.2 GB in w6530)
+had the metadata in it.
+
+- **ReFS metadata: 14.8 to 20.5 GB on 2026-11-27, the largest part and the part that swings.** `fsutil volume diskfree V:`
+  prints it without elevation ("Total metadata bytes"). The ReFS log keeps its history: event 142 in
+  `Microsoft-Windows-ReFS/Operational` (readable by a worker) gives available, reserved, metadata and used clusters about
+  once an hour ("Used clusters" includes metadata and reserved; "GB" there is GiB). Over 1,126 events since 2026-11-18,
+  metadata ranged 2.8 to 20.5 GB. On 11-27 it rose from 14.8 GB (14:26Z) to 20.5 GB (21:32Z) and fell back to 17.4 GB
+  (22:32Z), measured. Block clones and dedup keep their reference counts in metadata, so a day of cloning sandboxes grows
+  it (a guess at the cause; the numbers are measured).
+- **Reserved clusters: 1.5 to 2.8 GB on a normal hour, 7.4 GB at most.** ReFS holds them for writes in flight and frees
+  not yet done. This is the "deferred free": it is small and clears within the hour.
+- **Not measured from a worker, about 13 to 22 GB** (the rest, minus reserved): `steam` and `secrets` (excluded by rule),
+  `V:\ffw\daemon` and `V:\ffw\tmp-daemon` (the daemon's own temp folder, w6000; a worker cannot list either),
+  `System Volume Information` (shadow copies), files deleted while a process still holds them open, three folders inside
+  `tmp` that the walk could not open, and what changed during the walk (8 to 9 minutes; free moved 0.8 GB during one).
+  The recycle bin `V:\$RECYCLE.BIN` held 0.14 GB. Sizing these needs an elevated look (below).
+- **trim and compact do not touch it.** `ffsb-helper-trim` and `-compact` hand free space inside V: back to the VHDX's
+  host drive (self-recovery.md); they never lower V:'s own "used".
+
+The elevated look, read-only, on LothDesktop as an administrator:
+
+1. `vssadmin list shadowstorage /for=V:` and `vssadmin list shadows /for=V:`: shadow copies of V: live in its
+   System Volume Information; a worker gets "Initialization failure" from `Win32_ShadowStorage`.
+2. The size of everything a worker cannot open, physical clusters, from an elevated shell:
+   `powershell -File scripts\disk-usage\diskuse.ps1 -Folders "V:\System Volume Information,V:\ffw\daemon,V:\ffw\tmp-daemon,V:\ffw\steam,V:\ffw\secrets"`.
+   Sizes only; nothing is opened for reading. If System Volume Information still answers "Access is denied", run it as
+   SYSTEM (an administrator alone may not list it).
+3. Files deleted but still open: `handle64.exe -accepteula -nobanner V:\` (Sysinternals), then the paths that no longer
+   exist (`Test-Path` false) with their processes. On NTFS they show under `\$Extend\$Deleted`; on ReFS that is not
+   checked yet.
+4. Dedup state: `Get-ReFSDedupStatus -Volume V:` and `Get-ReFSDedupSchedule -Volume V:`. The daily job failed on
+   2026-11-26 08:00Z after 2 s with 0x80070015 ("device not ready"), three hours after V: was dismounted and mounted again
+   at its grow from 343.5 to 386.5 GB, and the log shows no job since (ReFsDedupSvc events, measured 2026-11-27 22:40Z).
 
 ## Where a sandbox's disk goes
 
@@ -178,6 +217,21 @@ JSON gives `RunStatus`, `StatusCode`, `Duration`, `ScannedOnLastRun` and `Dedupe
 job starts at 08:00Z, which is 03:00 local, even though the task's trigger and `NextTime` read 07:00Z (measured, events
 from 2026-11-12 to 11-19). Total savings fell from 238 GB to 203 GB between 11-17 and 11-19 while every run
 succeeded. That is the decay described below, not a fault.
+
+**A remount of V: can stop the dedup service watching it (w6573).** Both remounts since dedup was turned on (the
+helper's `mount`, `compact` or `grow`, or anything else that detaches the VHDX) left `ReFsDedupSvc` (a demand-start service)
+not deduplicating V: until the service restarted (measured):
+after a remount on 2026-11-08 20:33Z no event 6 came until the 11-09 08:00Z job itself started the service (job
+started 08:00:02, service 08:00:26, event 6 08:00:39), that job never logged an end, and nothing ran until the 11-11
+reboot; a remount on 11-26 05:00Z was followed by no event 6, the 11-26 08:00Z job failed with 0x80070015
+(ERROR_NOT_READY) and no job ran after it, with the volume's scheduled task stuck in Running. An administrator's
+`Restart-Service refsdedupsvc` (and stopping the stuck task) brought event 6 back at 2026-11-27 23:00Z. Event 6, "started monitoring" a volume, has only ever been logged at a service start (measured, 10-19 to 11-27). The
+helper's `mount`, `compact` and `grow` now wait up to a minute for an event 6 newer than V:'s last dismount (ReFS event 303 naming
+V:'s volume id; shutdown and boot log none, so a mount at boot does not warn) and, when none comes, say so in their result (warn only; they restart nothing; read from the event log, not the dedup cmdlets). To check by hand without admin:
+`Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-ReFsDedupSvc/Operational'; Id=6} -MaxEvents 3`, and compare
+its time with V:'s last dismount (events 300 and 303 in `Microsoft-Windows-ReFS/Operational` naming V:'s volume
+id, f1ab3378 on LothDesktop). A remount logs no event 7 ("stopped monitoring") there; only the service's own stop
+did (2026-11-27 22:59Z, measured).
 
 The full log is `C:\ProgramData\ffsb-helpers\results\refs-dedup-trial.log`. To undo:
 `Clear-ReFSDedupSchedule -Volume V:` then `Disable-ReFSDedup -Volume V:`. Data already shared stays shared (sourced).

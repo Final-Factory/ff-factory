@@ -134,6 +134,36 @@ request CI took 123 min at the median and 190 min at p90 (measured, 92 runs, `gh
 slot last on its branch is picked first. The 2 h is a guess, long beside the ffu loop's slowest step (a cold workspace
 build, 221 to 366 s), so only a worker that moved on to other work loses its slot.
 
+**Who frees a stale slot (w6484).** Until w6484 only the next `take` or a hand-run `ffu-slot sweep` freed one: the rule
+above judged a slot free, but nothing acted on it while no worker needed a slot. So stale holds stayed "held" on the page
+for hours (BEAST slot3 for 5 h on 2026-11-26, w6179; BEAST slot3 and slot4 and m5 slot1 on 2026-11-27, 4 to 16 h), and a
+person filed a request each time to free them by hand. Now the daemon acts on its own slot report (`ffu-slot list --json`,
+every 2 min, `FFU_REPORT_MS`): when it names a stale slot, the stale-output setting `ffuSlotSweep`
+(`machines.cleanup.staleOutput.ffuSlotSweep`) says what happens (`machine/ffuSlotAutoSweep.ts`):
+
+- `on` is the default since the enforce step (w6484, after the warn-only #1500; lothsahn: "Turn it on everywhere: free
+  stale slots by themselves."). The portal's `machines.cleanup.staleOutput.ffuSlotSweep` set to `warn` or `off` takes it
+  back on every machine at its next settings push, with nobody at the machine.
+- `warn`: daemon.log says `ffu slots: auto sweep (warn-only, ffuSlotSweep warn): would free
+  <slot> on <branch>: <why>`, once per slot and holder; nothing is freed.
+- `on`: the daemon runs `ffu-slot sweep` as its own process (`runFfuSlotSweep`, no session), the same rule, lock and rescue
+  as a worker's sweep, and logs each line it printed as `ffu slots: auto sweep: ...`. A failure is one log line
+  (`auto sweep failed: ...`) and never stops the daemon. It is not killed on a timer: killed inside the lock it would leave
+  the lock held for 15 min and its git running in the checkout; its lock wait (10 min) and each git call (20 min) end it.
+
+Both modes act only on a holder that no longer runs (`holderIs` stopped or gone; a sessionless sweep skips running
+holders). A running holder's stale slot (on no open request, or idle past 2 h) is left to the next `take`, which frees it
+and hands it over in one locked step: freed with no take behind it, the holder would go on writing in a released slot, and
+the next take's reset would drop that work with nothing to rescue (w6495's review of #1500, reproduced by a test).
+- `off`: nothing.
+
+A slot a sweep freed remembers its holder (`freedFrom` in slots.json). If that holder resumes (after waiting on CI, say)
+and writes in its old checkout, the slot's verdict becomes "released; ... saved on a rescue branch first", and the next take
+saves that work under the holder's name (and tells it) before it resets the checkout (w6510's review of #1500).
+
+The portal sets it, so turning it back off needs nobody at the machine. `ffu-slot sweep` no longer needs FF_SESSION_ID
+(the daemon's sweep has none; it holds no slot, so every holder is another's).
+
 **Its holder's work is saved first, never dropped** (`rescueWork`). Before a taken slot's checkout is reset, its
 uncommitted changes are committed and its tip is kept as branch `rescue/ffu-slot/<slot>-<holder>-<sha8>` in the shared
 clone (a local branch, which `fetch --prune` never drops), then pushed to origin (ffu's CI runs on pushes to `main` and
@@ -194,7 +224,7 @@ and in `list_sandboxes` and `list_machines` (`server/ffuSlotsView.ts`): for each
 when the portal knows the session), whether it runs, stopped or is gone, its branch and commit, since when it is held and
 when it was last used, its target's size, and whether the hold is **stale**. Stale is `ffu-slot list`'s own judgement: a
 held slot `slotFree` calls free (its holder is gone with its work pushed, or stopped or waiting past `FFU_SLOT_WAIT_GRACE_MS`, or idle
-past `FFU_SLOT_IDLE_MS`, w5885); the next `take` frees it by itself, so the page has no action.
+past `FFU_SLOT_IDLE_MS`, w5885); the next `take`, or the daemon's auto sweep with `ffuSlotSweep` on (w6484), frees it, so the page has no action.
 
 - The daemon runs `ffu-slot list --json` (`slotsReport`) in a child process every 2 minutes (`FFU_REPORT_MS`,
   `readFfuSlotsReport`), so the `git rev-parse` and `git status` in each checkout never block it, and sends the result in its
@@ -259,9 +289,14 @@ UTC before a pass swept 15.6 GB of it. Now every slot a pass keeps for one of th
 slot is kept again and stays watched. Once idle, the re-check plans what the pass would take then: the stale units, then
 `debug/incremental` over the cap. Each removal still asks `ffuSlotBusyNow` right before its rename.
 
-`staleOutput.ffuBusyRetry` sets the mode. `warn` is the default: it logs `would remove` lines to the clean-up history
-(`portal_logs cleanup`, trigger `ffu-busy-retry`) and removes nothing (docs/worker-fence.md: warn-only first). `on` removes,
-and only while the stale-output mode is `on` too. `off` stops the re-check. Pruning by age inside a busy target was rejected
+`staleOutput.ffuBusyRetry` sets the mode. `on` is the default: it removes, and only while the stale-output mode is `on`
+too. It shipped as `warn` first (docs/worker-fence.md): on LothDesktop on 2026-11-27, 05:00 to 21:36 UTC, the warn mode logged
+3 plans (3.1, 4.9 and 10.3 GB), each made after the build had stopped and each the same unit-graph sweep an idle pass makes,
+so zero bad plans. BEAST and biscuit ran warn the same day and logged 5 more plans by the idle-pass rules (read by w6537's
+review); one of them, biscuit slot4 at 08:47, was a whole-target take of 27.5 GB, by the rule that removes a target still
+over the cap after its stale units and incremental cache once nothing was written in it for the settle time. `warn` logs `would remove` lines to the clean-up history (`portal_logs cleanup`, trigger `ffu-busy-retry`)
+and removes nothing. `off` stops the re-check. Planning can take minutes, so right before it removes, the re-check asks again
+whether a pass has started; if one has, it removes nothing and the slot stays watched (w6304's review, point 4). Pruning by age inside a busy target was rejected
 because a running rustc or test run can need any file in `deps/` whatever its age. The age window that is safe is the
 unit-graph sweep's, and a pass already runs it whenever nothing runs in the target.
 

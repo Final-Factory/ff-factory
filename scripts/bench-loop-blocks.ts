@@ -194,6 +194,68 @@ const pagePlacement = () => {
   agents.roomNow();
   agents.roomExtras();
 };
+// w6513: a daemon disconnect (15:44Z on 2026-11-27, lothdesktop: a 5.0 s block under drain > withClaimsMemo): m0 goes offline
+// and the drain walks every queued send, those for m0's workers held on it. --drainRounds K: only that drain, K times (a CPU profile).
+const DRAIN_ROUNDS = arg('drainRounds', 0);
+const disconnect = () => {
+  const m = machines as unknown as { links: Map<string, unknown> };
+  m.links.delete('m0');
+  store.machines.get('m0')!.online = false;
+};
+if (DRAIN_ROUNDS > 0) {
+  // --held N: N of m0's workers that sit stopped in their sandbox (not released), each on an open request, get a send. Nothing
+  // holds them before the send itself, which throws as MachineManager.dispatchSend does while m0's daemon is away.
+  // --others 0: the bench's other waiting sends are left out (default: kept, as the live queue has them).
+  const HELD = arg('held', 60);
+  const q = (sm as unknown as { queue: unknown[] }).queue;
+  if (arg('others', 1) <= 0) q.splice(0, Infinity);
+  // m0's workers mid-turn are idle once its daemon is gone (the live case: nothing there runs), so its sends reach the send.
+  for (const s of sessions.filter((x) => x.machineId === 'm0' && x.status === 'running')) {
+    s.status = 'stopped';
+    (sm.sessions.get(s.id) as unknown as { live: boolean }).live = false;
+  }
+  const onM0 = sessions.filter((s) => s.machineId === 'm0' && !s.placeReleased && s.status !== 'running').slice(0, HELD);
+  // --full N: N sends for m1's stopped workers too, m1 online with every sandbox at max_agents_per_sandbox (two mid-turn in
+  // each), interleaved with m0's: each is held by placeFull, which reads claims and places.
+  const FULL = arg('full', 0);
+  const onM1: SessionInfo[] = [];
+  if (FULL > 0) {
+    for (const sb of store.machines.get('m1')!.sandboxes!) {
+      const here = sessions.filter((s) => s.machineId === 'm1' && s.machineSandbox === sb.id && !s.placeReleased);
+      for (const s of here.slice(0, 2)) {
+        s.status = 'running';
+        (sm.sessions.get(s.id) as unknown as { live: boolean }).live = true;
+      }
+      onM1.push(...here.slice(2).filter((s) => s.status !== 'running'));
+    }
+    onM1.splice(FULL);
+  }
+  const mix = onM0.flatMap((s, i) => (onM1[i] ? [s, onM1[i]] : [s])).concat(onM1.slice(onM0.length));
+  mix.forEach((s, i) => {
+    const id = `wh${i}`;
+    store.work.set(id, { ...store.work.get(`w${W - 1}`)!, id, status: 'active', queuedFor: undefined, sessionIds: [s.id], links: { [s.id]: { at: T, how: 'sent' } } } as unknown as WorkItem);
+    q.push({ uuid: `h${i}`, id: s.id, text: 'go on', from: 'orchestrator', at: new Date().toISOString(), why: 'capacity' });
+    const h = sm.sessions.get(s.id) as unknown as { send: () => string };
+    h.send = () => {
+      if (!(machines as unknown as { links: Map<string, unknown> }).links.has(s.machineId!)) throw new Error(`machine ${s.machineId} is offline (asleep, or its daemon is not running)`);
+      return 'sent';
+    };
+  });
+  disconnect();
+  for (let r = 0; r < DRAIN_ROUNDS; r++) {
+    const marks = [costMark(agents.placeCost.free), costMark(agents.placeCost.places), costMark(agents.placeAgain.claimsCost)] as const;
+    const t0 = performance.now();
+    sm.drain();
+    const place = `${costSince('places', agents.placeCost.places, marks[1])}${costSince('free', agents.placeCost.free, marks[0])}${costSince('claims', agents.placeAgain.claimsCost, marks[2])}`.trim();
+    console.log(`drain after m0's daemon disconnected, run ${r + 1}: ${(performance.now() - t0).toFixed(1)} ms, ${sm.queued().length} still queued  place{${place}}`);
+  }
+  if (arg('why', 0) > 0) {
+    const left = new Set(sm.queued().map((x) => x.id));
+    for (const s of onM0.filter((x) => !left.has(x.id)).slice(0, 3)) console.log('gone', s.id, s.status, JSON.stringify(store.readTranscript(s.id).slice(-2)).slice(0, 400));
+    for (const x of sm.queued().slice(0, 3)) console.log('held', x.id, (x as { why?: string }).why);
+  }
+  process.exit(0);
+}
 // --placeRounds K: only the page placement, K times, for a CPU profile (node --cpu-prof) that is mostly placement.
 if (PLACE_ROUNDS > 0) {
   for (let r = 0; r < PLACE_ROUNDS; r++) agents.pageRead(pagePlacement);

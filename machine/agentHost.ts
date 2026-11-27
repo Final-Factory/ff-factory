@@ -6,7 +6,10 @@
 //   in.jsonl     the daemon's commands, numbered (send, interrupt, stop, mode, decide, tool answers, the editor's state)
 //   out.jsonl    everything the session records, in order (its record, transcript events with their seq set here,
 //                images, deltas, signals, tool calls); the daemon forwards each line to the portal and keeps how far
-//                it got in daemon.offset, so a new daemon forwards exactly what the last one had not
+//                it got in daemon.offset, so a new daemon forwards exactly what the last one had not (with
+//                daemon.offset.stop, which a daemon going away writes when its poll's write may still land: the larger).
+//                A killed daemon may have forwarded past that save; a new one reads those lines again, which is harmless
+//                but for signals (a turn end acts twice), so daemon.signalled keeps how far the forwarded signals go (w6548)
 //   host.json    the host's protocol, pid and start time; beat: its heartbeat, written every few seconds
 //   state.json   the session's latest record, for a daemon that adopts the host
 //   place.json   (the daemon's) the agent's folder and sandbox, without secrets
@@ -37,6 +40,7 @@ import { scopeEndCause, scoped } from './linuxScope.ts';
 import { HOST_WATCH, endHostTree, hostIdentity, pidAlive, realHostProcs, removeHostDir, type HostProcs } from './hostWatch.ts';
 import { capNote, capsFor, capsModeOf, startWorkerCaps, type CapHit, type CapsMode } from './workerCaps.ts';
 import { pushCapNote } from '../server/workerCapNotes.ts';
+import { isMainModule } from './isMain.ts';
 
 export { pidAlive };
 
@@ -47,6 +51,8 @@ export const BEAT_MS = 3000;
 export const BEAT_STALE_MS = 30_000;
 /** How often each side reads the other's file. */
 const POLL_MS = 100;
+/** w6595: how long the daemon keeps a host's out.jsonl open between polls (it opens it again after that). */
+const TAIL_KEEP_OPEN_MS = 2000;
 /** A host given no message to deliver this long after it started closes (a daemon died between start and send). */
 const IDLE_START_MS = 2 * 60_000;
 /** After its agent process ended, how long a host waits for a message that would start it again before it closes. */
@@ -100,10 +106,36 @@ export class LineTail {
   private partial = Buffer.alloc(0);
   readonly file: string;
   private readonly onLine: (line: string) => void;
-  constructor(file: string, onLine: (line: string) => void, offset = 0) {
+  /** w6595: an open read handle kept between polls, and the timer that closes it (keepOpenMs after it was opened). */
+  private fd: number | undefined;
+  private closer: NodeJS.Timeout | undefined;
+  private readonly keepOpenMs: number;
+  /**
+   * `keepOpenMs` (w6595): keep the file open between polls for that long, then close it; the next poll opens it again.
+   * The daemon's tail of each host's out.jsonl polls every POLL_MS, and opening the file each time held its loop 7 to 11 s
+   * a minute with ~26 hosts on a busy disk (LothDesktop, 2026-11-27 22:57Z). 0 (the default): open and close every poll.
+   */
+  constructor(file: string, onLine: (line: string) => void, offset = 0, keepOpenMs = 0) {
     this.file = file;
     this.onLine = onLine;
     this.offset = offset;
+    this.keepOpenMs = keepOpenMs;
+  }
+
+  /** Polls under way (a line's handler may close the tail, or poll it again, while a poll reads). */
+  private depth = 0;
+  /** Handles let go of while a poll read them: closed once the outermost poll is done. */
+  private deferred: number[] = [];
+
+  /** Let go of the kept handle now (before its folder is removed); a later poll opens the file again. */
+  close() {
+    clearTimeout(this.closer);
+    this.closer = undefined;
+    const fd = this.fd;
+    this.fd = undefined;
+    if (fd === undefined) return;
+    if (this.depth > 0) this.deferred.push(fd);
+    else closeQuietly(fd);
   }
 
   /** How far whole lines have been read. */
@@ -111,36 +143,67 @@ export class LineTail {
     return this.offset - this.partial.length;
   }
 
+  /** Where the line onLine is handling now ends (its newline included), as a byte offset (w6548). */
+  lineEnd = 0;
+
   /** Read what was appended since the last call. */
   poll() {
-    let fd: number | undefined;
+    let fd = this.fd;
+    let own = false;
+    this.depth++;
     try {
-      fd = fs.openSync(this.file, 'r');
+      if (fd === undefined) {
+        fd = fs.openSync(this.file, 'r');
+        if (this.keepOpenMs > 0) {
+          this.fd = fd;
+          this.closer = setTimeout(() => this.close(), this.keepOpenMs);
+          this.closer.unref?.();
+        } else own = true;
+      }
       const size = fs.fstatSync(fd).size;
       while (this.offset < size) {
         const buf = Buffer.alloc(Math.min(size - this.offset, 8 * 1024 * 1024));
         const n = fs.readSync(fd, buf, 0, buf.length, this.offset);
         if (n <= 0) break;
+        let at = this.offset - this.partial.length;
         this.offset += n;
         let data = Buffer.concat([this.partial, buf.subarray(0, n)]);
         for (let i = data.indexOf(10); i >= 0; i = data.indexOf(10)) {
           const line = data.subarray(0, i).toString('utf8').replace(/\r$/, '');
           data = data.subarray(i + 1);
+          at += i + 1;
+          this.lineEnd = at;
           if (line.trim()) this.onLine(line);
         }
         this.partial = Buffer.from(data);
       }
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') console.log(new Date().toISOString(), `reading ${this.file}: ${(e as Error).message}`);
+      // A kept handle that failed is not kept: the next poll opens the file again.
+      if (fd !== undefined && fd === this.fd) this.close();
     } finally {
-      if (fd !== undefined) fs.closeSync(fd);
+      if (own && fd !== undefined) closeQuietly(fd);
+      if (--this.depth === 0) for (const d of this.deferred.splice(0)) closeQuietly(d);
     }
   }
 }
 
+function closeQuietly(fd: number) {
+  try {
+    fs.closeSync(fd);
+  } catch {
+    // already closed
+  }
+}
+
+/** Digits of every offset written (w6519): the largest safe integer has 16. */
+export const OFFSET_WIDTH = 16;
+/** An offset as it is written in daemon.offset and daemon.offset.stop: zero-padded, which Number() and every older daemon read as it. */
+export const offsetText = (at: number) => String(at).padStart(OFFSET_WIDTH, '0');
+
 export function hostFiles(dir: string) {
   const f = (n: string) => path.join(dir, n);
-  return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), beat: f('beat'), log: f('host.log'), creds: f('creds.sha'), lockEnv: f('lockenv.sha'), scope: f('scope'), progress: f('daemon.progress') };
+  return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), offsetStop: f('daemon.offset.stop'), signalled: f('daemon.signalled'), beat: f('beat'), log: f('host.log'), creds: f('creds.sha'), lockEnv: f('lockenv.sha'), scope: f('scope'), progress: f('daemon.progress') };
 }
 
 const CREDENTIAL_ENV = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'GH_TOKEN'] as const;
@@ -396,6 +459,21 @@ export class HostedSession implements SessionHandle {
   private launchedAt = 0;
   private timer?: NodeJS.Timeout;
   private savedOffset = -1;
+  /**
+   * The poll's write of daemon.offset still in flight (w6486: BEAST's daemon held its loop 6-10 s in this write on
+   * 2026-11-27), and which start of the host it is for: a write for an earlier start never counts as saved.
+   */
+  private offsetWrite?: Promise<void>;
+  private offsetGen = 0;
+  /**
+   * How far into out.jsonl the signals forwarded to the portal go (w6548), kept in daemon.signalled at each one. Signals
+   * are the one kind of line that acts twice when read twice (transcript events go by seq, a state replaces the last):
+   * a daemon killed between forwarding a turn end and its poll's offset save (off the loop, w6486) left daemon.offset
+   * short of it, and the next daemon forwarded that turn end again, as a second turn end of a turn that ran once (the
+   * w2625 test's "its next turn" passed on it at once on Linux CI, run 46073307022). A signal the daemon before never
+   * forwarded (the turn ended while no daemon ran, w605) lies past it and goes.
+   */
+  private signalledAt = 0;
   private disposed = false;
   /** The host process's pid as launched (host.json says it too once written). */
   private pid?: number;
@@ -414,6 +492,8 @@ export class HostedSession implements SessionHandle {
   /** When its agent last did something (PROGRESS_OPS) or was given a turn: the hang watch's clock (w3673). */
   private progressAt = Date.now();
   private progressSaved = 0;
+  /** A daemon.progress write is on its way (w6554): the next waits for it rather than racing it. */
+  private progressWriting = false;
   /** The hang watch's look at it (w3673): since when, its tools' CPU then, and the status detail it set. */
   private hang?: { since: number; cpu?: Map<string, number>; flag?: string };
   private hangLooking = false;
@@ -475,7 +555,9 @@ export class HostedSession implements SessionHandle {
     const state = readJson<Extract<HostMessage, { op: 'state' }>>(f.state);
     if (state) this.applyState(state, false);
     this.creds = readFileOr(f.creds, '').trim() || undefined;
-    const offset = Number(readFileOr(f.offset, '0')) || 0;
+    // The larger: a poll's write that landed after a going daemon's own is older (w6486), and offsets only grow.
+    const offset = Math.max(Number(readFileOr(f.offset, '0')) || 0, Number(readFileOr(f.offsetStop, '0')) || 0);
+    this.signalledAt = Number(readFileOr(f.signalled, '0')) || 0;
     this.n = countLines(f.in);
     // Its process runs: taken back even with a late heartbeat (w799); the poll looks at it again.
     const look = hostLook(f.dir);
@@ -619,8 +701,9 @@ export class HostedSession implements SessionHandle {
   /** The daemon is going (a restart, an update): stop reading, leave the host running for the next daemon. */
   detach() {
     clearInterval(this.timer);
+    this.tail?.close();
     this.timer = undefined;
-    this.saveOffset();
+    this.saveOffsetNow();
   }
 
   /** Removed for good: once its host has closed, its folder goes. */
@@ -633,6 +716,8 @@ export class HostedSession implements SessionHandle {
   /** Starts its host with `first`; false when no host process could be started (the portal is told, and the record says so). */
   private start(first: Omit<Extract<HostCommand, { op: 'send' }>, 'n'>): boolean {
     const f = this.files;
+    this.offsetGen++;
+    this.tail?.close();
     try {
       fs.rmSync(f.dir, { recursive: true, force: true });
     } catch (e) {
@@ -647,9 +732,10 @@ export class HostedSession implements SessionHandle {
     fs.writeFileSync(f.creds, this.creds);
     if (this.deps.lockEnv) fs.writeFileSync(f.lockEnv, lockEnvOf(this.deps.lockEnv()));
     this.restaged = undefined;
-    fs.writeFileSync(f.offset, '0');
+    fs.writeFileSync(f.offset, offsetText(0));
     this.n = 0;
     this.savedOffset = 0;
+    this.signalledAt = 0;
     this.sends = [this.command(first) as Extract<HostCommand, { op: 'send' }>];
     const start: HostStart = { hostProtocol: HOST_PROTOCOL, info: { ...this.info, pendingPermissions: [] }, seq: this.seq, spec, editorUp: this.deps.editorUp(), ...(this.deps.capsMode ? { capsMode: this.deps.capsMode() } : {}) };
     this.running = true;
@@ -669,6 +755,7 @@ export class HostedSession implements SessionHandle {
       this.running = false;
       this.liveNow = false;
       clearInterval(this.timer);
+      this.tail?.close();
       this.timer = undefined;
       Object.assign(this.info, { status: 'error', statusDetail: error });
       this.deps.log(`agent ${this.info.id}: ${error}`);
@@ -685,7 +772,8 @@ export class HostedSession implements SessionHandle {
 
   private follow(offset: number) {
     clearInterval(this.timer);
-    this.tail = new LineTail(this.files.out, (line) => this.onLine(line), offset);
+    this.tail?.close();
+    this.tail = new LineTail(this.files.out, (line) => this.onLine(line), offset, TAIL_KEEP_OPEN_MS);
     this.timer = setInterval(() => this.poll(), POLL_MS);
     this.timer.unref?.();
   }
@@ -820,13 +908,18 @@ export class HostedSession implements SessionHandle {
     }
     this.progressAt = now;
     // Kept for the next daemon (adopt), at most once a minute.
-    if (now - this.progressSaved < 60_000 || !fs.existsSync(this.files.dir)) return;
-    try {
-      fs.writeFileSync(this.files.progress, String(now));
-      this.progressSaved = now;
-    } catch {
-      // the next progress tries again
-    }
+    if (now - this.progressSaved < 60_000 || this.progressWriting) return;
+    // w6554: written without holding the loop (BEAST, 2026-11-27: this write once held it 6.6 s). A folder that is gone fails
+    // the write (ENOENT, nothing is made); a failed write lets the next progress try again, as the synchronous one did.
+    this.progressWriting = true;
+    const before = this.progressSaved;
+    this.progressSaved = now;
+    fs.promises
+      .writeFile(this.files.progress, String(now))
+      .catch(() => {
+        if (this.progressSaved === now) this.progressSaved = before;
+      })
+      .finally(() => (this.progressWriting = false));
   }
 
   /**
@@ -852,11 +945,54 @@ export class HostedSession implements SessionHandle {
     });
   }
 
+  /**
+   * The poll's save of how far it read, off the event loop (w6486), one write at a time: the next poll writes what it
+   * read meanwhile. A folder that is gone is never made again (the open fails); kept in memory, the next poll tries
+   * again. w6508: a write for an earlier start of the host writes nothing once a new start has come, so it can never put
+   * the old, larger offset over the new start's '0'. The generation is looked at after the open: a file opened before
+   * start() removed the folder is the old one (on Windows the open file may make start() refuse), and one opened after
+   * it finds the generation changed, as start() runs whole before any open's answer comes back. Every write is
+   * OFFSET_WIDTH digits from byte 0 (offsetText) over the file, never cut short: it never reads empty mid-write, and a
+   * shorter, older offset landing on a longer one can never leave its digits followed by the longer one's (999 over 1000
+   * read 9990 until the truncate, w6519), whenever the daemon exits.
+   */
   private saveOffset() {
+    const at = this.tail?.position ?? 0;
+    if (at === this.savedOffset || this.offsetWrite) return;
+    const gen = this.offsetGen;
+    const text = offsetText(at);
+    const write = async () => {
+      const file = await fs.promises.open(this.files.offset, fs.constants.O_RDWR | fs.constants.O_CREAT);
+      try {
+        if (gen !== this.offsetGen) return false;
+        await file.write(text, 0);
+        return true;
+      } finally {
+        await file.close();
+      }
+    };
+    this.offsetWrite = write()
+      .then(
+        (wrote) => {
+          this.savedOffset = wrote && gen === this.offsetGen ? at : -1;
+        },
+        () => {
+          if (gen !== this.offsetGen) this.savedOffset = -1;
+        },
+      )
+      .finally(() => (this.offsetWrite = undefined));
+  }
+
+  /**
+   * The save when the daemon goes (detach): synchronous, as the process exits right after. A poll's write still in flight
+   * may land after it with an older offset, so then it goes to daemon.offset.stop as well, which adopt() reads too.
+   */
+  private saveOffsetNow() {
     const at = this.tail?.position ?? 0;
     if (at === this.savedOffset || !fs.existsSync(this.files.dir)) return;
     try {
-      fs.writeFileSync(this.files.offset, String(at));
+      fs.writeFileSync(this.files.offset, offsetText(at));
+      if (this.offsetWrite) fs.writeFileSync(this.files.offsetStop, offsetText(at));
       this.savedOffset = at;
     } catch {
       // kept in memory; the next poll tries again
@@ -890,9 +1026,21 @@ export class HostedSession implements SessionHandle {
       case 'delta':
         this.deps.out({ type: 'delta', sessionId: id, text: m.text });
         return;
-      case 'signal':
+      case 'signal': {
+        const at = this.tail?.lineEnd ?? 0;
+        if (at && at <= this.signalledAt) return;
         this.deps.events.emit(m.name, this, m.arg, ...(m.meta ? [m.meta] : []));
+        if (at) {
+          this.signalledAt = at;
+          // Synchronous, as it is once a turn or so: the next daemon must never read it short of a signal sent.
+          try {
+            fs.writeFileSync(this.files.signalled, offsetText(at));
+          } catch {
+            // its folder is gone (the host is done): no daemon reads it again
+          }
+        }
         return;
+      }
       case 'failed':
         this.deps.out({ type: 'failed', sessionId: id, error: m.error });
         return;
@@ -997,6 +1145,7 @@ export class HostedSession implements SessionHandle {
     this.running = false;
     this.liveNow = false;
     clearInterval(this.timer);
+    this.tail?.close();
     this.timer = undefined;
     if (why) {
       this.deps.log(`agent ${this.info.id}: ${why}`);
@@ -1018,6 +1167,7 @@ export class HostedSession implements SessionHandle {
   private teardown(waitExitMs: number): Promise<void> {
     if (this.stoppingNow) return this.stoppingNow;
     clearInterval(this.timer);
+    this.tail?.close();
     this.timer = undefined;
     const id = this.info.id;
     const pid = this.hostPid;
@@ -1032,6 +1182,8 @@ export class HostedSession implements SessionHandle {
           return;
         }
       }
+      // The poll's offset write ends first (w6486): its open file would keep the folder on Windows.
+      await this.offsetWrite;
       const err = await removeHostDir(this.files.dir);
       if (err) this.deps.log(`agent host ${id}: could not remove ${this.files.dir}: ${err}`);
     };
@@ -1103,6 +1255,14 @@ export function hostFolders(root: string): { sessionId: string; dir: string; rec
 export const readHostState = (dir: string) => readJson<Extract<HostMessage, { op: 'state' }>>(hostFiles(dir).state);
 /** When the agent host in `dir` started (ms, its host.json), or undefined (w3673: what an earlier host left is older). */
 export const hostStartedAt = (dir: string) => Date.parse(readJson<HostRecord>(hostFiles(dir).host)?.startedAt ?? '') || undefined;
+/** hostStartedAt off the loop (w6595). */
+export async function hostStartedAtAsync(dir: string): Promise<number | undefined> {
+  try {
+    return Date.parse((JSON.parse(await fs.promises.readFile(hostFiles(dir).host, 'utf8')) as HostRecord).startedAt ?? '') || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** The worker's temp folder (<root>/tmp/ffa-<session>) from its env, or undefined. */
 export function workerTempDir(env: Record<string, string | undefined> | undefined): string | undefined {
@@ -1379,7 +1539,7 @@ async function readStdin(): Promise<string> {
 }
 
 // Run when started directly (by the daemon), not when imported.
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+if (isMainModule(import.meta.filename)) {
   const dir = process.argv[2];
   // host.log never holds a secret either (w1688): every line, an error's message included, redacted as it is written
   for (const k of ['log', 'warn', 'error'] as const) {
