@@ -9,7 +9,7 @@ import { WORK_OPEN, type WorkItem } from '../shared/types.ts';
 import { cleanBlock, cleanLine, sourceTag, UNTRUSTED_HEADER } from './intakeRules.ts';
 import { digestText } from '../shared/intakeDigest.ts';
 import { ledgerOrder, liveLine, names } from './work.ts';
-import { gatesName, gatesOf } from '../shared/blockers.ts';
+import { gatesName, gatesOf, onRequest } from '../shared/blockers.ts';
 import { HANDOFF_REPORT_CHARS } from './handoffReport.ts';
 import { FINDINGS_CHARS, findingsLines } from './findings.ts';
 
@@ -66,7 +66,7 @@ export function namedIds(w: WorkItem): Set<string> {
 
 /** The scope of worker session `sessionId` (w642): see the file comment. */
 export function readScope(items: readonly WorkItem[], sessionId: string): ReadScope {
-  const own = items.filter((w) => w.sessionIds.includes(sessionId));
+  const own = items.filter((w) => onRequest(w, sessionId));
   const ownIds = new Set(own.map((w) => w.id.toLowerCase()));
   const exists = new Set(items.map((w) => w.id.toLowerCase()));
   const named = new Set<string>();
