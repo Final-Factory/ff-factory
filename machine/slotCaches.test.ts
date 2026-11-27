@@ -22,6 +22,9 @@ import {
   slotCacheDir,
   slotCacheEnv,
   watchShared,
+  sharedEventHandler,
+  DAEMON_GRACE_MS,
+  STALE_MS,
   type SharedLockSetting,
 } from "./slotCaches.ts";
 
@@ -622,7 +625,7 @@ test("w6212 L3/B2: merge-back never replaces a seed file and writes nothing thro
   // the seed's archive-v0 is a link to a folder elsewhere: nothing lands there
   const elsewhere = path.join(root, "elsewhere");
   fs.mkdirSync(elsewhere);
-  fs.symlinkSync(elsewhere, path.join(seed, "archive-v0"));
+  fs.symlinkSync(elsewhere, path.join(seed, "archive-v0"), "junction");
   const now = Date.now() + 3600_000;
   await mergeBack(clone, seed, rule as never, copyTree, now);
   assert.equal(fs.readFileSync(path.join(seed, "wheels-v0", "a.whl"), "utf8"), "old");
@@ -752,4 +755,90 @@ test("watchShared: stop closes the watchers", async (t) => {
   put(path.join(folder, "after-stop.txt"));
   await wait(350);
   assert.deepEqual(lines, []);
+});
+
+// w6274: macOS delivers the daemon's own events after daemonBusy() went false (m5: slot.json 28 ms after an install).
+test("sharedEventHandler: a late event just after the daemon's write is its own; a worker's write after the grace is logged", (t) => {
+  const dir = tmp(t);
+  put(path.join(dir, "slot.json"));
+  put(path.join(dir, "planted.txt"));
+  let clock = Date.now();
+  const lines: string[] = [];
+  const ended = clock; // the install ended now; daemonBusy() is already false
+  const on = sharedEventHandler((l) => lines.push(l), {
+    daemonBusy: () => false,
+    lastDaemonWrite: () => ended,
+    now: () => clock,
+  });
+  clock = ended + 28;
+  on(dir, dir, "slot.json");
+  clock = ended + DAEMON_GRACE_MS - 1;
+  on(dir, dir, "slot.json");
+  assert.deepEqual(lines, []);
+  clock = ended + DAEMON_GRACE_MS + 1;
+  fs.appendFileSync(path.join(dir, "planted.txt"), "y"); // a worker's write: mtime and ctime are now
+  on(dir, dir, "planted.txt");
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /planted\.txt changed and the daemon did not write it/);
+  // A delete after the grace counts too (nothing to stat).
+  on(dir, dir, "gone.txt");
+  assert.equal(lines.length, 2);
+});
+
+test("sharedEventHandler: an event on an entry whose mtime and ctime predate it is no write (a clone's read)", (t) => {
+  const dir = tmp(t);
+  put(path.join(dir, "INSTALLATION_COMPLETE"));
+  const st = fs.statSync(path.join(dir, "INSTALLATION_COMPLETE"));
+  let clock = Math.max(st.mtimeMs, st.ctimeMs) + STALE_MS + 1_000;
+  const lines: string[] = [];
+  const on = sharedEventHandler((l) => lines.push(l), { now: () => clock });
+  on(dir, dir, "INSTALLATION_COMPLETE");
+  assert.deepEqual(lines, []);
+  clock = Math.max(st.mtimeMs, st.ctimeMs) + 50; // just written: logged
+  on(dir, dir, "INSTALLATION_COMPLETE");
+  assert.equal(lines.length, 1);
+});
+
+test("sharedEventHandler: uv's random .tmp names make one line per folder an hour", (t) => {
+  const root = tmp(t);
+  const builds = path.join(root, "builds-v0");
+  const other = path.join(root, "archive-v0");
+  let clock = Date.now();
+  const lines: string[] = [];
+  const on = sharedEventHandler((l) => lines.push(l), { now: () => clock });
+  for (const n of [".tmpAbC123", ".tmpZz9_x0", ".tmpQ7w-e1"]) on(builds, root, n);
+  assert.equal(lines.length, 1, lines.join("\n"));
+  assert.match(lines[0], /\.tmpAbC123 changed .*random \.tmp names in .*builds-v0 make one line an hour/);
+  on(other, root, ".tmpLmN456"); // another folder: its own line
+  assert.equal(lines.length, 2);
+  on(builds, root, "wheel.whl"); // a plain name keeps its own key
+  assert.equal(lines.length, 3);
+  clock += 3600_001;
+  on(builds, root, ".tmpNew999");
+  assert.equal(lines.length, 4);
+});
+
+test("watchShared: the events of a daemon write that arrive after it ended are not logged; a later worker write is", async (t) => {
+  const folder = path.join(tmp(t), "players");
+  fs.mkdirSync(folder, { recursive: true });
+  await wait(300);
+  const lines: string[] = [];
+  let busy = false;
+  let ended = -Infinity;
+  const stop = watchShared([folder], (l) => lines.push(l), {
+    daemonBusy: () => busy,
+    lastDaemonWrite: () => ended,
+    graceMs: 600,
+  });
+  t.after(stop);
+  busy = true;
+  put(path.join(folder, "slot.json"));
+  busy = false; // ends before its event is delivered, as FSEvents does on macOS
+  ended = Date.now();
+  await wait(350);
+  assert.equal(lines.length, 0, lines.join("\n"));
+  await wait(400); // past the grace
+  put(path.join(folder, "planted.txt"));
+  assert.ok(await until(() => lines.some((l) => l.includes("planted.txt"))));
+  assert.ok(!lines.some((l) => l.includes("slot.json")), lines.join("\n"));
 });

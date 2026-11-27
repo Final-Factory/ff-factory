@@ -42,6 +42,7 @@ import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFe
 import { isSlotRepo } from './slotRepo.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
+import { junctionRmSignalLine } from '../server/junctionRmWarn.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
 import { PortalPin, hostOf, onPortalRedirect, pinnedHosts } from './portalPin.ts';
@@ -1278,8 +1279,11 @@ export class Daemon {
       });
     }
     if (cfg.maxSessions !== undefined) log(`daemon.json maxSessions (${cfg.maxSessions}) is obsolete (w536): workers run in sandboxes only, and the portal sends this machine's agent cap`);
-    for (const name of ['turnEnd', 'permission', 'result', 'ended', 'rateLimit', 'tempSize', 'workerCap'] as SignalName[]) {
+    for (const name of ['turnEnd', 'permission', 'result', 'ended', 'rateLimit', 'tempSize', 'workerCap', 'junctionRm'] as SignalName[]) {
       this.events.on(name, (s: SessionHandle, arg?: unknown, meta?: { compaction?: CompactionTrigger }) => {
+        // w6266: the junction rm warning's line is kept in daemon.log (the host's own log goes with its folder).
+        const jl = name === 'junctionRm' ? junctionRmSignalLine(arg) : undefined;
+        if (jl) log(jl);
         this.out({ type: 'signal', name, sessionId: s.info.id, arg: name === 'permission' ? undefined : arg, ...(meta?.compaction ? { meta: { compaction: meta.compaction } } : {}) });
         this.awake();
       });
@@ -2079,8 +2083,10 @@ export class Daemon {
     if (this.procsBroker) this.timers.push(setInterval(loopLabel('timer procsBroker.tick', () => void this.procsBroker?.tick()), PROCS_POLL_MS));
     // w5615: each sandbox's own clones of the tool caches, made, merged back and refreshed while it is idle.
     if (this.slotCaches) {
-      void this.slotCaches.tick();
-      this.timers.push(setInterval(loopLabel('timer slotCaches.tick', () => void this.slotCaches?.tick()), SLOT_CACHES_EVERY_MS));
+      // w6274: a tick's merge-back and clones are the daemon's writes for the shared-lock watch, its in-process steps too.
+      const tick = () => void this.sharedWrite(() => this.slotCaches?.tick());
+      tick();
+      this.timers.push(setInterval(loopLabel('timer slotCaches.tick', tick), SLOT_CACHES_EVERY_MS));
     }
     // What stopped workers left running (w1196, w1197): looked at once a minute.
     // w1894: each look also feeds the person's-game watch (machine/personPlay.ts)
@@ -3745,19 +3751,22 @@ export class Daemon {
       this.sharedLockMemo = asked === 'on' && blockers.length ? 'warn' : asked;
       const line = sharedLockLine(asked, blockers);
       if (line) log(line);
-      if (this.sharedLockMemo !== 'off' && this.cfg.root) this.stopSharedWatch = watchShared(sharedLockedFolders(this.cfg.root), (l) => log(l), { daemonBusy: () => this.sharedBusy > 0 });
+      if (this.sharedLockMemo !== 'off' && this.cfg.root) this.stopSharedWatch = watchShared(sharedLockedFolders(this.cfg.root), (l) => log(l), { daemonBusy: () => this.sharedBusy > 0, lastDaemonWrite: () => this.sharedDoneAt });
     }
     return this.sharedLockMemo;
   }
   private stopSharedWatch?: () => void;
   /** Writes the daemon itself makes in the locked folders right now (a merge-back, a player install): the watch skips them. */
   private sharedBusy = 0;
-  private async sharedWrite<T>(f: () => Promise<T>): Promise<T> {
+  /** When the last of them ended: macOS reports their events late, so the watch skips a grace after it too (w6274). */
+  private sharedDoneAt = -Infinity;
+  private async sharedWrite<T>(f: () => T | Promise<T>): Promise<T> {
     this.sharedBusy++;
     try {
       return await f();
     } finally {
       this.sharedBusy--;
+      this.sharedDoneAt = Date.now();
     }
   }
 
@@ -3812,7 +3821,8 @@ export class Daemon {
     const root = this.cfg.root;
     if (!root || this.sharedLock === 'off') return {};
     let fence: PlayerFence | undefined;
-    return playersRpcHandlers({
+    // w6274: each call is a daemon write (slot.json, leases, the copy), so the shared-lock watch counts it as the daemon's.
+    const handlers = playersRpcHandlers({
       root,
       host: os.hostname().toLowerCase(),
       sandboxPath: (id) => this.pool.list().find((sb) => sb.id === id)?.path,
@@ -3824,6 +3834,7 @@ export class Daemon {
       launch: brokerLauncher({ root, playerFence: () => (fence ??= playerFenceFor()), lowNode: () => this.lowCopies?.make(process.execPath) }),
       log: (l) => log(l),
     });
+    return Object.fromEntries(Object.entries(handlers).map(([k, h]): [string, RpcHandler] => [k, (c, b) => this.sharedWrite(() => h(c, b))]));
   }
 
   private fenceMemo?: { fence?: WorkerFence; why?: string };
@@ -4768,7 +4779,9 @@ export class Daemon {
         : this.makeSession({ ...info, pendingPermissions: [] }, this.sink(), () => {
             const spec = holder.e!.spec!;
             const sandbox = spec.sandbox;
-            return buildOptions(this.runSpec(info, spec), this.handlers(info.id), process.env, sandbox ? () => this.pool.editorUp(sandbox) : undefined);
+            return buildOptions(this.runSpec(info, spec), this.handlers(info.id), process.env, sandbox ? () => this.pool.editorUp(sandbox) : undefined, (line) =>
+              events.emit('junctionRm', holder.e!.s, { line }),
+            );
           }, events);
       e = { s, seq: lastSeq };
       holder.e = e;
