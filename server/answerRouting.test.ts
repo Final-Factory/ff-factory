@@ -12,6 +12,7 @@ import type { Computer } from './placement.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo, WorkItem } from '../shared/types.ts';
 import { isWith, latestWorker } from '../shared/blockers.ts';
+import { holdsOf } from '../shared/workState.ts';
 
 /**
  * w6047 (the w6253 review asked for it): one table of where answerNeedsYou sends a person's [answer], over every shape the
@@ -398,4 +399,53 @@ test("a deploy's step after it does not resume a worker moved off and merged bac
   assert.equal(env.agents.orchestrators.resumeAfterDeploy('w5869', 'portal deployed abc', 'check the dashboard'), false);
   assert.equal(timersOf(env).get(E), undefined);
   assert.equal(env.store.work.get('w5869')!.status, 'blocked');
+});
+
+// The w6323 review of #1430 (w6309): holdsOf, and every reader of it, uses onRequest too. A moved-off worker merged back
+// alone holds nothing of it: a worker tool on it is refused, a room move leaves it behind (gone), the merge notice
+// names no worker of it.
+const aloneMergedBack = (env: Awaited<ReturnType<typeof setup>>) => {
+  const k = kit(env);
+  const w = k.req([E], 'w5869', { [E]: 2 * H });
+  k.moveOff(w, E);
+  k.merge(w, [E], { [E]: -1000 });
+  return env.store.work.get('w5869')!;
+};
+
+test('w6323 PROBE1 a moved-off worker merged back alone holds nothing of it (holdsOf, servedBy)', async (t) => {
+  const env = await setup(t, 'on');
+  aloneMergedBack(env);
+  const items = [...env.store.work.values()];
+  const h = holdsOf(E, items);
+  assert.ok(!h.held.has('w5869') && !h.served.has('w5869'));
+  assert.ok(!env.agents.orchestrators.itemsOf(E).some((x) => x.id === 'w5869'));
+});
+
+test('w6323 PROBE2 a moved-off worker merged back alone is refused a worker tool on it (workerRequest)', async (t) => {
+  const env = await setup(t, 'on');
+  aloneMergedBack(env);
+  assert.throws(() => env.agents.orchestrators.handUp(E, { items: [{ title: 'x', brief: 'y' }], request: 'w5869' }), /not on w5869/);
+});
+
+test('w6323 PROBE3 a room move of a moved-off worker merged back leaves the request behind (movableWorkOf gone)', async (t) => {
+  const env = await setup(t, 'on');
+  aloneMergedBack(env);
+  const a = env.agents as unknown as { movableWorkOf: (i: SessionInfo) => { reqs: WorkItem[]; gone: WorkItem[] } };
+  const m = a.movableWorkOf(env.store.sessions.get(E)!);
+  assert.ok(m.gone.some((x) => x.id === 'w5869'));
+  assert.ok(!m.reqs.some((x) => x.id === 'w5869'));
+});
+
+test('w6323 the merge notice names no moved-off worker it listed again (Low)', async (t) => {
+  const env = await setup(t, 'on');
+  const k = kit(env);
+  const w = k.req([E], 'w5869', { [E]: 2 * H });
+  k.moveOff(w, E);
+  const m = env.request([E], 'w5871');
+  m.links = { [E]: { at: T(-1000), how: 'sent' } };
+  m.status = 'blocked';
+  env.store.putWork(m);
+  const said = env.agents.orchestrators.decide({ id: 'w5871', action: 'merge', into: 'w5869', note: 'it repeats w5869 (test)' });
+  assert.match(said, /merged into w5869/);
+  assert.ok(!said.includes(E), said);
 });

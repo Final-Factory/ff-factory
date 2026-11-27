@@ -2013,7 +2013,7 @@ It is for your part of the work, not an answer to another worker's question.`;
 
   /** The open ledger items a worker works on (a closed one no longer hears from it, even if the worker is reused). */
   itemsOf(sessionId: string): WorkItem[] {
-    return [...this.store.work.values()].filter((w) => w.sessionIds.includes(sessionId) && isOpen(w));
+    return [...this.store.work.values()].filter((w) => onRequest(w, sessionId) && isOpen(w));
   }
 
   /**
@@ -2124,7 +2124,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       w.heldCheckIns = undefined;
       if (isOpen(w) || w.status === 'stalled') {
         for (const h of held) {
-          if (this.store.sessions.get(h.session) && w.sessionIds.includes(h.session)) this.wakeNow(h.session, `${w.id}'s block ended (${clip(line, 200)}). This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`, w.id);
+          if (this.store.sessions.get(h.session) && onRequest(w, h.session)) this.wakeNow(h.session, `${w.id}'s block ended (${clip(line, 200)}). This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`, w.id);
         }
       }
     }
@@ -4576,7 +4576,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       w.mergedInto = t.id;
       // w2610: a gate of t on w now names t itself (w2607 Blocked on w2608, its own copy): it can never clear, so it goes.
       this.dropSelfGates(t, w.id);
-      const workers = t.sessionIds.filter((sid) => this.store.sessions.get(sid)).map((sid) => this.workerLine(sid));
+      const workers = t.sessionIds.filter((sid) => this.store.sessions.get(sid) && onRequest(t, sid)).map((sid) => this.workerLine(sid));
       what = `merged into ${t.id} "${clip(t.title, 80)}" (${t.status}${workers.length ? `: ${workers.join(', ')}` : ''}), which ${names(t.requesters)} will hear about`;
     } else if (input.action === 'link') {
       const ids = (input.session_ids ?? []).map((x) => x.trim()).filter(Boolean);
@@ -4900,7 +4900,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const back: string[] = [];
     const skip = typeof except === 'string' ? [except] : (except ?? []);
     for (const h of w.heldCheckIns ?? []) {
-      if (skip.includes(h.session) || !this.store.sessions.get(h.session) || !w.sessionIds.includes(h.session)) continue;
+      if (skip.includes(h.session) || !this.store.sessions.get(h.session) || !onRequest(w, h.session)) continue;
       const note = h.resume
         ? `${lead}. An earlier resume reached you only after ${w.id} was blocked again, so it was kept until now; carry on from it: ${h.note}`
         : `${lead}. This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`;
@@ -6402,7 +6402,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    */
   private recordReportedWorker(w: WorkItem | undefined, sessionId: string, a: { worker: string; line: string; at: number; key: string }): boolean {
     const ref = a.worker.trim();
-    if (!w || (w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length || ref === sessionId || !w.sessionIds.includes(ref)) return false;
+    if (!w || (w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length || ref === sessionId || !onRequest(w, ref)) return false;
     const gate = this.makeGate({ kind: 'worker', ref, what: `worker ${ref}'s part (its DONE or final report)` }, new Date(a.at).toISOString(), `worker ${sessionId}`);
     w.blocked = gate;
     w.alsoBlocked = undefined;
@@ -7521,13 +7521,13 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (!(isOpen(w) || w.status === 'stalled')) continue;
       // w2045: a DONE while its after-merge report waits on green CI is that report's, filed when FF Factory merges.
       if (!ops && w.status === 'blocked' && gatesOf(w).some((g) => g.mergeOnGreen?.session === s.id)) continue;
-      if (!w.sessionIds.includes(s.id)) {
+      if (!onRequest(w, s.id)) {
         const by = ops ? undefined : this.namedBy(s.id, id);
         if (ops?.workIds.has(id)) {
           also.set(id, [ops.by]);
           this.stamp(w, `the orchestration worker said DONE for it (the job ${ops.by.displayName} sent it for ${id})`);
         } else if (by) {
-          w.sessionIds = [...w.sessionIds, s.id];
+          if (!w.sessionIds.includes(s.id)) w.sessionIds = [...w.sessionIds, s.id];
           w.links = { ...w.links, [s.id]: { at: this.now().toISOString(), how: 'linked' } };
           also.set(id, by.requesters);
           this.stamp(w, `worker ${s.id} said DONE for it from ${by.id} "${clip(by.title, 80)}" (${names(by.requesters)}'s), which names ${id}: now one of its workers`);

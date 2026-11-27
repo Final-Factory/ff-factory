@@ -38,7 +38,7 @@ import { statusLinesIn, stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, MEDIA_FILE, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
 import { ciPushHold } from './savePushHold.ts';
-import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
+import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, offSince, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
 import { isSamePerson, personForWork, poolOwnerOf, tokenPersonForWork, vaultContext, withPool } from './vault.ts';
 import { ghRunner, githubFromVault, githubPersonOf, githubTokens } from './githubTokens.ts';
 import { clashLine, expectedFiles, type FfuClash, ffuStartClashes, FfuPrReads, peerFilesNote, sharedFilesNote } from './ffuOverlap.ts';
@@ -4593,7 +4593,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   private movableWorkOf(info: SessionInfo): { reqs: WorkItem[]; owned: WorkItem[]; gone: WorkItem[] } {
     const out = { reqs: [] as WorkItem[], owned: [] as WorkItem[], gone: [] as WorkItem[] };
     for (const w of this.openWorkOf(info)) {
-      if (!w.sessionIds.includes(info.id) && w.movedOff?.[info.id]) out.gone.push(w);
+      if (offSince(w, info.id)) out.gone.push(w);
       else if (!w.pair?.started?.legs.some((l) => l.session === info.id) && this.otherWorkerOn(w, info, true)) out.owned.push(w);
       else out.reqs.push(w);
     }
@@ -4672,7 +4672,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       const w = this.store.work.get(id);
       return !!w && isOpen(w);
     });
-    const moved = items.filter((w) => isOpen(w) && !!w.movedOff?.[info.id] && !w.sessionIds.includes(info.id));
+    const moved = items.filter((w) => isOpen(w) && offSince(w, info.id));
     const heirs = (w: WorkItem): HeirFacts[] =>
       w.sessionIds.flatMap((id) => {
         const x = this.store.sessions.get(id);

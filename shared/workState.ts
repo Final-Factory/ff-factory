@@ -215,7 +215,7 @@ export function holdsOf(sessionId: string, items: readonly WorkItem[], byId?: Re
   const paused = new Map<string, string>();
   let all = byId;
   for (const w of items) {
-    if (served.has(w.id) || !live(w) || !w.sessionIds.includes(sessionId) || w.done?.[sessionId]) continue;
+    if (served.has(w.id) || !live(w) || !onRequest(w, sessionId) || w.done?.[sessionId]) continue;
     const a = w.setAside?.[sessionId];
     if (a && (Date.parse(a.at) || 0) > linkOf(w, sessionId).at) {
       if (a.kind === 'released') continue;
