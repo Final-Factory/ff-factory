@@ -688,7 +688,7 @@ export class WinCiFirst {
       for (let x: number | undefined = pid; x !== undefined && procOf.has(x) && !seen.has(x); ) {
         seen.add(x);
         if (isGamePlayer(procOf.get(x))) return x;
-        const pp = procOf.get(x)!.ppid;
+        const pp: number = procOf.get(x)!.ppid;
         const ps = started.get(pp);
         const st = started.get(x);
         if (ps !== undefined && st !== undefined && ps > st + 1_000) return undefined;
@@ -755,6 +755,31 @@ export class WinCiFirst {
       }
     }
     if (enforcing) this.lowHosts = low;
+    // w6596 (w6608 review): a game player below Normal goes back up beside the job: one this rule lowered before (step 1)
+    // to what its record says it was, and one that inherited a lowered tool's class (Windows starts a child at its
+    // parent's Idle or BelowNormal) to Normal. Only the player itself; the record entry goes once it is raised.
+    const normal = os.constants.priority.PRIORITY_NORMAL;
+    const raisedPlayers: string[] = [];
+    if (lowering && !unwritten) {
+      let recChanged = false;
+      for (const pid of kept.keys()) {
+        const f = byPid.get(pid);
+        if (!isGamePlayer(procOf.get(pid)) || f?.startedAt === undefined || f.startedAt > cutoff) continue;
+        const p = this.d.priorityOf(pid);
+        if (p === undefined || p <= normal) continue;
+        const k = keyOf(f);
+        const to = this.lowered[k]?.prev ?? normal;
+        if (p <= to || !this.d.setPriority!(pid, to)) continue;
+        raisedPlayers.push(`${pid} ${imageOf(procOf.get(pid))} ${priorityName(p)} to ${priorityName(to)}${this.lowered[k] ? ' (lowered here before)' : ' (inherited)'}`);
+        if (this.lowered[k]) {
+          delete this.lowered[k];
+          recChanged = true;
+        }
+      }
+      if (recChanged) this.save();
+      if (raisedPlayers.length)
+        this.d.log(`ci first: raised ${raisedPlayers.length} game player(s) beside the CI job(s), so their main loop is not starved (w6596): ${raisedPlayers.slice(0, 8).join(', ')}${raisedPlayers.length > 8 ? ', ...' : ''}`);
+    }
     if (unwritten) {
       if (!wasFailing) this.d.log(`ci first: lowered none of ${cands.length} process(es), since the record of what would be lowered could not be written`);
     } else if (loweredNow.length || lowerFailed) {

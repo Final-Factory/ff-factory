@@ -1006,6 +1006,37 @@ test("w6596 (w6600 review): a tool whose parent pid now belongs to a player that
   assert.equal(r.prio.get(91), P.PRIORITY_BELOW_NORMAL, 'the reused parent pid does not make 91 a player');
 });
 
+test("w6596 (w6608 review): enforce: a player that inherited a lowered tool's Idle goes up to Normal; warn and a held turn touch nothing", async () => {
+  for (const [mode, hold, want] of [
+    ['warn', false, P.PRIORITY_LOW],
+    ['enforce', true, P.PRIORITY_LOW],
+    ['enforce', false, P.PRIORITY_NORMAL],
+  ] as const) {
+    const r = rig({ procs: PLAYER_TREE, prio: [[24, P.PRIORITY_LOW], [25, P.PRIORITY_LOW]], mode });
+    r.setHeld(hold);
+    await r.cf.tick();
+    assert.equal(r.prio.get(24), want, `${mode}${hold ? ' held' : ''}`);
+    assert.equal(r.prio.get(25), P.PRIORITY_LOW, 'only the player itself');
+    const line = r.lines.find((l) => /raised 1 game player/.test(l));
+    if (want === P.PRIORITY_NORMAL) assert.match(line!, /\(w6596\): 24 FinalFactory\.exe Idle to Normal \(inherited\)/);
+    else assert.equal(line, undefined);
+  }
+});
+
+test('w6596 (w6608 review): enforce: a player step 1 lowered goes back to its recorded priority, and its record entry goes', async () => {
+  // step 1's world: 24 was a lowered tool (as a player still was before step 2)
+  const r = rig({ procs: [...BASE, { pid: 24, ppid: 21, cmd: 'rustc.exe' }], prio: [[24, P.PRIORITY_ABOVE_NORMAL]], mode: 'enforce' });
+  await r.cf.tick();
+  assert.equal(r.prio.get(24), P.PRIORITY_BELOW_NORMAL);
+  assert.ok(Object.keys(r.record()).some((k) => k.startsWith('24@')));
+  r.setProcs(PLAYER_TREE.filter((p) => p.pid !== 25)); // the same process, now seen as the player it is
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.prio.get(24), P.PRIORITY_ABOVE_NORMAL, 'what it was before it was lowered');
+  assert.ok(!Object.keys(r.record()).some((k) => k.startsWith('24@')), 'no longer in the record');
+  assert.match(r.lines.find((l) => /raised 1 game player/.test(l))!, /24 FinalFactory\.exe BelowNormal to AboveNormal \(lowered here before\)/);
+});
+
 test('w6596: no game player, no line and no count', async () => {
   const r = rig({ mode: 'enforce' });
   const res = await r.cf.tick();
