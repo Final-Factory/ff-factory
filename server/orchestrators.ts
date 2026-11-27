@@ -131,6 +131,14 @@ const cardMedia = (ask: Ask) => new Set([ask.question, ...ask.options.map((o) =>
 const ANSWER_MARK = '[answer] ';
 /** How a person's note that names one worker of several starts its resume (noteToWorker, w3117); it goes like an answer. */
 const NOTE_MARK = '[note] ';
+/**
+ * w6047 (the w6172 review): a resume that carries a person's own words (an [answer] to its [needs you], a [note] naming the
+ * worker, sent as a check-in by wakeNow), which always goes (w2495), unlike the old worker's own gate or check-in.
+ */
+export function personsResume(m: { text: string; resumeOf?: { note: string } }): boolean {
+  const note = m.resumeOf?.note ?? /^\[wake_me\][^\n]*?Your note: ([\s\S]*)$/.exec(m.text)?.[1] ?? '';
+  return note.startsWith(ANSWER_MARK) || note.startsWith(NOTE_MARK);
+}
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
 /** A request Blocked on a machine its worker was cut off on is named to the dispatcher after this long offline (w2433, ledger.offlineNoticeMinutes). */
 export const OFFLINE_NOTICE_MS = 60 * 60_000;
@@ -1495,28 +1503,102 @@ It is for your part of the work, not an answer to another worker's question.`;
     }
     // w2433: with the Latest line it answers, which shows as answered until the request's next report.
     r.answered = { by: by.displayName, at: this.now().toISOString(), ...(w.outcome ? { outcome: w.outcome } : {}), ...(forWho?.length ? { for: forWho } : {}) };
-    const sid = r.worker;
+    // w6047 (the w6214, w6223, w6226 and w6239 reviews): every request the answer answers (this one and those w1812 shares it
+    // with, below) goes to the worker on it now. The asking worker gets those it still holds; a request it is off (moved, or
+    // handed back and placed on a next worker) goes to that request's worker now, never to the asker, whose resume would be
+    // refused (staleResume, w2079) and lost, and which must never take it up again; one handed back with no worker yet takes
+    // the answer in its hand-off, which its next worker reads when it starts. Each worker hears it once, naming only the
+    // requests it holds.
+    const asker = r.worker;
+    const holds = (x: WorkItem) => !!asker && x.sessionIds.includes(asker);
+    // The w6248 and w6253 reviews: a request's newest worker other than the asker is on it now unless the request was handed
+    // back after that worker's link (a hand-back leaves it with nobody, and sessionIds keeps every worker it ever had): such an
+    // earlier worker is never resumed on it (w2079). A worker with no link time counts only when there is no hand-back (a
+    // placement after one always links its worker). A worker linked before the asker left still holds it (two on one
+    // request, w1049). The hand-off takes the answer only while it is live: nobody was sent or linked to the request since
+    // (an old hand-off, read by a worker placed after it, never takes one). Off the request with neither, the asker is not
+    // resumed (staleResume would refuse it): the person is told nobody is on it.
+    const at = (t: string | undefined) => Date.parse(t ?? '') || 0;
+    const hbAt = (x: WorkItem) => at(x.handedBack?.at);
+    const onNow = (x: WorkItem): string | undefined => {
+      const now = latestWorker(x);
+      if (!now || now === asker) return undefined;
+      const link = x.links?.[now]?.at;
+      return !x.handedBack || (link && at(link) >= hbAt(x)) ? now : undefined;
+    };
+    // Someone on it since: a link after the hand-back, or a worker taken off after it (moveOff drops the link); the hand-back's
+    // own moveOff of its worker comes in the same breath, so that worker counts only a minute on.
+    const liveHandOff = (x: WorkItem) =>
+      !!x.handedBack &&
+      !Object.values(x.links ?? {}).some((l) => at(l.at) > hbAt(x)) &&
+      !Object.entries(x.movedOff ?? {}).some(([s, t]) => at(t) > hbAt(x) + (s === x.handedBack!.session ? 60_000 : 0));
+    const workerOf = (x: WorkItem): string | undefined => (!asker || holds(x) ? asker : onNow(x));
+    const sid = workerOf(w);
     // w1812: the same question from the same worker on other requests is answered by this too: none of them waits on input
     // any more, and none is asked again (Ben, w1768: "i already answered this why are you asking me ... still").
     const share = questionShareKey(r.key);
-    const also = share && sid
-      ? [...this.store.work.values()].filter((x) => x !== w && isOpen(x) && x.needsYou && !x.needsYou.answered && x.needsYou.worker === sid && questionShareKey(x.needsYou.key) === share)
+    const also = share && asker
+      ? [...this.store.work.values()].filter((x) => x !== w && isOpen(x) && x.needsYou && !x.needsYou.answered && x.needsYou.worker === asker && questionShareKey(x.needsYou.key) === share)
       : [];
     for (const x of also) {
       x.needsYou!.answered = { ...r.answered, on: w.id, outcome: x.outcome };
-      this.stamp(x, `[needs you] answered by ${by.displayName} on ${w.id}: the same question from worker ${sid}, not asked again (w1812)`);
+      this.stamp(x, `[needs you] answered by ${by.displayName} on ${w.id}: the same question from worker ${asker}, not asked again (w1812)`);
       this.store.putWork(x);
     }
     const both = also.length ? ` (the same question on ${also.map((x) => x.id).join(', ')}: answered there too)` : '';
+    const carried = (x: WorkItem) => !!asker && !holds(x) && !onNow(x) && liveHandOff(x);
+    const carry = (x: WorkItem): boolean => {
+      const words = `${by.displayName} answered on ${w.id} "${clip(w.title, 100)}", in their own words: ${note}\n\nIt answers what worker ${asker} asked before ${x.id} was handed back: "${clip(r.question, 300)}". Carry on with it.`;
+      return this.carryInHandBack(x, asker!, words, true);
+    };
+    // The requests each worker gets, `w`'s worker first, and those carried in a hand-off.
+    const groups = new Map<string, WorkItem[]>();
+    const inHandOff: WorkItem[] = [];
+    for (const x of [w, ...also]) {
+      if (carried(x)) {
+        inHandOff.push(x);
+        continue;
+      }
+      const to = workerOf(x);
+      if (to) groups.set(to, [...(groups.get(to) ?? []), x]);
+    }
+    const textFor = (to: string, mine: WorkItem[]): string => {
+      const ids = mine.map((x) => x.id).join(' and ');
+      const what = to !== asker ? `worker ${asker} asked before ${ids} moved to you` : 'you waited on';
+      const where = mine.length > 1 ? `, which ${to !== asker ? 'it' : 'you'} asked on ${ids}: it answers it on all of them` : mine[0] !== w ? `, which ${to !== asker ? 'it' : 'you'} asked on ${ids} as well: it answers it there` : '';
+      return `${ANSWER_MARK}${by.displayName} answered on ${w.id} "${clip(w.title, 100)}", in their own words: ${note}\n\nIt answers what ${what}: "${clip(r.question, 300)}"${where}. Carry on with it.`;
+    };
+    // The other workers (not `w`'s), each resumed with the answer tagged with a request it holds; what became of each is said.
+    const others = (): string => {
+      let out = '';
+      for (const x of inHandOff) if (x !== w && carry(x)) out += `; ${x.id} was handed back since worker ${asker} asked, so the answer goes with its hand-off to its next worker`;
+      for (const [to, mine] of groups) {
+        if (to === sid && mine.includes(w)) continue;
+        const ids = mine.map((x) => x.id).join(' and ');
+        const a = this.store.sessions.get(to);
+        if (!a) {
+          out += `; its worker ${to} on ${ids} is gone`;
+          continue;
+        }
+        if (BUSY.includes(a.status)) {
+          out += `; its worker ${to} on ${ids} is mid-turn: pass it on there with message_agent`;
+          continue;
+        }
+        const gates = mine.map((x) => this.clearReportedGates(x, to)).join('');
+        out += this.wakeNow(to, textFor(to, mine), mine[0]!.id) ? `; its worker ${to} on ${ids} resumes with it there${gates}` : `; its worker ${to} on ${ids} could not be resumed: pass it on there with message_agent`;
+      }
+      return out;
+    };
+    // w6047 (the w6223 review, F2): a request handed back since it asked (Queued, no worker on it now) carries the answer in
+    // its hand-off, which its next worker reads when it starts.
+    if (inHandOff.includes(w) && carry(w)) return `answers the [needs you] question${both}: ${w.id} was handed back since worker ${asker} asked, so the answer goes with its hand-off to its next worker (nothing for you to pass on)${others()}`;
     const s = sid ? this.store.sessions.get(sid) : undefined;
-    if (!sid || !s) return `answers the [needs you] question${both}${sid ? ` (its worker ${sid} is gone: start the work with it)` : ''}`;
-    if (BUSY.includes(s.status)) return `answers the [needs you] question${both}; its worker ${sid} is mid-turn: pass it on with message_agent`;
-    const cleared = this.clearReportedGates(w, sid);
-    const text =
-      `${ANSWER_MARK}${by.displayName} answered on ${w.id} "${clip(w.title, 100)}", in their own words: ${note}\n\n` +
-      `It answers what you waited on: "${clip(r.question, 300)}"${also.length ? `, which you asked on ${[w, ...also].map((x) => x.id).join(' and ')}: it answers it on all of them` : ''}. Carry on with it.`;
-    if (!this.wakeNow(sid, text, w.id)) return `answers the [needs you] question${both}; its worker ${sid} could not be resumed: pass it on with message_agent`;
-    return `answers the [needs you] question${both}: sent to its worker ${sid}, which resumes with it (nothing for you to pass on)${cleared}`;
+    if (!sid || !s) return `answers the [needs you] question${both}${sid ? ` (its worker ${sid} is gone: start the work with it)` : asker ? ` (worker ${asker} asked it but is off ${w.id} now, and nobody is on it: start the work with it)` : ''}${others()}`;
+    if (BUSY.includes(s.status)) return `answers the [needs you] question${both}; its worker ${sid} is mid-turn: pass it on with message_agent${others()}`;
+    const main = groups.get(sid) ?? [w];
+    const cleared = main.map((x) => this.clearReportedGates(x, sid)).join('');
+    if (!this.wakeNow(sid, textFor(sid, main), w.id)) return `answers the [needs you] question${both}; its worker ${sid} could not be resumed: pass it on with message_agent${others()}`;
+    return `answers the [needs you] question${both}: sent to its worker ${sid}, which resumes with it (nothing for you to pass on)${cleared}${others()}`;
   }
 
   /**
@@ -2251,10 +2333,34 @@ It is for your part of the work, not an answer to another worker's question.`;
    * hand-off and its Queued state undone. A request the move had not touched yet is left as it is. Without it the request sat
    * Queued with no worker while `s` kept its movedAway mark (the w5950 review: handBack before startMoved succeeds).
    */
-  moveUndone(w: WorkItem, s: Pick<SessionInfo, 'id'>, before: MoveBefore, why: string) {
-    if (!isOpen(w)) return;
+  /**
+   * w6047 (the w6056 review, 2): a message a failed move held for worker `sid`, whose hand-back of `w` (made meanwhile) stands,
+   * goes into that hand-off's message, so the request's next worker gets it.
+   */
+  carryInHandBack(w: WorkItem, sid: string, text: string, anyHandBack = false): boolean {
+    const hb = w.handedBack;
+    // w6047 (the w6223 review, F1): `anyHandBack` takes a hand-back another worker made (a sibling it took and handed back
+    // during the move), so the message goes with it to the request's next worker instead of nowhere.
+    if (!hb || (hb.session !== sid && !anyHandBack) || !text) return false;
+    w.handedBack = { ...hb, message: hb.message ? `${hb.message}\n\n---\n\n${text}` : text };
+    this.stamp(w, `the message its move held for worker ${sid} goes with its hand-back${hb.session !== sid ? ` (made by worker ${hb.session})` : ''} (w6047)`);
+    this.store.putWork(w);
+    return true;
+  }
+
+  moveUndone(w: WorkItem, s: Pick<SessionInfo, 'id'>, before: MoveBefore, why: string, move?: { how: string; to: string }): boolean {
+    if (!isOpen(w)) return false;
     const off = !w.sessionIds.includes(s.id);
-    if (!off && !w.movedOff?.[s.id] && w.handedBack?.session !== s.id) return;
+    if (!off && !w.movedOff?.[s.id] && w.handedBack?.session !== s.id) return false;
+    // w6047 (the w5995 review): a hand-back made while the start was under way (a pause, a stop_agent move_to) is not this
+    // move's: it stands, Queued for the dispatcher as it said, and is not undone. The move's own is the one with its how and to.
+    const hb = w.handedBack;
+    if (move && hb && hb.session === s.id && hb.at !== before.handedBack?.at && (hb.how !== move.how || hb.to !== move.to)) {
+      this.stamp(w, `not given back to worker ${s.id} (${why}): it was handed back meanwhile (${hb.how}), and that stands (w6047)`);
+      this.store.putWork(w);
+      console.log(`ledger: ${w.id}: not given back to worker ${s.id}: handed back meanwhile (${hb.how}) (w6047)`);
+      return false;
+    }
     if (off) w.sessionIds = [...w.sessionIds, s.id];
     w.links = { ...w.links, [s.id]: before.link ?? { at: this.now().toISOString(), how: 'sent' } };
     if (w.movedOff?.[s.id]) {
@@ -2271,6 +2377,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     this.stamp(w, `given back to worker ${s.id}: ${why} (w5976)`);
     this.store.putWork(w);
     console.log(`ledger: ${w.id}: given back to worker ${s.id}, its move did not start (w5976): ${why}`);
+    return true;
   }
 
   /**
@@ -4914,7 +5021,11 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       this.store.putWork(w);
       return `${w.id} is blocked again on ${name}; the resume is kept and handed back when that clears`;
     }
-    if (!isOpen(w) && w.status !== 'stalled') return `${w.id} is ${w.status}`;
+    // w6047 (the w6193 review): a person's answer or note goes even when its request closed while it waited: the person's
+    // words are never dropped; the worker sees the request closed. A moved-off worker still does not take one (w2079 below):
+    // an answer to a question it asked goes to the request's new worker (answerNeedsYou, the w6214 review), and a move
+    // forwards what was queued for it there (forwardToHeirs).
+    if (!isOpen(w) && w.status !== 'stalled' && !answer) return `${w.id} is ${w.status}`;
     // w2079: a worker its request was moved off does not take it up again beside the new one. eca53c32 was moved off w1903 at
     // 19:34Z on 2026-10-24 (to c62e5ad1 on m5/slot3); the sweep's resume reached it at 19:40Z, and both pushed to PR #2369.
     if (w.movedOff?.[sessionId] && !w.sessionIds.includes(sessionId)) {
