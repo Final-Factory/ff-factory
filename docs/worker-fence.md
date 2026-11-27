@@ -101,6 +101,21 @@ anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macO
   closed: no commit given, a commit GitHub does not know, a failed read, or a file without the read keeps the mark, with that
   reason added to it, so the refusal says which. `start_agent` makes the same check for a marked pair run that has a commit
   (one filed before w6189, or by hand) and clears the mark on the request before its legs are checked.
+  Only `commit` is read (w6235, from w6192's review of PR #1402), so `legacy_data` that names another player, a sha that
+  is not `commit` or a `0.50.x.y` build ("the host runs the Steam 0.50.0.47 build"), keeps the mark and says so
+  (`server/gameDataDir.ts` `otherPlayerIn`), and a verdict for another commit than the pair's clears nothing. A queued
+  pair run still marked (filed before w6189, or by hand) is re-checked each minute by BlockerWatch before the queue is
+  read (`Agents.recheckLegacyPairs`, at most once per 10 minutes per run and commit), so it no longer waits for a
+  `start_agent` call to be placed. The run's own `what` and `brief` are read the same way (w6451, from w6442's review of
+  PR #1477), since a run with no `legacy_data` is marked from them: "the host runs Steam 0.50.0.47" in the brief keeps
+  the mark at all three points (`otherPlayerInWords`; start_agent and the re-check take the worker's part of a filed
+  run's brief, `pairAskWords`, so FF Factory's own words and their hex session id do not count). A sha in a brief that
+  is only context keeps the mark too, failing closed: pass `legacy_data` "none" when no leg runs a pre-w5297 player.
+  A build named without a number counts as another player too (w6458, from w6454's review of PR #1484): "the Steam
+  pre-1.0 build", "installed from Steam", "the published 0.50 player", "the pre-1.0 release" (`INSTALLED_BUILD`). Its
+  words are read only after the pre-1.0 or 0.50 words marked the run, and "a Steam lobby" or "the release branch" are no
+  build; a false match keeps the mark, and `legacy_data` "none" is the way out. newPair joins the worker's brief to its
+  own words with `PAIR_FILED_BY`, the same text `pairAskWords` cuts at.
 
 ## Long runs the daemon starts for a worker (w6367, Windows)
 

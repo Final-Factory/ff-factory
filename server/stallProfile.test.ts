@@ -72,3 +72,51 @@ test('w6382: a slow state build gets a line of its own from its samples, with no
   p.noteSpan('state build', 10_000);
   assert.equal((p as unknown as { spans: unknown[] }).spans.length, 0);
 });
+
+// Its own functions: one an earlier test ran under another session's profiler is named by its caller here (measured).
+function firstWindowBusyLoop(ms: number) {
+  const end = Date.now() + ms;
+  let x = 0;
+  while (Date.now() < end) x += Math.sqrt(x + 1);
+  return x;
+}
+
+function secondWindowBusyLoop(ms: number) {
+  const end = Date.now() + ms;
+  let x = 0;
+  while (Date.now() < end) x += Math.sqrt(x + 2);
+  return x;
+}
+
+test('w6416: windows overlap, so a roll starts the next profile warm, and each window still names its own block', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stall-w6416-'));
+  const lines: string[] = [];
+  let block: [number, number] = [0, 0];
+  const p = new StallProfiler({ dataDir: dir, worstLagSince: () => block[1], blocksSince: () => [block], log: (l) => lines.push(l) }).start();
+  try {
+    assert.equal(p.overlap, true, 'this Node gives console profiles back to the session');
+    const t0 = Date.now();
+    firstWindowBusyLoop(400);
+    block = [Date.now(), Date.now() - t0 + 1000];
+    p.roll();
+    assert.ok(p.lastRoll && p.lastRoll.nodes > 1 && p.lastRoll.samples > 0, JSON.stringify(p.lastRoll));
+    const first = lines.find((l) => l.startsWith('stall profile: block of'));
+    assert.match(first ?? '', /firstWindowBusyLoop \(server\/stallProfile\.test\.ts:\d+\)/, lines.join('\n'));
+    // The next window is its own: its block names the second function, not the first window's.
+    lines.length = 0;
+    const t1 = Date.now();
+    secondWindowBusyLoop(400);
+    block = [Date.now(), Date.now() - t1 + 1000];
+    p.roll();
+    const second = lines.find((l) => l.startsWith('stall profile: block of'));
+    assert.match(second ?? '', /secondWindowBusyLoop/, lines.join('\n'));
+    assert.doesNotMatch(second ?? '', /firstWindowBusyLoop/);
+  } finally {
+    p.stop();
+    await new Promise((ok) => setTimeout(ok, 100));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

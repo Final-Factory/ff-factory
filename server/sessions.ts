@@ -2304,7 +2304,10 @@ export class SessionManager {
       const refused = q.capRefusedAt && now - (Date.parse(q.capRefusedAt) || 0) < CAP_REFUSED_HOLD_MS ? q.why : undefined;
       let hold = onHold ?? (restart || this.fullFor(s) || refused);
       // w1532: a paused machine's worker hands its requests back instead of waiting for the unpause; the message goes with them.
-      if (onHold && free(() => this.pauseHeld?.(s, q.text))) {
+      // w6381: the check reads only (MachinePause.heldResume) and runs inside the memo; only the drop empties it. Run in free(),
+      // each message held on a computer (beast's daemon dropping) made the next one build claims and places again (1.1-1.7 s
+      // under drainOnce at 13:52Z and 13:59Z, 2026-11-27, each right after "machine beast disconnected").
+      if (onHold && this.pauseHeld?.(s, q.text)) {
         drop();
         continue;
       }

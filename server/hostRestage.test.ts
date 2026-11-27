@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import { HostedSession, hostFiles, lockEnvOf, restageModeOf, type HostDeps, type HostStart, type RestageMode } from '../machine/agentHost.ts';
 import type { SessionInfo } from '../shared/types.ts';
 
@@ -59,10 +60,10 @@ function rig(id: string, mode: RestageMode | undefined) {
 }
 
 /** The host's agent reports a state, as its host's out.jsonl line does; the daemon's poll reads it. */
-const say = async (r: ReturnType<typeof rig>, status: SessionInfo['status'], live: boolean, id: string) => {
+const say = async (r: ReturnType<typeof rig>, status: SessionInfo['status'], live: boolean, id: string, backgroundTasks?: number) => {
   const before = r.commands().length;
-  r.hostSays({ op: 'state', info: info(id, status), live, lastFrom: 'system' });
-  await until(`the session reads ${status}`, () => r.s.info.status === status && r.s.live === live);
+  r.hostSays({ op: 'state', info: { ...info(id, status), ...(backgroundTasks ? { backgroundTasks } : {}) }, live, lastFrom: 'system' });
+  await until(`the session reads ${status}`, () => r.s.info.status === status && r.s.live === live && (r.s.info.backgroundTasks ?? 0) === (backgroundTasks ?? 0));
   // The same status as before reads at once: a few of the daemon's polls (100 ms) so this line is read too.
   await new Promise((res) => setTimeout(res, 400));
   return before;
@@ -130,6 +131,55 @@ test('w6287: a restage the host skipped (a turn had started) is asked again at t
   await say(r, 'running', true, 'h2');
   await say(r, 'idle', true, 'h2');
   assert.deepEqual(r.commands().map((c) => c.op), ['send', 'restage', 'restage']);
+});
+
+test('w6439: hostRestage on: an idle agent with a background task is not restaged until its task ends, then once', { timeout: 30_000 }, async (t) => {
+  const r = rig('h5', 'on');
+  t.after(() => fs.rmSync(r.root, { recursive: true, force: true }));
+  r.s.send('first turn', 'system');
+  await say(r, 'idle', true, 'h5');
+  // ed1d17df (w6291) on LothDesktop: idle with a background task while its host was on the old environment.
+  r.switchToWarn();
+  await say(r, 'idle', true, 'h5', 1);
+  await say(r, 'idle', true, 'h5', 1);
+  assert.deepEqual(r.commands().map((c) => c.op), ['send'], 'never a restage while a background task runs');
+  // Its task ends: the host is told to restage, once.
+  await say(r, 'idle', true, 'h5');
+  assert.deepEqual(r.commands().map((c) => c.op), ['send', 'restage']);
+  await say(r, 'idle', true, 'h5');
+  assert.deepEqual(r.commands().map((c) => c.op), ['send', 'restage'], 'asked once');
+});
+
+/** w6445: a host the daemon before this one started on the old environment (a process stands in for it), idle, taken back after the switch. */
+function adoptIdle(t: { after: (fn: () => void) => void }, id: string, backgroundTasks?: number) {
+  const r = rig(id, 'on');
+  const old = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  t.after(() => {
+    old.kill();
+    fs.rmSync(r.root, { recursive: true, force: true });
+  });
+  fs.mkdirSync(r.f.dir, { recursive: true });
+  fs.writeFileSync(r.f.host, JSON.stringify({ hostProtocol: 1, sessionId: id, pid: old.pid, startedAt: new Date().toISOString() }));
+  fs.writeFileSync(r.f.beat, '');
+  fs.writeFileSync(r.f.lockEnv, lockEnvOf({}));
+  fs.writeFileSync(r.f.state, JSON.stringify({ op: 'state', info: { ...info(id), ...(backgroundTasks ? { backgroundTasks } : {}) }, live: true, lastFrom: 'system' }));
+  r.switchToWarn();
+  assert.equal(r.s.adopt(), true);
+  return r;
+}
+
+test('w6445: hostRestage on: an idle host taken back at the daemon restart after a switch is restaged at once, once', { timeout: 30_000 }, async (t) => {
+  const r = adoptIdle(t, 'h6');
+  assert.deepEqual(r.commands().map((c) => c.op), ['attach', 'restage']);
+  await say(r, 'idle', true, 'h6');
+  assert.deepEqual(r.commands().map((c) => c.op), ['attach', 'restage'], 'asked once');
+});
+
+test('w6445: an idle host taken back with a background task is not restaged until its task ends', { timeout: 30_000 }, async (t) => {
+  const r = adoptIdle(t, 'h7', 1);
+  assert.deepEqual(r.commands().map((c) => c.op), ['attach'], 'never a restage while a background task runs');
+  await say(r, 'idle', true, 'h7');
+  assert.deepEqual(r.commands().map((c) => c.op), ['attach', 'restage']);
 });
 
 test('w6287: hostRestage warn (the default) only logs an agent on the old environment, once, and never stops it', { timeout: 30_000 }, async (t) => {

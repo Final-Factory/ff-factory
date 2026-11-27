@@ -1102,6 +1102,13 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     (w5659, PR #1220) and `editorFence: true`: then a fenced editor's EditorPrefs writes are refused, silently to Unity. The daemon's own EditorPrefs (App Nap off, Burst on)
     therefore still apply. That is the cfprefsd hole in docs/worker-fence.md "Known limits": measured on m5, a
     `defaults write` of a new domain from inside the fence created its plist in the real `~/Library/Preferences`.
+    **Measured with both on (m5, 2026-11-27, w6339):** `CFFIXED_USER_HOME=<root>/home` does NOT move EditorPrefs. In
+    a fenced editor, `EditorPrefs.SetInt("w6339probe", 7)` read back 7 in the process (cfprefsd's cache) but
+    reached no plist: not the real `com.unity3d.UnityEditor5.x.plist` and nothing under `<root>/home/Library/Preferences`.
+    The real plist was rewritten only at the editor's start, by the daemon's unfenced `defaults` (`BurstCompilation = 1`,
+    `NSAppSleepDisabled = 1`), and the editor read Burst on. The editor still licensed, compiled, entered play mode and
+    passed `SimulationRateConstantsTest` 31/31. To probe this, use `execute_code` and `defaults read` from outside
+    Unity: `log show` cannot run inside the fence ("log: Cannot run while sandboxed").
   - **Warn-only first** (lothsahn's lockout rule). With `editorFence` unset, the profile's every `(deny ...)` becomes
     `(allow ... (with report))` (`warnOnlyProfile`). Nothing is refused. **On macOS that report is logged nowhere**
     (measured on m5, macOS 26.4, w5659): no `Sandbox:` unified-log line for an allow with report, none for a deny
@@ -1478,6 +1485,10 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
   `UV_CACHE_DIR`, `PIP_CACHE_DIR`, `npm_config_cache`, `NUGET_PACKAGES`, `UPM_CACHE_ROOT`, `DOTNET_CLI_HOME` and
   `PLAYWRIGHT_BROWSERS_PATH` pointing at its clones (under `warn` only once a tool's clone is made; under `on` always), its
   own `FF_DETERMINISM_AUDIT_DIR` (`cache/slots/<sandbox>/determinism-audit`), and `FF_PLAYER_BROKER=1`.
+- uv can't use the read-only seed as `UV_CACHE_DIR`; use the slot clone. (uv opens its 0-byte cache marker files, such as
+  `sdists-v9/.git`, for writing on every start, so it exits 2 with "Operation not permitted", `--offline` too. Measured on
+  macOS Seatbelt with the lock on, uv 0.11.27, w6424 on m5, 2026-11-27: the slot clone ran warm at 0.070 s min; Windows not
+  checked.)
 - **After a sharedLock switch** (w6287): the switch restarts the daemon, and the new daemon adopts the running agent hosts
   (w605). A host keeps the environment it started with, so an agent adopted across the switch keeps the old mode's cache
   paths and `FF_PLAYER_BROKER` until its next host start (a stop, the idle reap after an hour, a code update's restart);

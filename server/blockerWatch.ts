@@ -19,7 +19,7 @@
 import type { Store } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
-import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, onRequest, ownsPr, partOfPr, prLabel, RESUME_SWEEP_MS, sameCommit, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, onRequest, followMerged, gateWaitsOn, ownsPr, partOfPr, reviewsPr, prLabel, RESUME_SWEEP_MS, sameCommit, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner, isRateLimitText } from './githubTokens.ts';
 import { budgetOf, ghGet, GH_LOW_EVERY_MS, GH_LOW_REMAINING } from './ghBudget.ts';
@@ -108,6 +108,8 @@ export interface BlockerWatchDeps {
   room?: () => string[];
   /** Room for each kind of work and the held computers (w1089, w1098); preferred over `room`. */
   roomFacts?: () => RoomNow;
+  /** w6235: clear the pre-w5297 mark of queued pair runs whose commit reads FF_GAME_DATA_DIR (Agents.recheckLegacyPairs). */
+  legacyPairs?: () => Promise<string[]>;
   now?: () => number;
 }
 
@@ -295,6 +297,8 @@ export class BlockerWatch {
     }
     this.busy = true;
     try {
+      // w6235: a queued pair run marked pre-w5297 whose commit reads FF_GAME_DATA_DIR is placed like any other, before the queue is read.
+      for (const id of await this.d.legacyPairs?.().catch((): string[] => []) ?? []) did.set(id, 'its commit reads FF_GAME_DATA_DIR: no longer a pre-w5297 pair run');
       // w1089: a block that is only a wait for capacity is Queued, not Blocked, whoever set it and whenever.
       for (const id of this.d.orchestrators.requeueCapacityBlocks?.() ?? []) did.set(id, 'requeued: a block that waited only for capacity');
       // w2304: a pair run that lost a leg mid-run starts again whole, Queued, never Stalled.
@@ -589,6 +593,33 @@ export class BlockerWatch {
    * none while a message to the worker waits in the send queue (it was answered, and waits for capacity), and none once
    * a worker of the request it names finished a turn after that report (it was resumed on it, and blocked again).
    */
+  /**
+   * w6446: request `w` waits on request `on`: through its gates (a request gate, done or report, or a w5845 merge wait on
+   * the request it was handed to), or its idle worker's words (saysWaitsOn), following merged requests and chains of
+   * such waits a few steps. w6077 waited on w6105, which was merged into w6090.
+   */
+  private waitsOn(w: WorkItem, on: string): boolean {
+    const target = (id: string) => followMerged(id, (x) => this.d.store.work.get(x.toLowerCase()))?.id.toLowerCase() ?? id.toLowerCase();
+    const goal = target(on);
+    const seen = new Set<string>();
+    let front = [w];
+    for (let depth = 0; depth < 6 && front.length; depth++) {
+      const next: WorkItem[] = [];
+      for (const x of front) {
+        const ids = x.status === 'blocked' ? gatesOf(x).map(gateWaitsOn).filter((y): y is string => !!y) : x.status === 'active' ? [this.saysWaitsOn(x)].filter((y): y is string => !!y) : [];
+        for (const id of ids.map(target)) {
+          if (id === goal) return true;
+          if (seen.has(id)) continue;
+          seen.add(id);
+          const t = this.d.store.work.get(id);
+          if (t) next.push(t);
+        }
+      }
+      front = next;
+    }
+    return false;
+  }
+
   private saysWaitsOn(w: WorkItem): string | undefined {
     const s = newestFirst(w).map((sid) => this.d.store.sessions.get(sid)).find((x) => x?.kind === 'worker' && x.lastResult);
     if (!s || BUSY.has(s.status) || s.queuedSend) return undefined;
@@ -684,7 +715,18 @@ export class BlockerWatch {
       const sorted = [...list].sort((a, b) => Number(owns(b)) - Number(owns(a)) || (Date.parse(b.g.at) || 0) - (Date.parse(a.g.at) || 0));
       const keep = sorted[0];
       const why = owns(keep) ? `${keep.w.id} owns it (its Request: line, ledger link or branch)` : `none of them owns it and ${keep.w.id}'s worker called blocked_on on it last (${keep.g.at})`;
-      const rest = sorted.slice(1);
+      // w6446: a request that reviews the PR is woken with the owner: it reads and reports, never pushes, and the PR merges
+      // only after its report. Nor is a request the owner waits on (directly, or through one merged into it) told to wait
+      // for the merge: the two would wait on each other (w6090 and w6102 sat a day each).
+      const exempt = new Map<string, string>();
+      for (const x of sorted.slice(1)) {
+        if (ownsPr(x.w, ref, h)) continue;
+        if (reviewsPr(x.w, ref, keep.w)) exempt.set(x.w.id, `${x.w.id} reviews ${ref}, which merges only after its review`);
+        else if (this.waitsOn(keep.w, x.w.id)) exempt.set(x.w.id, `${keep.w.id} waits on ${x.w.id}: a wait for the merge would make them wait on each other`);
+      }
+      for (const [id, reason] of exempt) console.log(`blocker watch: ${ref}: ${id} is woken with ${keep.w.id}, not set to wait for it to merge (${reason}) (w6446)`);
+      const rest = sorted.slice(1).filter((x) => !exempt.has(x.w.id));
+      if (!rest.length) continue;
       console.log(`blocker watch: ${ref}: ${list.map((x) => x.w.id).join(', ')} would all be woken; only ${keep.w.id} is (${why}); ${rest.map((x) => x.w.id).join(', ')} now wait for it to merge (w5845)`);
       for (const x of rest) {
         try {

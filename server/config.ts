@@ -401,7 +401,7 @@ export interface Config {
    * (default 5) and when it is busy (default 60); between, it grows with the load.
    */
   timing?: { unavailableIdleMinutes?: number; unavailableBusyMinutes?: number };
-  masterBatch?: { enabled?: boolean; autoApprove?: { enabled?: boolean; maxPerDay?: number }; repo?: string; workflow?: string };
+  masterBatch?: { enabled?: boolean; autoApprove?: { enabled?: boolean; maxPerDay?: number }; repo?: string; workflow?: string; branches?: string[] };
   /** ffu's post-merge revert verdicts, handed to the reverted PR's request (w4930, server/ffuPostMerge.ts): on, Final-Factory/ffu, ci.yml by default. */
   ffuPostMerge?: { enabled?: boolean; repo?: string; workflow?: string };
   /**

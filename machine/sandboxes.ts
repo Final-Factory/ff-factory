@@ -22,7 +22,8 @@ import { checkArray, readJsonDurable, writeJsonDurable } from '../server/durable
 import { armScriptReimport } from './scriptReimport.ts';
 import { daemonGit } from './storeLock.ts';
 import { borrowsFrom, convertToSlotRepo, finishConversion, guardStorePrune, isSlotRepo, isWorktree, keepSlotBranches, makeSlotRepo, storeGitDir, takeStoreBranch } from './slotRepo.ts';
-import { MacUnity, MacUnityWatch, realDeps, type EditorFence, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
+import { isLowFence, MacUnity, MacUnityWatch, realDeps, type EditorFence, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
+import { GitPackages, type GitPackagesMode } from './gitPackages.ts';
 import type { DaemonSandbox } from '../server/machineProtocol.ts';
 import type { BenchTicket } from './benchQueue.ts';
 import type { IdleCloseResult } from './liveIdle.ts';
@@ -91,6 +92,8 @@ export interface SandboxEditor {
 
 export interface PoolDeps {
   git(args: string[], opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<RunResult>;
+  /** w6412: after a switch, what to say about git packages the cache lacks (and, editorGitPackages on, their mirrors begun). */
+  gitPackagesAfterSwitch?(dir: string): string | undefined;
   copyTree(src: string, dst: string, signal?: AbortSignal, mode?: 'robocopy' | 'clone', exclude?: string[]): Promise<void>;
   /**
    * Bytes a Library copy writes up front: the source's size when it is a full copy (robocopy on Windows), undefined
@@ -238,12 +241,46 @@ export type LfsDedup = { bytes: number } | { skipped: string };
  * smudges every LFS file into a full copy: 9.1 GB of each game worktree on lothdesktop, its proof videos, art and FMOD audio
  * (5,026 files; the dedup took 9 s there, measured 2026-10-19). git-lfs does nothing where the file system cannot clone (NTFS,
  * ext4) and refuses a worktree with any uncommitted or untracked change. Never throws.
+ *
+ * w6432: git-lfs's dedup puts back only each file's mode, not its times, so every cloned file's mtime is new and the
+ * index's stat data no longer matches: the next `git status` re-reads every LFS file through the clean filter (17.2 s for
+ * 200 files of 400 MB on lothdesktop at 100% CPU, measured; slot1's 8.5 GB ran past switchBranch's 120 s timeout, and
+ * w6431's start failed). The content is the same bytes, so the times taken before the dedup are put back after it, and the
+ * index stays clean (0 stale entries after, 57 ms for the next status, measured). Without the list of files, no dedup.
  */
 export async function lfsDedup(git: PoolDeps['git'], dir: string, signal?: AbortSignal): Promise<LfsDedup> {
-  const res = await git(['-C', dir, 'lfs', 'dedup'], { timeoutMs: 10 * 60_000, signal }).catch((e: Error) => ({ code: -1, stdout: '', stderr: e.message }));
+  const failed = (e: Error) => ({ code: -1, stdout: '', stderr: e.message });
+  const ls = await git(['-C', dir, 'lfs', 'ls-files', '--name-only'], { timeoutMs: 5 * 60_000, signal }).catch(failed);
+  if (ls.code !== 0) return { skipped: `could not list the LFS files: ${tail(ls.stderr || ls.stdout) || `exit ${ls.code}`}` };
+  const times = await lfsTimes(dir, ls.stdout);
+  const res = await git(['-C', dir, 'lfs', 'dedup'], { timeoutMs: 10 * 60_000, signal }).catch(failed);
+  // An aborted dedup (the trim's timeout won, and the sandbox may already be back in use) gets no times back: a checkout's
+  // new bytes of the same size would be stamped with the old mtime and hidden from git status (w6453's review).
+  if (!signal?.aborted) await restoreLfsTimes(dir, times, signal);
   if (res.code !== 0) return { skipped: tail(res.stderr || res.stdout) || `exit ${res.code}` };
   const m = /De-duplicated\s+size:\s*(\d+)\s*bytes/i.exec(res.stdout + res.stderr);
   return { bytes: m ? Number(m[1]) : 0 };
+}
+
+/** Each listed LFS file's size and times before a dedup (w6432); a file that cannot be read is left out. Exported for tests. */
+export async function lfsTimes(dir: string, names: string): Promise<Map<string, fs.Stats>> {
+  const out = new Map<string, fs.Stats>();
+  for (const name of names.split(/\r?\n/).filter(Boolean)) {
+    const st = await fs.promises.stat(path.join(dir, name)).catch(() => undefined);
+    if (st?.isFile()) out.set(name, st);
+  }
+  return out;
+}
+
+/** Put back the times lfsTimes took, on every file whose size is still the same (the dedup's clone is the same bytes); it stops once `signal` aborts. Never throws. */
+export async function restoreLfsTimes(dir: string, times: Map<string, fs.Stats>, signal?: AbortSignal): Promise<void> {
+  for (const [name, was] of times) {
+    if (signal?.aborted) return;
+    const p = path.join(dir, name);
+    const now = await fs.promises.stat(p).catch(() => undefined);
+    if (!now || now.size !== was.size || now.mtimeMs === was.mtimeMs) continue;
+    await fs.promises.utimes(p, was.atime, was.mtime).catch(() => undefined);
+  }
 }
 
 /** The log's words for an lfsDedup result. */
@@ -348,7 +385,16 @@ export function editorLaunchEnv(env: Record<string, string>, f: { mkdirSync: typ
 }
 
 /** The real machine: git in the main clone, robocopy/cp for the Library, the daemon's Unity code. */
-export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined, fence?: () => EditorFence | undefined, root?: string, editorTmpdir = false, sharedLock: () => SharedLockSetting = () => 'off'): PoolDeps {
+export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined, fence?: () => EditorFence | undefined, root?: string, editorTmpdir = false, sharedLock: () => SharedLockSetting = () => 'off', gitPackagesMode: () => GitPackagesMode = () => 'warn'): PoolDeps {
+  // w6412: one mirror set for every sandbox, fetched with the daemon's own git and credential (outside the worker fence).
+  const gitPackages = new GitPackages({
+    mode: gitPackagesMode,
+    root,
+    platform,
+    log,
+    git: (args, opts = {}) => daemonGit(run('git', args, { timeoutMs: opts.timeoutMs ?? 120_000, env: ENV })),
+  });
+  const lowFenced = () => platform === 'win32' && isLowFence(fence?.());
   // One process listing serves every sandbox's watch in a look (a CIM query costs seconds on Windows).
   const base = realDeps(platform, log);
   let cached: { at: number; p: Promise<Proc[]> } | undefined;
@@ -360,6 +406,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
   return {
     // w5614: daemonGit marks the daemon's own git calls, which the store lock's warning leaves out (machine/storeLock.ts).
     git: (args, opts = {}) => daemonGit(run('git', ['-C', repoPath, ...args], { timeoutMs: opts.timeoutMs ?? 120_000, signal: opts.signal, env: ENV })),
+    gitPackagesAfterSwitch: (dir) => gitPackages.afterSwitch(dir, lowFenced()),
     copyTree: (src, dst, signal, mode, exclude) => copyTree(src, dst, { signal, mode, exclude }),
     libraryCopyBytes: async (src, mode) => (platform === 'win32' && mode !== 'clone' ? treeBytes(src) : undefined),
     removeTree,
@@ -375,7 +422,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
     editor: (sb, logFile, report) => {
       const env = sandboxEditorEnv(process.env, sb.id, root, editorTmpdir, platform, sharedLock());
       if (editorTmpdir && platform !== 'win32' && !editorTmpdirEnv(root, sb.id, true, platform).TMPDIR) log(`sandbox ${sb.id}: editorTmpdir is on but ${root ?? 'no root'} is too long for it (or unset): the editor keeps the system temp folder`);
-      const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence, env: () => editorLaunchEnv(env, fs, (line) => log(`sandbox ${sb.id}: ${line}`)) });
+      const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence, env: () => editorLaunchEnv(env, fs, (line) => log(`sandbox ${sb.id}: ${line}`)), gitPackages });
       return { unity, watch: new MacUnityWatch(unity, report, { log }) };
     },
     bridgeUp: (project, since) => bridgeUpSince(project, since),
@@ -1611,6 +1658,8 @@ export class SandboxPool {
       if (foreign.length) res.notes.push(`${foreign.length} untracked file(s) were already here from before, not yours, and a save of ${res.to} leaves them uncommitted (w2988): ${someFiles(foreign)}`);
     }
     if (took) res.notes.unshift(took);
+    const gp = this.d.gitPackagesAfterSwitch?.(r.path);
+    if (gp) res.notes.push(gp);
     if (slot && res.from && res.from !== res.to) await this.keepInStore(r, res.from);
     this.git.set(id, await this.d.gitStatus(r.path));
     this.changed(r, { branch: res.to });

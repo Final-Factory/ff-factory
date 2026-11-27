@@ -700,16 +700,22 @@ machines.testHistory = (id, sandbox, file, record) => {
   if (!r.tests.length && !r.running) return { ok: true };
   const key = localRunKey(id, sandbox, file);
   const tags = localRunTags(agents, id, sandbox, r.session, testHistory.startTags(key));
-  testHistory.addRun(
-    { ...r.info, source: 'local', key, repo: testHistorySettings(cfg).repo, machine: id, sandbox: sandbox || undefined, ...tags },
-    r.tests,
-  );
-  return { ok: true };
+  // In the writer thread (w6415: 13.2 s on the loop on 2026-11-27); the daemon is answered once the run is committed, and
+  // sends the file again later when it is not.
+  return testHistory
+    .addRunApart({ ...r.info, source: 'local', key, repo: testHistorySettings(cfg).repo, machine: id, sandbox: sandbox || undefined, ...tags }, r.tests)
+    .then(() => ({ ok: true }));
 };
 // A run's workers as it starts: the daemon sends its finished file later, maybe after the worker has left the sandbox.
 machines.testHistoryStarted = (id, sandbox, file) => {
   const tags = localRunTags(agents, id, sandbox);
-  if (tags.tagged !== 'none') testHistory.noteStart(localRunKey(id, sandbox, file), tags);
+  if (tags.tagged !== 'none') {
+    const key = localRunKey(id, sandbox, file);
+    void testHistory
+      .idle()
+      .then(() => testHistory.noteStart(key, tags))
+      .catch((e: Error) => console.warn(`test history start of ${id}: ${e.message}`));
+  }
 };
 setInterval(() => {
   try {
@@ -1096,6 +1102,7 @@ const blockerWatch = new BlockerWatch({
   nightlyAt: () => nightlyAt,
   room: () => agents.roomNow(),
   roomFacts: () => agents.roomFacts(),
+  legacyPairs: () => agents.recheckLegacyPairs(),
   // w2079: a worker whose work a resume's move is carrying away is not lost: the sweep leaves it be.
   queued: (id) => sessions.queued().some((q) => q.id === id) || agents.isMoving(id),
   // w2422: a worker whose own check-in is pending comes back by itself; its reported wait is not recorded for it.
@@ -1218,6 +1225,10 @@ const sessionRevs = new SessionRevs(undefined, { ready: false });
 const sessionRevsFile = new SnapshotFile(path.join(cfg.dataDir, SESSION_REVS_FILE), () => JSON.stringify(sessionRevs.saved(store.sessions)), { delayMs: 5_000, intervalMs: 30_000, generations: 0, label: 'session revs' });
 /** What each page connect's pageSessions worked out, kept while a session is unchanged (w6382). */
 const pageSessionsCache = new PageSessionsCache();
+// w6456: a page copy that gains or loses its report is a new rev, so a reconnect after any gap gets it again.
+pageSessionsCache.onCopy = (id, withResult) => {
+  if (sessionRevs.pageCopy(id, withResult) && sessionRevs.isReady) sessionRevsFile.changed();
+};
 bus.on('event', (e: ServerEvent) => {
   sessionRevs.note(e);
   pageSessionsCache.note(e);
@@ -1249,7 +1260,8 @@ function appState(user: string | undefined, have?: string | null, phases?: [stri
   // w6336: one placement pass for the whole build (it changes no placement). Outside one, each machine's free() rebuilt
   // every sandbox's claims over all sessions, and roomNow/roomExtras computed places() three times: 0.6-1.2 s of the
   // page's connect (stall profiles 2026-11-27, appState > free > claimedBy > claims).
-  return agents.withPlacesOnce(() => agents.placeAgain.withClaimsMemo(() => appStateIn(me, mine, have, lap)));
+  // w6428: and each sandbox's FREE once (Agents.pageRead): placesNow asked it twice more after the machine views.
+  return agents.pageRead(() => appStateIn(me, mine, have, lap));
 }
 
 /**
@@ -2876,7 +2888,7 @@ server.on('upgrade', (req, socket, head) => {
     // w5861: the log says how long the first state took to build and to hand to the network (on a slow path the last
     // of it waits for the page to take what came before), so a slow open shows where its seconds went.
     ws.send(first, () => pageSockets.sent(ws, performance.now() - t0));
-    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta, buildMs: t1 - t0, jsonMs: built - (t1 - t0), kept: state.partsKept, work: state.workDelta ? { sent: state.work?.length ?? 0, of: state.workDelta.ids.length } : undefined, phases });
+    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta, buildMs: t1 - t0, jsonMs: built - (t1 - t0), kept: state.partsKept, checked: pageSessionsCache.checked, work: state.workDelta ? { sent: state.work?.length ?? 0, of: state.workDelta.ids.length } : undefined, phases });
     if (Date.now() - lastSizesAt >= 3_600_000) {
       lastSizesAt = Date.now();
       setImmediate(() => console.log(`page state sizes: ${stateSizes(state)}`));

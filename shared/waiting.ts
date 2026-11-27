@@ -132,6 +132,32 @@ export function orchestratorAsks(sessions: readonly Pick<SessionInfo, 'id' | 'ki
   return out.sort((x, y) => x.a.at.localeCompare(y.a.at));
 }
 
+/** The one count the Waiting tab, its badge, its tooltip and the Requests banner share (w6436). */
+export interface WaitingTotals {
+  /** Everything waiting on a person: the queue plus the orchestrator's cards that no queued request already holds. */
+  total: number;
+  /** Of those, the viewer's move. Always <= total. */
+  onMe: number;
+  /** total - onMe, never negative. */
+  onOthers: number;
+}
+
+/**
+ * Counts the queue and the cards as one set (w6436). A card about a request already in the queue is that request, counted once
+ * (and it is on the viewer, since their orchestrator asks them); any other card is one more item, on the viewer.
+ */
+export function waitingTotals(queue: readonly WaitingItem[], asks: readonly AskItem[]): WaitingTotals {
+  const byId = new Map<string, boolean>(queue.map((i) => [i.w.id, i.mine]));
+  let extra = 0;
+  for (const a of asks) {
+    if (a.w && byId.has(a.w.id)) byId.set(a.w.id, true);
+    else extra++;
+  }
+  const onMe = [...byId.values()].filter(Boolean).length + extra;
+  const total = byId.size + extra;
+  return { total, onMe, onOthers: total - onMe };
+}
+
 /** How stale a wait is: past a day it is "old", past three days "stale". */
 export function waitAge(since: string, now: number): 'fresh' | 'old' | 'stale' {
   const age = now - Date.parse(since);

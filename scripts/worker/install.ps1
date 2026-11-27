@@ -70,6 +70,14 @@
   With -Update (w6378): set daemon.json's liveRunGuard, as ops_worker machine_update live_run_guard does: warn (the
   default) logs a WARNING when a sandbox trim, release or delete would hit a sandbox where a run of its worker still
   lives; off looks at nothing (the way back). Left out: the install keeps what it has.
+.PARAMETER EditorGitPackages
+  With -Update (w6412): set daemon.json's editorGitPackages, as ops_worker machine_update editor_git_packages does: how a
+  sandbox editor gets a git package its Packages/manifest.json names that Library/PackageCache lacks (machine/gitPackages.ts).
+  warn (the default) only names the missing packages in the start note, unity status and the Package Manager dialog notice;
+  on also fetches each into a mirror under <root>/cache-medium/git-packages with the daemon's own git and credential, and
+  gives a Windows Low-integrity editor the workers' Git on PATH and a url.insteadOf to that mirror, so its Package Manager
+  fetches without a credential; off looks at nothing (the way back). Takes effect at the editor's next start. Left out: the
+  install keeps what it has.
 .PARAMETER DaemonTmpdir
   With -Update (w6000, docs/worker-root.md): set the daemon's own temp folder in daemon.json (daemonTmpdir), as ops_worker
   machine_update daemon_tmpdir does: on (the default) points the daemon's TEMP and TMP at <root>\tmp-daemon, off keeps the
@@ -153,6 +161,7 @@ param(
     [ValidateSet('warn', 'on')][string]$HostRestage,
     [ValidateSet('off', 'warn', 'on')][string]$LongRuns,
     [ValidateSet('off', 'warn')][string]$LiveRunGuard,
+    [ValidateSet('off', 'warn', 'on')][string]$EditorGitPackages,
     [ValidateSet('warn', 'on')][string]$MediumAgentFolders,
     [ValidateSet('on', 'off')][string]$DaemonTmpdir,
     [ValidateSet('warn', 'on')][string]$ToolsDiskLock,
@@ -329,6 +338,7 @@ if ($Update) {
     if ($HostRestage) { $argv += @('--host-restage', $HostRestage) }
     if ($LongRuns) { $argv += @('--long-runs', $LongRuns) }
     if ($LiveRunGuard) { $argv += @('--live-run-guard', $LiveRunGuard) }
+    if ($EditorGitPackages) { $argv += @('--editor-git-packages', $EditorGitPackages) }
     if ($MediumAgentFolders) { $argv += @('--medium-agent-folders', $MediumAgentFolders) }
     if ($DaemonTmpdir) { $argv += @('--daemon-tmpdir', $DaemonTmpdir) }
     if ($ToolsDiskLock) { $argv += @('--tools-disk-lock', $ToolsDiskLock) }

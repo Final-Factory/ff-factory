@@ -10,6 +10,7 @@ import { scoped } from './linuxScope.ts';
 import { DOTNET_DIR, FF_LANDLOCK, makeDotnetShm } from './writeLock.ts';
 import { fencedEditorEnv, fencedEditorEnvWarning } from './editorEnv.ts';
 import { editorTempEnv } from './sharedCaches.ts';
+import type { GitPackages } from './gitPackages.ts';
 import { SANDBOX_EXEC, seatbeltProfile, type WorkerFence } from '../server/workerFence.ts';
 import { accessibilityStep, axPrompt, axTrusted, closeMacWindow, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, tccAccessibility, type SessionState } from './macDialogs.ts';
 
@@ -96,6 +97,8 @@ export interface LowEditorFence {
   unityDir: string;
   licensingIpc: string;
   env: Record<string, string>;
+  /** w6412: the workers' Git (`<root>\tools\git`, server/agentGit.ts), whose msys runs at Low; absent until worker.ts tools puts it there. */
+  gitDir?: string;
 }
 
 /**
@@ -535,12 +538,17 @@ export class MacUnity {
   private readonly fence?: () => EditorFence | undefined;
   /** w5540: whether the last start() was fenced, and why not when it was not. */
   fenced?: { on: boolean; why?: string; warn?: boolean };
+  /** w6412: git packages the manifest names that Library/PackageCache lacks (machine/gitPackages.ts); unset: not looked at. */
+  readonly gitPackages?: GitPackages;
+  /** w6412: what the last start() said about them, if anything. */
+  gitPackagesNote?: string;
 
-  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string; fence?: () => EditorFence | undefined; env?: Record<string, string> | (() => Record<string, string>) } = {}) {
+  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string; fence?: () => EditorFence | undefined; env?: Record<string, string> | (() => Record<string, string>); gitPackages?: GitPackages } = {}) {
     this.repo = norm(repo);
     this.platform = platform;
     this.logFile = opts.logFile;
     this.fence = opts.fence;
+    this.gitPackages = opts.gitPackages;
     const env = opts.env ?? {};
     this.envOf = typeof env === 'function' ? env : () => env;
     this.d = deps ?? realDeps(platform);
@@ -573,7 +581,26 @@ export class MacUnity {
     const parts = [eds.length ? `running: pid ${eds.map((e) => e.pid).join(', ')}` : 'not running', `project ${this.repo}`];
     if (reporters.length) parts.push(`crash reporter open (pid ${reporters.map((r) => r.pid).join(', ')}): the editor crashed`);
     if (!eds.length && this.d.exists(lock)) parts.push('a stale Temp/UnityLockfile is left (start removes it)');
+    const gp = this.gitPackagesNow();
+    if (gp) parts.push(gp);
     return parts.join('; ');
+  }
+
+  /** w6412: whether this editor starts at Low integrity (a Windows Low fence the daemon has now). */
+  private lowFenced(): boolean {
+    return this.platform === 'win32' && isLowFence(this.fence?.());
+  }
+
+  /**
+   * w6412: the git packages the manifest names that Library/PackageCache lacks, the cause and the route, read from disk now
+   * (`unity status`, the Package Manager dialog notice). Undefined when none is missing or the setting is off.
+   */
+  gitPackagesNow(): string | undefined {
+    try {
+      return this.gitPackages?.note(this.repo, this.lowFenced());
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -680,7 +707,10 @@ export class MacUnity {
       pid = lpid;
     } else if (fence && fencedBin && this.d.launchFenced) {
       bin = fencedBin;
-      pid = await this.d.launchFenced(fence, bin, [...args, '-licensingIpc', fence.licensingIpc], this.repo, env);
+      // w6412: a git package the cache lacks would stop a Low editor on the Package Manager dialog; with editorGitPackages
+      // on, the daemon mirrors it first and the editor fetches from the mirror with the workers' Git.
+      const gp = await this.prepareGitPackages(fence.gitDir, { ...process.env, ...fence.env, ...env }, true);
+      pid = await this.d.launchFenced(fence, bin, [...args, '-licensingIpc', fence.licensingIpc], this.repo, { ...env, ...gp });
       this.fenced = { on: true };
     } else {
       // A fence the editor cannot use (no junction for its version, a unity_path not shaped <version>\Editor\Unity.exe):
@@ -688,6 +718,7 @@ export class MacUnity {
       this.fenced = fence ? { on: false, why: !fencedBin ? `no junction under ${fence.unityDir} for ${bin}` : 'no fenced launcher here' } : undefined;
       pid = await this.d.launch(bin, args, this.repo, env);
     }
+    if (!(fence && fencedBin && this.d.launchFenced)) await this.prepareGitPackages(undefined, env, false);
     for (let i = 0; i < 10; i++) {
       await this.d.sleep(1000);
       if (this.editors(await this.d.procs()).length) break;
@@ -702,7 +733,7 @@ export class MacUnity {
           : " inside the workers' Landlock write rules (the worker fence)"
         : ' at Low integrity (the worker fence)';
     const fenceNote = this.fenced ? (this.fenced.on ? onNote : ` unfenced (${this.fenced.why})`) : '';
-    return `${aside ? `${aside}. ` : ''}${this.burstNote ? `${this.burstNote}. ` : ''}Started ${bin}${fenceNote} (pid ${pid}). The Unity MCP bridge comes up once the project has loaded (a minute or more); wait for it before Unity MCP calls.`;
+    return `${aside ? `${aside}. ` : ''}${this.burstNote ? `${this.burstNote}. ` : ''}${this.gitPackagesNote ? `${this.gitPackagesNote}. ` : ''}Started ${bin}${fenceNote} (pid ${pid}). The Unity MCP bridge comes up once the project has loaded (a minute or more); wait for it before Unity MCP calls.`;
   }
 
   /**
@@ -737,6 +768,23 @@ export class MacUnity {
       await this.d.noAppNap?.(bin ?? this.bin());
     } catch {
       // not fatal: the watch also tolerates a throttled editor
+    }
+  }
+
+  /**
+   * w6412: what start() does about missing git packages: the note (kept in gitPackagesNote) and, for a Low editor with
+   * editorGitPackages on, the variables it starts with on top of `env`. Never throws: a failure is a note.
+   */
+  private async prepareGitPackages(gitDir: string | undefined, prior: Record<string, string | undefined>, lowFenced: boolean): Promise<Record<string, string>> {
+    this.gitPackagesNote = undefined;
+    if (!this.gitPackages) return {};
+    try {
+      const r = await this.gitPackages.prepare(this.repo, gitDir, prior, lowFenced);
+      this.gitPackagesNote = r.note;
+      return r.env;
+    } catch (e) {
+      this.gitPackagesNote = `could not look at the git packages: ${(e as Error).message}`;
+      return {};
     }
   }
 
@@ -1296,7 +1344,10 @@ export class MacUnityWatch {
       }
       // Unknown dialogs are reported only if still there on the next look (many close by themselves).
       const block = d.known || prev;
-      const why = d.known?.advice ?? ('why' in v ? v.why : undefined);
+      const advice = d.known?.advice ?? ('why' in v ? v.why : undefined);
+      // w6412: a Package Manager error with a git package the cache lacks names the package, the cause and the route.
+      const gp = d.known?.id === 'package-manager' ? this.u.gitPackagesNow() : undefined;
+      const why = gp ? (advice ? `${gp}. ${advice}` : gp) : advice;
       open.push({ d, state: block ? 'blocked' : 'new', since: prev?.since ?? now, why });
       if (block && !this.reported.has(k)) {
         this.reported.add(k);

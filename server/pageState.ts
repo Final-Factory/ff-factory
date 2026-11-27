@@ -97,6 +97,13 @@ export class PageSessionsCache {
   private changes = new Map<string, number>();
   private off = new Map<string, number>();
   private copies = new Map<string, { at: number; withResult: boolean; copy: SessionInfo }>();
+  /**
+   * How many sessions the last pageSessions call had to look at again (keepsOnPage), for the 'page socket open' line: the
+   * cache's misses. The first build after the 2026-11-27 14:31Z deploy spent 60 ms in `keeps`, as if it missed for most.
+   */
+  checked = 0;
+  /** Told of every page copy, with or without its report (w6456: SessionRevs.pageCopy). */
+  onCopy?: (id: string, withResult: boolean) => void;
 
   note(e: { type: string; session?: { id: string }; id?: string }) {
     const id = e.type === 'session' ? e.session?.id : e.type === 'session_removed' ? e.id : undefined;
@@ -112,6 +119,7 @@ export class PageSessionsCache {
     if (named.has(s.id)) return true;
     const at = this.changes.get(s.id) ?? 0;
     if (this.off.get(s.id) === at) return false;
+    this.checked++;
     const keeps = keepsOnPage(s, named, now);
     if (!keeps) this.off.set(s.id, at);
     return keeps;
@@ -121,6 +129,7 @@ export class PageSessionsCache {
   copy(s: SessionInfo, named: ReadonlySet<string>, now: number): SessionInfo {
     const at = this.changes.get(s.id) ?? 0;
     const withResult = s.lastResult !== undefined && (named.has(s.id) || now - (Date.parse(s.lastActivityAt) || 0) < PAGE_RESULT_KEEP_MS);
+    this.onCopy?.(s.id, withResult);
     const c = this.copies.get(s.id);
     if (c && c.at === at && c.withResult === withResult) return c.copy;
     const copy = pageSession(s, named, now);
@@ -133,6 +142,7 @@ export class PageSessionsCache {
 export function pageSessions(sessions: Iterable<SessionInfo>, named: ReadonlySet<string>, now: number, cache?: PageSessionsCache): { sessions: SessionInfo[]; older: number } {
   const out: SessionInfo[] = [];
   let older = 0;
+  if (cache) cache.checked = 0;
   for (const s of sessions) {
     if (cache ? cache.keeps(s, named, now) : keepsOnPage(s, named, now)) out.push(cache ? cache.copy(s, named, now) : pageSession(s, named, now));
     else older++;
@@ -171,6 +181,13 @@ export class SessionRevs {
    * only the sessions it would leave out.
    */
   private pending = new Map<string, [number, string]>();
+  /**
+   * Whether the last page copy of each session carried its report (w6456, PageSessionsCache.copy). A page copy loses its
+   * report when its session goes 3 days idle with no shown request naming it, and gets it back when one names it, with
+   * no change to the session itself: such a flip is a new rev (`pageCopy`), so a page that reconnects after any gap gets
+   * the copy a fresh load would. Saved with the revs, so a flip while the server was down counts too.
+   */
+  private reports = new Map<string, boolean>();
   private store: Pick<ReadonlyMap<string, SessionInfo>, 'get'> | undefined;
   private counts = { kept: 0, changed: 0 };
 
@@ -189,6 +206,7 @@ export class SessionRevs {
       this.revs.delete(e.id);
       this.keys.delete(e.id);
       this.pending.delete(e.id);
+      this.reports.delete(e.id);
       this.rev++;
     }
   }
@@ -211,6 +229,19 @@ export class SessionRevs {
     if (!Number.isSafeInteger(rev)) return undefined;
     const upTo = m[1] === this.boot ? this.rev : this.past.find(([e]) => e === m[1])?.[1];
     return upTo !== undefined && rev <= upTo ? rev : undefined;
+  }
+
+  /**
+   * A page copy of `id` was made, with its report or without (w6456): a new rev when that is not what the last copy had,
+   * so a page holding the other kind gets it again. True when it gave one (the revs file then wants saving).
+   */
+  pageCopy(id: string, withResult: boolean): boolean {
+    this.check(id);
+    const was = this.reports.get(id);
+    this.reports.set(id, withResult);
+    if (was === undefined || was === withResult) return false;
+    this.revs.set(id, ++this.rev);
+    return true;
   }
 
   changedSince(id: string, rev: number): boolean {
@@ -254,7 +285,14 @@ export class SessionRevs {
       for (const id of ids) {
         if (this.touched.has(id)) continue;
         const was = s.sessions.get(id);
-        if (was) this.pending.set(id, was);
+        const seen = this.reports.get(id);
+        const savedReport = s.reports.get(id);
+        if (savedReport !== undefined && seen === undefined) this.reports.set(id, savedReport);
+        // w6456: this run made a page copy of a different kind than the last run's last one (a flip while it was down).
+        if (was && savedReport !== undefined && seen !== undefined && seen !== savedReport) {
+          this.revs.set(id, ++this.rev);
+          this.counts.changed++;
+        } else if (was) this.pending.set(id, was);
         else {
           this.revs.set(id, ++this.rev);
           this.counts.changed++;
@@ -278,12 +316,13 @@ export class SessionRevs {
 
   /** What session-revs.json holds: the epoch, the rev, the earlier runs, and each session's rev and content key. */
   saved(sessions: ReadonlyMap<string, SessionInfo>): SavedRevs {
-    const out: Record<string, [number, string]> = {};
+    const out: SavedRevs['sessions'] = {};
     for (const [id, s] of sessions) {
       this.check(id);
       let key = this.keys.get(id);
       if (key === undefined) this.keys.set(id, (key = contentKey(s)));
-      out[id] = [this.revs.get(id) ?? 0, key];
+      const report = this.reports.get(id);
+      out[id] = report === undefined ? [this.revs.get(id) ?? 0, key] : [this.revs.get(id) ?? 0, key, report ? 1 : 0];
     }
     return { v: 1, epoch: this.boot, rev: this.rev, past: this.past, sessions: out };
   }
@@ -292,7 +331,7 @@ export class SessionRevs {
 /** The file in the data folder the revs are saved in (server/index.ts). */
 export const SESSION_REVS_FILE = 'session-revs.json';
 
-/** How many earlier runs' tokens a server still takes: a page sends its token only after a gap of at most 10 minutes. */
+/** How many earlier runs' tokens a server still takes (w6456: a page sends its token after any gap). */
 export const PAST_EPOCHS = 8;
 
 export interface SavedRevs {
@@ -300,7 +339,8 @@ export interface SavedRevs {
   epoch: string;
   rev: number;
   past: [string, number][];
-  sessions: Record<string, [number, string]>;
+  /** Each session's rev and content key, and (w6456) 1 or 0: whether the last page copy of it carried its report. */
+  sessions: Record<string, [number, string] | [number, string, 0 | 1]>;
 }
 
 /** A session's content key (w6382): a hash of its JSON, so a change the saved revs missed still reads as a change. */
@@ -309,18 +349,22 @@ export function contentKey(s: SessionInfo): string {
 }
 
 /** session-revs.json read, or undefined when it is not one this server wrote (then every session counts as changed). */
-function readSavedRevs(v: unknown): { epoch: string; rev: number; past: [string, number][]; sessions: Map<string, [number, string]> } | undefined {
+function readSavedRevs(v: unknown): { epoch: string; rev: number; past: [string, number][]; sessions: Map<string, [number, string]>; reports: Map<string, boolean> } | undefined {
   if (typeof v !== 'object' || v === null) return undefined;
   const o = v as Partial<SavedRevs>;
   if (o.v !== 1 || typeof o.epoch !== 'string' || !/^[a-z0-9]+$/.test(o.epoch) || !Number.isSafeInteger(o.rev) || (o.rev as number) < 0) return undefined;
   if (!Array.isArray(o.past) || typeof o.sessions !== 'object' || o.sessions === null) return undefined;
   const past = o.past.filter((p): p is [string, number] => Array.isArray(p) && typeof p[0] === 'string' && Number.isSafeInteger(p[1]) && p[1] <= (o.rev as number));
   const sessions = new Map<string, [number, string]>();
+  const reports = new Map<string, boolean>();
   for (const [id, e] of Object.entries(o.sessions)) {
     // A rev above the file's own is not one it could have given: such a session counts as changed.
-    if (Array.isArray(e) && Number.isSafeInteger(e[0]) && e[0] >= 0 && e[0] <= (o.rev as number) && typeof e[1] === 'string') sessions.set(id, [e[0], e[1]]);
+    if (Array.isArray(e) && Number.isSafeInteger(e[0]) && e[0] >= 0 && e[0] <= (o.rev as number) && typeof e[1] === 'string') {
+      sessions.set(id, [e[0], e[1]]);
+      if (e[2] === 0 || e[2] === 1) reports.set(id, e[2] === 1);
+    }
   }
-  return { epoch: o.epoch, rev: o.rev as number, past, sessions };
+  return { epoch: o.epoch, rev: o.rev as number, past, sessions, reports };
 }
 
 /**

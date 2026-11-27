@@ -3063,13 +3063,14 @@ export class MachineManager {
         const file = String(msg.file ?? '').slice(0, 80);
         const sandbox = String(msg.sandbox ?? '').slice(0, 80);
         if (!this.testHistory) return;
-        let ack: { ok: boolean; error?: string };
+        // Answered once the run is stored (w6415: the portal records it in its writer thread), or with why not.
+        const refused = (e: unknown) => ({ ok: false, error: String((e as Error)?.message ?? e).slice(0, 200) });
+        const answer = (ack: { ok: boolean; error?: string }) => this.post(id, { type: 'test_history_ack', sandbox, file, ...ack }, false);
         try {
-          ack = this.testHistory(id, sandbox, file, String(msg.record ?? ''));
+          void Promise.resolve(this.testHistory(id, sandbox, file, String(msg.record ?? ''))).then(answer, (e) => answer(refused(e)));
         } catch (e) {
-          ack = { ok: false, error: (e as Error).message.slice(0, 200) };
+          answer(refused(e));
         }
-        this.post(id, { type: 'test_history_ack', sandbox, file, ...ack }, false);
         return;
       }
       case 'test_history_started':
@@ -3306,7 +3307,7 @@ export class MachineManager {
   /** w1996: a daemon's exclusive-bench hours (server/benchHoursStore.ts validates them). */
   benchHours?: (machineId: string, rows: unknown) => void;
   /** w4922: a sandbox's local test run (server/testHistory.ts); answers what to tell the daemon (ok: keep no more). */
-  testHistory?: (machineId: string, sandbox: string, file: string, record: string) => { ok: boolean; error?: string };
+  testHistory?: (machineId: string, sandbox: string, file: string, record: string) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
   testHistoryStarted?: (machineId: string, sandbox: string, file: string) => void;
   timedReport?: (machineId: string, msg: Extract<FromDaemon, { type: 'timed_run_status' | 'timed_run_done' | 'timed_run_result' }>) => void;
 
