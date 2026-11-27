@@ -7,7 +7,9 @@
 //   out.jsonl    everything the session records, in order (its record, transcript events with their seq set here,
 //                images, deltas, signals, tool calls); the daemon forwards each line to the portal and keeps how far
 //                it got in daemon.offset, so a new daemon forwards exactly what the last one had not (with
-//                daemon.offset.stop, which a daemon going away writes when its poll's write may still land: the larger)
+//                daemon.offset.stop, which a daemon going away writes when its poll's write may still land: the larger).
+//                A killed daemon may have forwarded past that save; a new one reads those lines again, which is harmless
+//                but for signals (a turn end acts twice), so daemon.signalled keeps how far the forwarded signals go (w6548)
 //   host.json    the host's protocol, pid and start time; beat: its heartbeat, written every few seconds
 //   state.json   the session's latest record, for a daemon that adopts the host
 //   place.json   (the daemon's) the agent's folder and sandbox, without secrets
@@ -113,6 +115,9 @@ export class LineTail {
     return this.offset - this.partial.length;
   }
 
+  /** Where the line onLine is handling now ends (its newline included), as a byte offset (w6548). */
+  lineEnd = 0;
+
   /** Read what was appended since the last call. */
   poll() {
     let fd: number | undefined;
@@ -123,11 +128,14 @@ export class LineTail {
         const buf = Buffer.alloc(Math.min(size - this.offset, 8 * 1024 * 1024));
         const n = fs.readSync(fd, buf, 0, buf.length, this.offset);
         if (n <= 0) break;
+        let at = this.offset - this.partial.length;
         this.offset += n;
         let data = Buffer.concat([this.partial, buf.subarray(0, n)]);
         for (let i = data.indexOf(10); i >= 0; i = data.indexOf(10)) {
           const line = data.subarray(0, i).toString('utf8').replace(/\r$/, '');
           data = data.subarray(i + 1);
+          at += i + 1;
+          this.lineEnd = at;
           if (line.trim()) this.onLine(line);
         }
         this.partial = Buffer.from(data);
@@ -147,7 +155,7 @@ export const offsetText = (at: number) => String(at).padStart(OFFSET_WIDTH, '0')
 
 export function hostFiles(dir: string) {
   const f = (n: string) => path.join(dir, n);
-  return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), offsetStop: f('daemon.offset.stop'), beat: f('beat'), log: f('host.log'), creds: f('creds.sha'), lockEnv: f('lockenv.sha'), scope: f('scope'), progress: f('daemon.progress') };
+  return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), offsetStop: f('daemon.offset.stop'), signalled: f('daemon.signalled'), beat: f('beat'), log: f('host.log'), creds: f('creds.sha'), lockEnv: f('lockenv.sha'), scope: f('scope'), progress: f('daemon.progress') };
 }
 
 const CREDENTIAL_ENV = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'GH_TOKEN'] as const;
@@ -409,6 +417,15 @@ export class HostedSession implements SessionHandle {
    */
   private offsetWrite?: Promise<void>;
   private offsetGen = 0;
+  /**
+   * How far into out.jsonl the signals forwarded to the portal go (w6548), kept in daemon.signalled at each one. Signals
+   * are the one kind of line that acts twice when read twice (transcript events go by seq, a state replaces the last):
+   * a daemon killed between forwarding a turn end and its poll's offset save (off the loop, w6486) left daemon.offset
+   * short of it, and the next daemon forwarded that turn end again, as a second turn end of a turn that ran once (the
+   * w2625 test's "its next turn" passed on it at once on Linux CI, run 46073307022). A signal the daemon before never
+   * forwarded (the turn ended while no daemon ran, w605) lies past it and goes.
+   */
+  private signalledAt = 0;
   private disposed = false;
   /** The host process's pid as launched (host.json says it too once written). */
   private pid?: number;
@@ -492,6 +509,7 @@ export class HostedSession implements SessionHandle {
     this.creds = readFileOr(f.creds, '').trim() || undefined;
     // The larger: a poll's write that landed after a going daemon's own is older (w6486), and offsets only grow.
     const offset = Math.max(Number(readFileOr(f.offset, '0')) || 0, Number(readFileOr(f.offsetStop, '0')) || 0);
+    this.signalledAt = Number(readFileOr(f.signalled, '0')) || 0;
     this.n = countLines(f.in);
     // Its process runs: taken back even with a late heartbeat (w799); the poll looks at it again.
     const look = hostLook(f.dir);
@@ -667,6 +685,7 @@ export class HostedSession implements SessionHandle {
     fs.writeFileSync(f.offset, offsetText(0));
     this.n = 0;
     this.savedOffset = 0;
+    this.signalledAt = 0;
     this.sends = [this.command(first) as Extract<HostCommand, { op: 'send' }>];
     const start: HostStart = { hostProtocol: HOST_PROTOCOL, info: { ...this.info, pendingPermissions: [] }, seq: this.seq, spec, editorUp: this.deps.editorUp(), ...(this.deps.capsMode ? { capsMode: this.deps.capsMode() } : {}) };
     this.running = true;
@@ -955,9 +974,21 @@ export class HostedSession implements SessionHandle {
       case 'delta':
         this.deps.out({ type: 'delta', sessionId: id, text: m.text });
         return;
-      case 'signal':
+      case 'signal': {
+        const at = this.tail?.lineEnd ?? 0;
+        if (at && at <= this.signalledAt) return;
         this.deps.events.emit(m.name, this, m.arg, ...(m.meta ? [m.meta] : []));
+        if (at) {
+          this.signalledAt = at;
+          // Synchronous, as it is once a turn or so: the next daemon must never read it short of a signal sent.
+          try {
+            fs.writeFileSync(this.files.signalled, offsetText(at));
+          } catch {
+            // its folder is gone (the host is done): no daemon reads it again
+          }
+        }
         return;
+      }
       case 'failed':
         this.deps.out({ type: 'failed', sessionId: id, error: m.error });
         return;

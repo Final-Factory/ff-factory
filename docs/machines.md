@@ -50,7 +50,16 @@ without a pong. Either side judges the other only on a heartbeat that ran on tim
 means its own event loop was blocked, so it pings and judges on the next beat (`linkBeat`, `server/loopWatch.ts`; the
 portal since w1377, the daemon since w4926, after BEAST dropped eight times in 96 minutes on 2026-11-20). The daemon's own
 loop watch writes `event loop: blocked for N s ...: the daemon answered nothing meanwhile` to daemon.log for any block of
-5 s or more, and a 10-minute summary line. If a daemon still has not come back 2 minutes after the portal started or after it
+5 s or more, and a 10-minute summary line. That line comes only once the block is over, so the freeze watch
+(`machine/freezeWatch.ts`, w6555) says it during one: a thread of the daemon's own, with an event loop of its own, reads a
+beat the main loop writes once a second. Once `freezeWatch.afterMin` minutes (daemon.json, default 3) pass with no beat it
+writes `event loop: frozen for N s so far ...: the daemon answers nothing` straight to daemon.log, then
+`event loop: frozen: the daemon's main thread is in <function (file:line)> < ...`, the stack V8 gives at the main thread's
+next JavaScript step (the in-process inspector, no port), and both again every `repeatMin` (default 5) while it lasts. On
+2026-11-27 BEAST's daemon held its loop 891 s in a synchronous realpath (w6546) and its log said nothing for those 15 minutes.
+For now the watch only logs. Ending the process so the supervisor starts a new daemon is the next stage; the supervisor
+restarts on every exit on Windows (`run-daemon.ps1`), on a Mac (KeepAlive) and on Linux (`Restart=always`), and the agent
+hosts and editors run on through a daemon restart. `freezeWatch: false` or `FF_FREEZE_WATCH=off` turns the watch off. If a daemon still has not come back 2 minutes after the portal started or after it
 dropped, and its Mac answers ssh, the portal redeploys it by itself (as `add_machine` does), at most
 every 30 minutes and never while its agents are running. So after a restart, give daemons a minute
 before redeploying by hand.
