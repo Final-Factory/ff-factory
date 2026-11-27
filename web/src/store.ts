@@ -4,7 +4,7 @@ import { api, connectSocket, setUnauthorizedHandler, UnauthorizedError, type WsS
 import { noteServedBuild } from './freshness';
 import { initNotifications, onNotice } from './notify';
 import { noteMachineStats } from './util';
-import { SOCKET_FAILURE_CHECK_MS } from '../../shared/socketPolicy';
+import { SOCKET_FAILURE_CHECK_MS, SOCKET_STATE_REFRESH_MS } from '../../shared/socketPolicy';
 import { mergeSessions, sessionsHave } from '../../shared/pageSessions';
 
 export type AuthState = 'unknown' | 'needed' | 'ok';
@@ -389,6 +389,8 @@ export function openSession(sessionId: string): () => void {
 // ---------- lifecycle ----------
 
 let disconnect: (() => void) | null = null;
+/** When the page last took a whole state (Date.now()): a socket that keeps failing still refreshes it now and then. */
+let stateAt = 0;
 
 function startSocket() {
   if (disconnect) return;
@@ -403,8 +405,12 @@ function startSocket() {
     have: (gapMs) => sessionsHave(state.app ?? undefined, gapMs),
     onFailure: async () => {
       try {
-        // Bounded: a path that hangs (w5318) must not hold the next attempt.
-        gotState(await api.state(SOCKET_FAILURE_CHECK_MS));
+        // Bounded: a path that hangs (w5318) must not hold the next attempt. w6336: a page whose state is fresh only asks
+        // whether its login is still good (/api/me, bytes): the whole state (megabytes) on every failed attempt, now every
+        // 2 s, cost the portal a full build each time it was slowest. A page whose socket keeps failing while the portal
+        // answers (a path that refuses /ws) still takes the whole state, at most every SOCKET_STATE_REFRESH_MS.
+        if (state.app && Date.now() - stateAt < SOCKET_STATE_REFRESH_MS) await api.me(SOCKET_FAILURE_CHECK_MS);
+        else gotState(await api.state(SOCKET_FAILURE_CHECK_MS));
         return true;
       } catch (e) {
         return !(e instanceof UnauthorizedError);
@@ -435,6 +441,7 @@ function gotState(app: AppState) {
     return;
   }
   const first = state.auth !== 'ok';
+  stateAt = Date.now();
   // w5907: a delta (a reconnect) lays the changed sessions on the page's own; either way the older ones views fetched stay.
   const { sessions, missing } = mergeSessions(state.app?.sessions, app, fetchedSessions);
   set({ app: { ...app, sessions, sessionsDelta: undefined }, auth: 'ok' });
