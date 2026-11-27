@@ -193,3 +193,80 @@ test('w5907: the open line says how many sessions the state carried, and when on
   assert.equal(lines[0], 'page socket open: ben from 127.0.0.1 via local, why=closed gap=2s, state 5ms 4KB 7 sessions changed (1 open)');
   assert.equal(lines[1], 'page socket open: ben from 127.0.0.1 via local, why=closed gap=2s, state 5ms 4KB 900 sessions (2 open)');
 });
+
+test('w6382: a page that reconnects after a restart gets only the sessions changed across it, and lands where a fresh load does', async () => {
+  const store = new Map<string, SessionInfo>();
+  let revs = new SessionRevs('runa');
+  const put = (s: SessionInfo) => {
+    store.set(s.id, s);
+    revs.note({ type: 'session', session: s });
+  };
+  const named = new Set<string>();
+  const part = (have?: string) => sessionsPart(pageSessions(store.values(), named, NOW).sessions, revs, revs.since(have));
+  for (let i = 0; i < 40; i++) put(session(`s${i}`, 1000));
+  const first = part();
+  let page = first.sessions;
+  // The run changes two more after the page's state, saves, and changes a third the file never gets (a crash between).
+  put(session('s1', 10, { title: 'changed before the save' }));
+  put(session('late', 10));
+  const file = JSON.parse(JSON.stringify(revs.saved(store)));
+  const pageToken = revs.token;
+  page = mergeSessions(page, part(first.sessionsRev), new Set()).sessions;
+  put(session('s2', 10, { title: 'changed after the save' }));
+  page = mergeSessions(page, part(pageToken), new Set()).sessions;
+  const afterSave = revs.token;
+  // While the server is down, its state.json carries one more change no event told the revs about, and one session went.
+  store.set('s3', session('s3', 10, { title: 'edited outside the events' }));
+  store.delete('s4');
+  // The next run.
+  revs = new SessionRevs('runb', { ready: false });
+  assert.equal(revs.since(pageToken), undefined, 'no token before the load is done');
+  const loaded = await revs.load(file, () => store.values());
+  assert.deepEqual(loaded, { kept: 38, changed: 2 }, 's2 and s3 count as changed by their content key');
+  assert.equal(revs.since(afterSave), undefined, 'a token past the saved rev saw changes the file never got');
+  assert.equal(revs.since('runz.1'), undefined, 'an unknown run');
+  const delta = part(pageToken);
+  assert.ok(delta.sessionsDelta, 'a delta, not the whole list');
+  assert.deepEqual(delta.sessions.map((s) => s.id).sort(), ['s2', 's3']);
+  const merged = mergeSessions(page, delta, new Set());
+  assert.deepEqual(merged.missing, []);
+  const byId = (l: SessionInfo[]) => Object.fromEntries(l.map((s) => [s.id, s]));
+  assert.deepEqual(byId(merged.sessions), byId(part().sessions), 'what a fresh load shows');
+  // A change in the new run, then a third run: the second run's tokens and the first's still work.
+  put(session('s5', 5, { title: 'run b' }));
+  const tokenB = revs.token;
+  const file2 = JSON.parse(JSON.stringify(revs.saved(store)));
+  revs = new SessionRevs('runc', { ready: false });
+  await revs.load(file2, () => store.values());
+  assert.deepEqual(part(tokenB).sessions.map((s) => s.id), []);
+  assert.deepEqual(part(pageToken).sessions.map((s) => s.id).sort(), ['s2', 's3', 's5']);
+});
+
+test('w6382: saved revs that are missing or not ours send every session, and a session changed during the load keeps its new rev', async () => {
+  const store = new Map([['a', session('a', 0)], ['b', session('b', 0)]]);
+  for (const bad of [undefined, null, 'x', { v: 2 }, { v: 1, epoch: 'Bad!', rev: 1, past: [], sessions: {} }]) {
+    const r = new SessionRevs('n', { ready: false });
+    assert.deepEqual(await r.load(bad, () => store.values()), { kept: 0, changed: 0 });
+    assert.equal(r.isReady, true);
+    assert.equal(r.since('old.1'), undefined);
+  }
+  const old = new SessionRevs('old');
+  old.note({ type: 'session', session: { id: 'a' } });
+  old.note({ type: 'session', session: { id: 'b' } });
+  const file = old.saved(store);
+  const r = new SessionRevs('new', { ready: false });
+  let sliced = 0;
+  const loading = r.load(file, function* () {
+    yield store.get('a')!;
+    // b changes while the load still runs: the change stands.
+    r.note({ type: 'session', session: { id: 'b' } });
+    sliced++;
+    yield store.get('b')!;
+  });
+  await loading;
+  assert.equal(sliced, 1);
+  assert.equal(r.changedSince('a', 2), false);
+  assert.equal(r.changedSince('b', 2), true);
+  assert.equal(r.since('old.2'), 2);
+  assert.equal(r.since('old.3'), undefined);
+});

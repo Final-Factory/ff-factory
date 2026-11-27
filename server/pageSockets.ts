@@ -31,7 +31,7 @@ interface Open {
 
 /** Building the first state, in parts: appState, JSON.stringify, and the whole. */
 /** `kept`: the whole parts the page kept its own of; `work`: requests sent of all (w6336, shared/pageParts.ts). */
-export interface FirstState { ms: number; bytes: number; sessions?: number; delta?: boolean; buildMs?: number; jsonMs?: number; kept?: string[]; work?: { sent: number; of: number } }
+export interface FirstState { ms: number; bytes: number; sessions?: number; delta?: boolean; buildMs?: number; jsonMs?: number; kept?: string[]; work?: { sent: number; of: number }; phases?: readonly (readonly [string, number])[] }
 
 /**
  * What a page says once its first state is on screen (w6336, web/src/api.ts): each phase of its connect in ms, as the
@@ -40,6 +40,16 @@ export interface FirstState { ms: number; bytes: number; sessions?: number; delt
 export interface PageReady { open: number; state: number; parse: number; render: number; load?: number }
 
 /** ", kept reports,machines, 3 of 100 requests changed": what a reconnect did not resend. */
+/**
+ * w6382: where a state's build went, its slowest phases first (server/index.ts appStateIn): " [sessions 310, work 120]".
+ * A phase under PHASE_LOG_MIN_MS is left out, so a fast build's line stays short.
+ */
+export const PHASE_LOG_MIN_MS = 5;
+function phasesOf(s: FirstState): string {
+  const shown = [...(s.phases ?? [])].filter(([, ms]) => ms >= PHASE_LOG_MIN_MS).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  return shown.length ? ` [${shown.map(([k, ms]) => `${k} ${Math.round(ms)}`).join(', ')}]` : '';
+}
+
 function keptOf(s: FirstState): string {
   const parts = s.kept?.length ? `, kept ${s.kept.join(',')}` : '';
   return `${parts}${s.work ? `, ${s.work.sent} of ${s.work.of} requests changed` : ''}`;
@@ -124,7 +134,7 @@ export class PageSockets<S extends object> {
     this.open.set(ws, { user, addr, via, at: this.now(), state });
     const why = reconnectOf(req.url);
     if (/^why=stale\b/.test(why)) this.countDrop(user);
-    this.log(`page socket open: ${user} from ${addr} via ${via}, ${why}${state ? `, state ${Math.round(state.ms)}ms${state.buildMs !== undefined && state.jsonMs !== undefined ? ` (build ${Math.round(state.buildMs)}ms json ${Math.round(state.jsonMs)}ms)` : ''} ${Math.round(state.bytes / 1024)}KB${state.sessions !== undefined ? ` ${state.sessions} sessions${state.delta ? ' changed' : ''}` : ''}${keptOf(state)}` : ''} (${this.open.size} open)`);
+    this.log(`page socket open: ${user} from ${addr} via ${via}, ${why}${state ? `, state ${Math.round(state.ms)}ms${state.buildMs !== undefined && state.jsonMs !== undefined ? ` (build ${Math.round(state.buildMs)}ms${phasesOf(state)} json ${Math.round(state.jsonMs)}ms)` : ''} ${Math.round(state.bytes / 1024)}KB${state.sessions !== undefined ? ` ${state.sessions} sessions${state.delta ? ' changed' : ''}` : ''}${keptOf(state)}` : ''} (${this.open.size} open)`);
   }
 
   /**
