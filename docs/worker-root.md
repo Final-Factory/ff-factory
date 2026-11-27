@@ -1410,7 +1410,7 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
   paths and `FF_PLAYER_BROKER` until its next host start (a stop, the idle reap after an hour, a code update's restart);
   agents started after the switch get the new mode at once. Seen on LothDesktop (w6213, 2026-11-27): after off -> warn at
   03:49:16Z, 12 hosts were adopted, and worker 95c5d71d (slot2) still had `FF_PLAYER_BROKER` unset and `UV_CACHE_DIR` /
-  `npm_config_cache` on the shared `V:fw\cache` at 03:53Z. `machine_update shared_lock` says so in its reply.
+  `npm_config_cache` on the shared `V:\ffw\cache` at 03:53Z. `machine_update shared_lock` says so in its reply.
   Each host records a hash of the variables the switch decides (`lockenv.sha` in its host folder, machine/agentHost.ts
   `lockEnvOf`; Daemon `lockEnvFor`: the slot clones, the audit folder and `FF_PLAYER_BROKER`, none when off). When an
   adopted agent is idle and its hash differs from what the daemon gives now, daemon.json `hostRestage` decides:
