@@ -107,7 +107,8 @@ import { movedRequestsOf, type SessionOwner } from '../server/resumable.ts';
 import { LeftoverReaper, answerProcsAsk, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
 import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBroker.ts';
 import { installPrShim } from './prFlow.ts';
-import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim, readFfuSlotsReport } from './ffuSlots.ts';
+import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim, readFfuSlotsReport, runFfuSlotSweep } from './ffuSlots.ts';
+import { FfuSlotAutoSweep } from './ffuSlotAutoSweep.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
 import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, sayOwnerLabels, ownerLabelTargets, ghLoginStorage, machineGhStatusEnv, ghLoginToFile, ghLoginToKeyring, realGhRun, OWNER_GH_MOVED_NOTE, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { installPythonShim, trustedGh } from './evidenceGate.ts';
@@ -835,6 +836,12 @@ export class Daemon {
   private ffuReport?: FfuSlotsReport;
   private ffuReportAt = 0;
   private ffuReporting = false;
+  /** w6484: frees the stale slots each report names (warn-only unless staleOutput.ffuSlotSweep is on). */
+  private readonly ffuAutoSweep = new FfuSlotAutoSweep({
+    mode: () => staleOutputSettings(this.cleanupSettings.staleOutput).ffuSlotSweep,
+    sweep: () => runFfuSlotSweep({ root: this.cfg.root!, factsFile: cleanupFactsFile(appDirOfConfig(this.cfg)), max: FFU_SLOTS_DEFAULT_MAX }),
+    log,
+  });
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
   readonly cleaner: CleanupRunner;
   private ffuRetry?: FfuBusyRetry;
@@ -2938,7 +2945,11 @@ export class Daemon {
     this.ffuReporting = true;
     this.ffuReportAt = Date.now();
     void readFfuSlotsReport({ root: this.cfg.root, factsFile: cleanupFactsFile(appDirOfConfig(this.cfg)), max: FFU_SLOTS_DEFAULT_MAX, sizes: this.ffuSizes, log })
-      .then((r) => void (this.ffuReport = r))
+      .then(async (r) => {
+        this.ffuReport = r;
+        // w6484: a stale slot is freed here (or, warn-only, said), not only by the next worker's take; then read again.
+        if ((await this.ffuAutoSweep.onReport(r)).length && staleOutputSettings(this.cleanupSettings.staleOutput).ffuSlotSweep === 'on') this.ffuReportAt = 0;
+      })
       .finally(() => void (this.ffuReporting = false));
   }
 
