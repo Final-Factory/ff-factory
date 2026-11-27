@@ -17,8 +17,12 @@ import { Worker } from 'node:worker_threads';
  * realpath calls) is named within milliseconds; the main thread is resumed at once after its stack is read. While the freeze
  * lasts it says so again every `repeatMs`, each time with the stack again.
  *
- * Stage 1 (this) only logs (lothsahn's lockout rule: a daemon change ships warn-only first). Ending the process, so the
- * supervisor starts a fresh daemon, is stage 2.
+ * Stage 1 only logged (lothsahn's lockout rule: a daemon change ships warn-only first). Stage 2 (`exitMs`): once the freeze
+ * reaches `exitMs` the thread says so, reads the stack once more, and ends the whole process with SIGKILL (TerminateProcess on
+ * Windows): the frozen main thread cannot run an exit of its own. Every supervisor then starts a fresh daemon: run-daemon.ps1
+ * restarts on any exit but 75 (server/machineDeployWin.ts), the LaunchAgent has KeepAlive true (server/machineDeploy.ts) and
+ * the systemd unit Restart=always (server/machineDeployLinux.ts). Agent hosts run detached, in their own process group, so they
+ * live on and the fresh daemon finds them, as after any daemon update. If the loop comes free before the kill, it is called off.
  */
 
 export interface FreezeWatchSettings {
@@ -26,16 +30,21 @@ export interface FreezeWatchSettings {
   afterMin: number;
   /** Minutes between the lines of one freeze that goes on. */
   repeatMin: number;
+  /** Minutes of one freeze before the process is ended so its supervisor starts a fresh daemon; false: only log. */
+  exitMin: number | false;
 }
 
-export const FREEZE_DEFAULTS: FreezeWatchSettings = { afterMin: 3, repeatMin: 5 };
+export const FREEZE_DEFAULTS: FreezeWatchSettings = { afterMin: 3, repeatMin: 5, exitMin: 3 };
 
-/** daemon.json `freezeWatch`: `false` turns it off; else afterMin (1-60) and repeatMin (1-120), the defaults for anything else. */
+/**
+ * daemon.json `freezeWatch`: `false` turns it off; else afterMin (1-60), repeatMin (1-120) and exitMin (1-120, or false to
+ * only log), the defaults for anything else.
+ */
 export function freezeWatchSettings(raw: unknown): FreezeWatchSettings | undefined {
   if (raw === false) return undefined;
   const r = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
-  const n = (k: keyof FreezeWatchSettings, min: number, max: number) => (typeof r[k] === 'number' && Number.isFinite(r[k]) && (r[k] as number) >= min && (r[k] as number) <= max ? (r[k] as number) : FREEZE_DEFAULTS[k]);
-  return { afterMin: n('afterMin', 1, 60), repeatMin: n('repeatMin', 1, 120) };
+  const n = (k: 'afterMin' | 'repeatMin' | 'exitMin', min: number, max: number) => (typeof r[k] === 'number' && Number.isFinite(r[k]) && (r[k] as number) >= min && (r[k] as number) <= max ? (r[k] as number) : (FREEZE_DEFAULTS[k] as number));
+  return { afterMin: n('afterMin', 1, 60), repeatMin: n('repeatMin', 1, 120), exitMin: r.exitMin === false ? false : n('exitMin', 1, 120) };
 }
 
 // Plain JavaScript, run as an eval worker (CommonJS), as server/hostProbe.ts does.
@@ -43,7 +52,7 @@ const WORKER_SOURCE = `
 const { workerData } = require('node:worker_threads');
 const fs = require('node:fs');
 const beat = new BigInt64Array(workerData.sab);
-const { afterMs, repeatMs, everyMs, fd, who } = workerData;
+const { afterMs, repeatMs, exitMs, everyMs, fd, who } = workerData;
 const out = (line) => {
   try { fs.writeSync(fd, new Date().toISOString() + ' ' + line + '\\n'); } catch {}
 };
@@ -57,6 +66,15 @@ const where = (f) => {
 };
 let warnedAt = 0;
 let session;
+let ending; // the kill's timer, once the freeze reached exitMs
+// The last look before the kill: a loop that came free meanwhile is left running.
+const end = () => {
+  ending = undefined;
+  const gap = Date.now() - Number(Atomics.load(beat, 0));
+  if (gap < afterMs) { out('event loop: came free before it was ended (' + Math.round(gap / 1000) + ' s since its beat): ' + who + ' goes on (w6555)'); return; }
+  out('event loop: ending ' + who + ' now (SIGKILL); its supervisor starts a fresh one (w6555)');
+  try { process.kill(process.pid, 'SIGKILL'); } catch (e) { out('event loop: could not end ' + who + ': ' + ((e && e.message) || e)); }
+};
 const drop = (s) => {
   try { s.disconnect(); } catch {}
   if (session === s) session = undefined;
@@ -87,6 +105,8 @@ function askStack() {
     } catch (e) {
       out('event loop: frozen: could not read the main thread\\'s stack: ' + ((e && e.message) || e));
     }
+    // The stack is in the log: end now, after the resume has gone out (a short wait), not at the fallback's time.
+    if (ending) { clearTimeout(ending); ending = setTimeout(end, 200); }
   });
   s.post('Debugger.enable', (e) => {
     if (e) { out('event loop: frozen: could not read the main thread\\'s stack: ' + e.message); drop(s); return; }
@@ -100,9 +120,19 @@ setInterval(() => {
   const last = Number(Atomics.load(beat, 0));
   const gap = now - last;
   if (gap < afterMs) { warnedAt = 0; return; }
+  if (ending) return;
+  const since = ' (its last beat ' + new Date(last).toISOString() + '): ' + who + ' answers nothing';
+  if (exitMs && gap >= exitMs) {
+    out('event loop: frozen for ' + Math.round(gap / 1000) + ' s' + since + '; ending it so its supervisor starts a fresh one (w6555)');
+    // At most 5 s for the stack line: a pause that cannot land (one long native call) does not hold the kill.
+    ending = setTimeout(end, 5000);
+    if (session) return; // a stack read is already under way; its line ends it
+    askStack();
+    return;
+  }
   if (warnedAt && now - warnedAt < repeatMs) return;
   warnedAt = now;
-  out('event loop: frozen for ' + Math.round(gap / 1000) + ' s so far (its last beat ' + new Date(last).toISOString() + '): ' + who + ' answers nothing; the freeze watch only logs (w6555)');
+  out('event loop: frozen for ' + Math.round(gap / 1000) + ' s so far' + since + (exitMs ? '; it is ended at ' + Math.round(exitMs / 1000) + ' s (w6555)' : '; the freeze watch only logs (w6555)'));
   askStack();
 }, everyMs);
 `;
@@ -112,10 +142,11 @@ export interface FreezeWatch {
 }
 
 /**
- * Starts the freeze watch's thread and the main loop's beat. `fd`: where its lines go (default 1, the daemon's stdout);
+ * Starts the freeze watch's thread and the main loop's beat. `exitMs`: end the process after a freeze this long (0 or absent:
+ * only log). `fd`: where its lines go (default 1, the daemon's stdout);
  * `beatMs`/`everyMs`: how often the main loop beats and the thread looks (1 s; a test's shorter).
  */
-export function startFreezeWatch(o: { afterMs: number; repeatMs: number; fd?: number; beatMs?: number; everyMs?: number; who?: string; onError?: (e: Error) => void }): FreezeWatch {
+export function startFreezeWatch(o: { afterMs: number; repeatMs: number; exitMs?: number; fd?: number; beatMs?: number; everyMs?: number; who?: string; onError?: (e: Error) => void }): FreezeWatch {
   const sab = new SharedArrayBuffer(8);
   const beat = new BigInt64Array(sab);
   const tick = () => void Atomics.store(beat, 0, BigInt(Date.now()));
@@ -124,7 +155,7 @@ export function startFreezeWatch(o: { afterMs: number; repeatMs: number; fd?: nu
   timer.unref();
   const w = new Worker(WORKER_SOURCE, {
     eval: true,
-    workerData: { sab, afterMs: o.afterMs, repeatMs: o.repeatMs, everyMs: o.everyMs ?? 1000, fd: o.fd ?? 1, who: o.who ?? 'the daemon' },
+    workerData: { sab, afterMs: o.afterMs, repeatMs: o.repeatMs, exitMs: o.exitMs ?? 0, everyMs: o.everyMs ?? 1000, fd: o.fd ?? 1, who: o.who ?? 'the daemon' },
     // Its own small heap: a thread that only reads a clock and writes a line.
     resourceLimits: { maxOldGenerationSizeMb: 16, maxYoungGenerationSizeMb: 4 },
   });
