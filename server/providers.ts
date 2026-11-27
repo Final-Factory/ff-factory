@@ -1156,13 +1156,22 @@ export class ProviderManager {
       case 'dev_received':
         return this.hook(() => this.dev?.onReceived(msg));
       case 'board_check': {
-        const a = this.onBoardCheck?.(msg);
-        if (!a) {
-          this.boardRefusals.push(this.now());
-          return this.send(link, { type: 'error', code: 'not_enabled', message: 'the ledger check is off in FF Factory (intake.ffbox.boardCheck)', ref: msg.ref });
-        }
-        this.boardRefusals = [];
-        return this.send(link, { type: 'board', ref: msg.ref, ...a });
+        const answer = () => {
+          // w6381: a link that closed while the check waited for its warm-up gets nothing; FFBox asks again on its next link.
+          if (this.link !== link || link.closedBy) return;
+          const a = this.onBoardCheck?.(msg);
+          if (!a) {
+            this.boardRefusals.push(this.now());
+            return this.send(link, { type: 'error', code: 'not_enabled', message: 'the ledger check is off in FF Factory (intake.ffbox.boardCheck)', ref: msg.ref });
+          }
+          this.boardRefusals = [];
+          return this.send(link, { type: 'board', ref: msg.ref, ...a });
+        };
+        // w6381: answered once the board check's concepts are made (Orchestrators.boardWarmed), not by making them all now.
+        const ready = this.boardReady?.();
+        if (!ready) return answer();
+        void ready.then(answer, answer).catch((e) => console.warn(`provider ${this.id}: a board_check failed:`, (e as Error).message));
+        return;
       }
     }
   }
@@ -1183,6 +1192,8 @@ export class ProviderManager {
   /** FFBox filed a request; the ledger item it became, or undefined while intake.ffbox is off. */
   onRequest?: (m: ProviderRequestMessage) => { workId?: string; status: string; repeat?: boolean; why?: string } | undefined;
   /** FFBox asks the ledger; undefined while intake.ffbox.boardCheck is off. */
+  /** w6381: settles once a board_check can be answered without making every request's concepts in one go (set by server/index.ts). */
+  boardReady?: () => Promise<unknown>;
   onBoardCheck?: (m: BoardCheckMessage) => Omit<Extract<ToConnector, { type: 'board' }>, 'type' | 'ref'> | undefined;
   /** FFBox accepted or refused a submit. */
   onWorkReply?: (m: WorkReply) => void;

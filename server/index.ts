@@ -1107,7 +1107,7 @@ const blockerWatch = new BlockerWatch({
   compile: (repo, sha, person) => ghCompileVerdict(repo, sha, ghRunner(person, `the compile of ${sha.slice(0, 10)}`)),
 });
 // w6381: the board check's concepts made in slices soon after a start, before FFBox's first board_check needs them all at once.
-setTimeout(() => void agents.orchestrators.warmBoardTexts(intake.settings.lookbackDays).catch((e) => console.warn(`board check warm-up failed: ${(e as Error).message}`)), 5_000).unref();
+setTimeout(() => void agents.orchestrators.boardWarmed(intake.settings.lookbackDays), 5_000).unref();
 agents.blockerWatch = blockerWatch;
 // A usage gate keeps the pool's own name for its ref and the hold's end (w1126: "vault-lothsahn-1" never matched and never cleared).
 agents.usageRef = (ref) => usageRefOf(ref);
@@ -1142,6 +1142,8 @@ max.onEvent = (ev) => intake.onMaxEvent(ev);
 providers.onConversation = (c) => intake.onConversation(c);
 providers.onRequest = (m) => intake.onRequest(m);
 providers.onBoardCheck = (m) => intake.onBoardCheck(m);
+// w6381: a board_check waits for the warm-up above (started now if it has not yet) rather than making it all in one go.
+providers.boardReady = () => agents.orchestrators.boardWarmed(intake.settings.lookbackDays);
 providers.onWorkReply = (m) => intake.onWorkReply(m);
 providers.onResult = (m) => intake.onResult(m);
 // FFBox operators' ffdev turns handed over (docs/ffbox.md, "Dev requests"): filed as the operator's mapped person's own.
