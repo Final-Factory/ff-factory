@@ -1611,6 +1611,13 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
   that fails or takes over 90 s counts every sandbox busy (review w6281), and a tick whose sandbox list takes over 120 s
   gives up until the next one, so a hung read never stops later refreshes. A first clone is made idle or not (its folder is
   renamed in and named only in the next run's environment).
+- **Light agent folders get their clones too** (w6393): `agent1`, `agent2`, ... are in the tick's list beside the game
+  sandboxes, and a light folder's create makes its clones before it answers (`SlotCaches.ensure`, `lightClones` in
+  machine/daemon.ts), waiting up to 45 s, below the portal's 60 s for the create. Its worker starts as soon as the create
+  answers, and under "on" its env names the slot folder from that first run, so a clone left to a later tick found the
+  worker's own cold cache there and kept it: on LothDesktop `agent5` ran with a 19 MB uv cache built from scratch beside the
+  1005 MB seed (w6393, measured). A cache folder already there when the create comes (a deleted folder's id made again) is
+  merged back and replaced, as an idle refresh does. A clone that takes longer than the wait goes on in the background.
 - **Left shared and writable**: `cache/uv-tools`, `cache/uv-bin`, `cache/xdg` and `cache/cargo` (cargo is the next stage).
 - **Way back**: `shared_lock off` and the daemon restart the update makes (the link job and installer run outside every fence,
   4.3). The clones stay on disk, unused; the env goes back to the shared caches at each agent's next host start (see "After a
