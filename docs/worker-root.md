@@ -1381,6 +1381,14 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
   no reflink), the Windows copy engine on a Dev Drive (block clone on ReFS). A clone is made only while its sandbox is idle
   (no live agent, no editor), one sandbox per 10-minute tick, under `.ff-new-<tool>` and renamed into place; the marker
   `.ff-slot-cache.json` is written last. A clone older than a day is merged back into the seed and made again.
+- **A clone counts cache by cache** (w6284): the marker lists the caches whose clone was made, and a sandbox whose marker
+  lacks one, or whose folder for one is gone, is completed at a later tick (`missingSlotCaches`): the caches it lacks are
+  cloned, the ones there kept, and the line says which (`completed ... made uv, npm; already there: ...`). A clone with a
+  failed cache, or whose clone threw before any cache (a junction at its folder), is tried again after an hour, or at once
+  when the Windows daemon makes its Low node copies (`retryNow`, kept for one more pass when a tick is running): on
+  LothDesktop the start's first tick ran before them and slot1's uv, npm, upm and dotnet copies failed with "no Low node
+  copy". The `With "on" it would stay off` list names each sandbox's missing caches too (`sandbox slot1 lacks 4 of its 7
+  cache clones (...)`), so "on" holds off until every cache of every sandbox is cloned.
 - **Every copy runs with a worker's rights, never the daemon's** (machine/workerCopy.ts, review w6212 B1): a worker can
   plant a link or junction in its build or its cache clone, and `cp -R`, `cp -a` and Copy-Item would follow or keep it with
   the daemon's reads (Copy-Item follows a junction: measured on BEAST by the reviewer). So the copy runs inside the workers'
@@ -1414,8 +1422,12 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
   worker's), writes `slot.json` as `player_slots.py` does, and starts the player itself: in the player write fence on Linux and
   macOS (machine/playerFence.ts), through the Low node copy on Windows (never at the daemon's Medium), with no credential in
   its environment. The slot comes from the caller's token, never the body. The source must be in the caller's sandbox, its
-  own temp folder (`<tempDir>/ffa-<session>`, not all of `<root>/tmp`: w6212 M1) or `<root>/nightly`, and so must a
-  `-logFile` folder the player may write. A launch onto a slot whose player still runs is refused (w6212 L1).
+  own temp folder (`<tempDir>/ffa-<session>`, not all of `<root>/tmp`: w6212 M1), `<root>/nightly` or the `player/`
+  folder of a ready player-cache entry (`<player cache>/<sha>-<os>[-burstN]/player`, build-manifest.json status ok; w6286),
+  and a `-logFile` folder the player may write must be in that own temp folder. The player cache is worker-written (build_player.sh
+  runs in workers), as nightly is, so it is no more trusted than them: the copy runs with the worker's rights and refuses
+  links (machine/workerCopy.ts), into the caller's own slot only, so a file planted there reaches only a worker that chose
+  that entry, as running it from the cache would. A launch onto a slot whose player still runs is refused (w6212 L1).
 - **What `warn` watches**: the seeds, `players`, `seed` and `tools` (`sharedLockedFolders`), each folder and its first level
   (not recursive), one daemon log line per entry an hour: `shared lock (warn): <path> changed and the daemon did not write it`.
 - **What `on` adds** (the enforce PR, separate): those folders become read-only to sandbox workers, a Medium No-Write-Up label

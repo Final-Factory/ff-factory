@@ -128,6 +128,7 @@ type Kit = {
   handBack: (w: WorkItem, sid?: string) => void;
   place: (w: WorkItem, sid: string, msAgo?: number) => void;
   oldHandBack: (w: WorkItem) => void;
+  merge: (into: WorkItem, ids: string[], links: Record<string, number>) => void;
 };
 type Row = {
   name: string;
@@ -169,6 +170,14 @@ function kit(env: Env): Kit {
       delete (w as { queuedFor?: unknown }).queuedFor;
       put(w);
     },
+    // Another request (w5871, no question of its own) with these workers, merged into this one through decide_work merge.
+    merge: (into, ids, links) => {
+      const w = env.request(ids, 'w5871');
+      w.links = Object.fromEntries(Object.entries(links).map(([s, ago]) => [s, { at: T(ago), how: 'sent' as const }]));
+      w.status = 'blocked'; // merge takes a request that is new, question, queued or blocked: a worker waiting on CI, say
+      put(w);
+      env.agents.orchestrators.decide({ id: 'w5871', action: 'merge', into: into.id, note: 'it repeats w5869 (test)' });
+    },
     // Handed back by Z two hours ago, then placed again (its handedBack record stays).
     oldHandBack: (w) => {
       w.sessionIds = [Z, ...w.sessionIds];
@@ -196,6 +205,14 @@ const ROWS: Row[] = [
   { name: 'asker handed it back, then a worker placed after (w6253 R3)', build: (k) => { const w = k.req([A], 'w5869', { [A]: H }); k.handBack(w); k.place(w, N); return w; }, resumed: [N], never: [A], noHandOff: ['w5869'] },
   { name: 'an old hand-off, then a co-worker and the asker placed, the asker moved (w6253 R2)', build: (k) => { const w = k.req([], 'w5869'); k.oldHandBack(w); k.place(w, E, H); k.place(w, A, H / 2); k.moveOff(w); return w; }, resumed: [E], never: [A, Z], noHandOff: ['w5869'] },
   { name: 'an old hand-off, the asker placed then moved, nobody on it', build: (k) => { const w = k.req([], 'w5869'); k.oldHandBack(w); k.place(w, A, H); k.moveOff(w); return w; }, resumed: [], never: [A, Z], noHandOff: ['w5869'], said: /nobody is on it/ },
+  { name: 'asker handed it back, then a request with a working worker merged in (w6271)', build: (k) => { const w = k.req([A], 'w5869', { [A]: H }); k.handBack(w); k.merge(w, [N], { [N]: 2 * H }); return w; }, resumed: [N], never: [A], noHandOff: ['w5869'] },
+  // w6277 review probes: the merged links keep their order, one with no link stays last, a gone worker leaves the hand-off live.
+  { name: 'merged in after a hand-back, its worker sent again after its co-worker keeps the lead (w6277 F1)', build: (k) => { const w = k.req([A], 'w5869', { [A]: H }); k.handBack(w); k.merge(w, [N, M], { [N]: 2 * H, [M]: 3 * H }); return w; }, resumed: [N], never: [A, M], noHandOff: ['w5869'] },
+  { name: 'merged in after a hand-back, the later-listed of two workers is older and stays behind (w6277 F1)', build: (k) => { const w = k.req([A], 'w5869', { [A]: H }); k.handBack(w); k.merge(w, [M, N], { [N]: 2 * H, [M]: 3 * H }); return w; }, resumed: [N], never: [A, M], noHandOff: ['w5869'] },
+  { name: 'merged in after a hand-back, a worker with no link stays behind the linked one (w6277 F2)', build: (k) => { const w = k.req([A], 'w5869', { [A]: H }); k.handBack(w); k.merge(w, [N, M], { [N]: 2 * H }); return w; }, resumed: [N], never: [A, M], noHandOff: ['w5869'] },
+  { name: 'merged in after a hand-back, a worker that no longer exists leaves the hand-off to carry it (w6277 F3)', build: (k) => { const w = k.req([A], 'w5869', { [A]: H }); k.handBack(w); k.merge(w, ['deadbeef'], { deadbeef: 2 * H }); return w; }, resumed: [], never: [A], handOff: ['w5869'] },
+  { name: 'a worker placed after the hand-back stays newest over one merged in later (w6277)', build: (k) => { const w = k.req([A], 'w5869', { [A]: H }); k.handBack(w); k.place(w, N); k.merge(w, [M], { [M]: 2 * H }); return w; }, resumed: [N], never: [A, M], noHandOff: ['w5869'] },
+  { name: 'a worker moved off it before the hand-back comes back with a merged request and must not take the answer (w6288 F4, w2079)', build: (k) => { const w = k.req([E, A], 'w5869', { [E]: 2 * H, [A]: H }); k.moveOff(w, E); k.handBack(w); k.merge(w, [E], { [E]: 3 * H }); return w; }, resumed: [], never: [A, E], handOff: ['w5869'] },
   // w1812 twins: the same question from the asker on w5869 and w5871.
   { name: 'twins: answered on the kept one, the other moved to a new worker', build: (k) => { const w = k.req([A], 'w5869', { [A]: 2 * H }); k.moveOff(w); k.place(w, N); return k.req([A], 'w5871', { [A]: H }); }, resumed: [A, N], never: [] },
   { name: 'twins: answered on the kept one, the other handed back', build: (k) => { const w = k.req([A], 'w5869', { [A]: H }); k.handBack(w); return k.req([A], 'w5871', { [A]: H }); }, resumed: [A], never: [], handOff: ['w5869'] },
