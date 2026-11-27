@@ -27,10 +27,11 @@ const VIAS: readonly LinuxLockVia[] = ['gnome', 'loginctl', 'none'];
 /**
  * Whether placement acts on a Linux reading (w6311). w6282, a windowed pair run, went on biscuit/slot3 behind a locked GNOME
  * desktop (GetActive answered (true,), its session idle 4 days) and drew no frames, because a Linux daemon reported no
- * session and that locked nothing out. lothsahn's lockout rule: warn first (linuxLockWarn logs "would not place"), enforce
- * in its own PR.
+ * session and that locked nothing out. lothsahn's lockout rule: warn first (#1432: linuxLockWarn logged "would not place",
+ * and biscuit's live daemon read "screen locked (gnome, warn-only)", portal log 2026-11-26 22:47 -07:00), then enforce in its
+ * own PR (this one). To go back to warn-only, set it false: nothing at the machine is needed either way.
  */
-export const LINUX_LOCK_ENFORCED = false;
+export const LINUX_LOCK_ENFORCED = true;
 
 /** The reading placement acts on: a Linux one only once LINUX_LOCK_ENFORCED, its "can't tell" then counting as locked. */
 function heeded(d: DesktopSession | undefined): DesktopSession | undefined {
