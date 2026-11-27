@@ -34,6 +34,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { MEDIUM_CACHE_CHILD } from '../server/claudeHome.ts';
 import type { RunResult } from '../server/proc.ts';
+import { redactLogText } from '../server/logRedact.ts';
 
 export type GitPackagesMode = 'off' | 'warn' | 'on';
 
@@ -221,7 +222,15 @@ export function missingNote(missing: GitDep[], mode: GitPackagesMode, lowFenced:
 
 export type MirrorGit = (args: string[], opts?: { timeoutMs?: number }) => Promise<RunResult>;
 
-const firstLine = (r: RunResult) => (r.stderr || r.stdout).trim().split('\n').slice(-1)[0]?.slice(0, 200) ?? '';
+/** A URL's user and password (a credential helper never puts one there, but a remote someone set by hand might). */
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi;
+
+/** git's last line, for a note or the log: any URL credential and token shape masked, at most 200 characters. */
+export const firstLine = (r: RunResult) => redactLogText(((r.stderr || r.stdout).trim().split('\n').slice(-1)[0] ?? '').replace(URL_USERINFO, '$1[redacted]@')).slice(0, 200);
+
+/** A fetch that moves under 1 KB/s for a minute gives up, so a stalled server does not hold a start for the whole timeout. */
+const SLOW = ['-c', 'http.lowSpeedLimit=1000', '-c', 'http.lowSpeedTime=60'];
+const FETCH_SPECS = ['+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*'];
 
 /**
  * Fetch `dep`'s repository into its mirror with the daemon's own git (and so its credential: nothing is passed in or
@@ -236,29 +245,40 @@ export async function ensureMirror(root: string, dep: GitDep, git: MirrorGit, f:
     const init = await git(['init', '--quiet', '--bare', dir]);
     if (init.code !== 0) return { why: `git init of ${dir} failed: ${firstLine(init)}` };
   }
-  // The origin and refspecs are set every time, so a mirror's config is always this one.
-  for (const args of [
-    ['config', 'remote.origin.url', dep.url],
-    ['config', '--replace-all', 'remote.origin.fetch', '+refs/heads/*:refs/heads/*'],
-    ['config', '--add', 'remote.origin.fetch', '+refs/tags/*:refs/tags/*'],
-  ]) {
+  // The origin and refspecs are written only when they differ (a new mirror, or one someone changed), so a start that
+  // finds its commit there writes no config.
+  const url = await git([...gd, 'config', '--get', 'remote.origin.url']);
+  const specs = await git([...gd, 'config', '--get-all', 'remote.origin.fetch']);
+  const specsNow = specs.code === 0 ? specs.stdout.split('\n').map((l) => l.trim()).filter(Boolean) : [];
+  const writes: string[][] = [];
+  if (url.code !== 0 || url.stdout.trim() !== dep.url) writes.push(['config', 'remote.origin.url', dep.url]);
+  if (specsNow.join('\n') !== FETCH_SPECS.join('\n')) writes.push(['config', '--replace-all', 'remote.origin.fetch', FETCH_SPECS[0]], ['config', '--add', 'remote.origin.fetch', FETCH_SPECS[1]]);
+  for (const args of writes) {
     const r = await git([...gd, ...args]);
     if (r.code !== 0) return { why: `git config in ${dir} failed: ${firstLine(r)}` };
   }
   const want = dep.lockHash;
   const have = async (sha: string) => (await git([...gd, 'cat-file', '-e', `${sha}^{commit}`])).code === 0;
-  if (want && (await have(want))) return { dir };
-  const fetched = await git([...gd, 'fetch', '--quiet', '--prune', 'origin'], { timeoutMs: 10 * 60_000 });
+  const pin = async (sha: string) => {
+    // A ref of ours holds it, so a later --prune (a branch that held it deleted) and gc keep it.
+    const ref = `refs/ff-pin/${sha}`;
+    if ((await git([...gd, 'rev-parse', '--verify', '--quiet', ref])).code !== 0) await git([...gd, 'update-ref', ref, sha]);
+  };
+  if (want && (await have(want))) {
+    await pin(want);
+    return { dir };
+  }
+  const fetched = await git([...gd, ...SLOW, 'fetch', '--quiet', '--prune', 'origin'], { timeoutMs: 10 * 60_000 });
   if (fetched.code !== 0) return { why: `git fetch of ${dep.url} failed: ${firstLine(fetched)}` };
   const head = await git([...gd, 'ls-remote', '--symref', 'origin', 'HEAD'], { timeoutMs: 60_000 });
   const sym = /^ref: (refs\/heads\/\S+)\s+HEAD/m.exec(head.stdout);
   if (sym) await git([...gd, 'symbolic-ref', 'HEAD', sym[1]]);
   if (want && !(await have(want))) {
     // A commit no branch or tag holds: fetched by its id and kept by a ref of ours, so a later --prune keeps it.
-    const one = await git([...gd, 'fetch', '--quiet', 'origin', want], { timeoutMs: 10 * 60_000 });
+    const one = await git([...gd, ...SLOW, 'fetch', '--quiet', 'origin', want], { timeoutMs: 10 * 60_000 });
     if (one.code !== 0 || !(await have(want))) return { why: `${dep.url} has no commit ${want} the daemon can fetch: ${firstLine(one)}` };
   }
-  if (want) await git([...gd, 'update-ref', `refs/ff-pin/${want}`, want]);
+  if (want) await pin(want);
   return { dir };
 }
 
@@ -284,10 +304,13 @@ export interface GitPackagesOptions {
   /** Make a mirror's folder (tests: nothing). */
   mkdir?: (p: string) => void;
   exists?: (p: string) => boolean;
+  /** How long a start waits for its mirrors in all (default 3 minutes); a fetch still going then goes on for the next start. */
+  prepareBudgetMs?: number;
 }
 
 export class GitPackages {
-  private readonly busy = new Map<string, Promise<{ dir: string } | { why: string }>>();
+  /** The last run queued on each mirror folder: one git at a time in a mirror, whichever commit each run wants. */
+  private readonly tail = new Map<string, Promise<unknown>>();
   private readonly o: GitPackagesOptions;
   constructor(o: GitPackagesOptions) {
     this.o = o;
@@ -306,13 +329,15 @@ export class GitPackages {
 
   private mirror(dep: GitDep): Promise<{ dir: string } | { why: string }> {
     const root = this.o.root as string;
-    const key = `${mirrorDirOf(root, dep.url)}#${dep.lockHash ?? ''}`;
-    let p = this.busy.get(key);
-    if (!p) {
-      p = ensureMirror(root, dep, this.o.git, { exists: this.o.exists ?? fs.existsSync, mkdir: this.o.mkdir ?? ((d) => fs.mkdirSync(d, { recursive: true })) }).catch((e: Error) => ({ why: e.message }));
-      this.busy.set(key, p);
-      void p.finally(() => this.busy.delete(key));
-    }
+    const key = mirrorDirOf(root, dep.url) ?? dep.url;
+    const run = () => ensureMirror(root, dep, this.o.git, { exists: this.o.exists ?? fs.existsSync, mkdir: this.o.mkdir ?? ((d) => fs.mkdirSync(d, { recursive: true })) }).catch((e: Error) => ({ why: e.message }));
+    // Behind the run in flight on this mirror (a second pin of one repository waits, then finds its commit or fetches).
+    const prev = this.tail.get(key);
+    const p = prev ? prev.then(run, run) : run();
+    this.tail.set(key, p);
+    void p.finally(() => {
+      if (this.tail.get(key) === p) this.tail.delete(key);
+    });
     return p;
   }
 
@@ -347,8 +372,14 @@ export class GitPackages {
     if (!lowGitDir) return { env: {}, note: `${missingNote(missing, 'warn', true)} (editorGitPackages is on but the workers' Git is not at <root>\\tools\\git yet)` };
     const served: { url: string; dir: string; name: string }[] = [];
     const failed: string[] = [];
+    const budget = this.o.prepareBudgetMs ?? 3 * 60_000;
+    const deadline = Date.now() + budget;
     for (const d of missing) {
-      const r = await this.mirror(d);
+      let timer: NodeJS.Timeout | undefined;
+      const late = new Promise<{ why: string }>((res) => {
+        timer = setTimeout(() => res({ why: `still fetching after ${Math.round(budget / 1000)} s; it goes on for the next start` }), Math.max(0, deadline - Date.now()));
+      });
+      const r = await Promise.race([this.mirror(d), late]).finally(() => clearTimeout(timer));
       if ('dir' in r) served.push({ url: d.url, dir: r.dir, name: d.name });
       else failed.push(`${d.name}: ${r.why}`);
     }

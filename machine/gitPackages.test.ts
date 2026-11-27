@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { cacheFolderName, ensureMirror, fileUrlOf, GitPackages, gitDepsOf, gitPackagesModeOf, githubRepoOf, insteadOfEnv, isGitSpec, lowGitPath, mirrorDirOf, missingGitPackages, missingNote, type MirrorGit, type ProjectFs } from './gitPackages.ts';
+import { cacheFolderName, ensureMirror, fileUrlOf, firstLine, GitPackages, gitDepsOf, gitPackagesModeOf, githubRepoOf, insteadOfEnv, isGitSpec, lowGitPath, mirrorDirOf, missingGitPackages, missingNote, type MirrorGit, type ProjectFs } from './gitPackages.ts';
 import { MacUnity, MacUnityWatch, type EditorFence, type Proc, type UnityDeps } from './unity.ts';
 import type { RunResult } from '../server/proc.ts';
 import { findDialogs, type EditorWindow } from '../server/watchdog.ts';
@@ -103,13 +103,25 @@ test('w6412: the note names the package, the Low cause and the route; off says n
 
 const ok = (stdout = ''): RunResult => ({ code: 0, stdout, stderr: '' }) as RunResult;
 const fail = (stderr: string): RunResult => ({ code: 1, stdout: '', stderr }) as RunResult;
+/** A git call's subcommand and what follows, without --git-dir and -c options. */
+const verbOf = (args: string[]) => {
+  const rest: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '-c') i++;
+    else if (!args[i].startsWith('--git-dir')) rest.push(args[i]);
+  }
+  return rest;
+};
 
 test('w6412: ensureMirror makes a bare mirror, fetches it and pins the locked commit; a commit already there fetches nothing', async () => {
   const [dep] = gitDepsOf(JSON.stringify({ dependencies: { 'com.akb.knn': KNN } }));
   const calls: string[][] = [];
   let haveIt = false;
+  let pinned = false;
   const git: MirrorGit = async (args) => {
     calls.push(args);
+    if (args.includes('rev-parse')) return pinned ? ok() : fail('');
+    if (args.includes('update-ref')) pinned = true;
     if (args.includes('cat-file')) return haveIt ? ok() : fail('missing');
     if (args.includes('fetch')) haveIt = true;
     if (args.includes('ls-remote')) return ok('ref: refs/heads/main\tHEAD\n');
@@ -120,14 +132,96 @@ test('w6412: ensureMirror makes a bare mirror, fetches it and pins the locked co
   assert.ok('dir' in r);
   const dir = mirrorDirOf('/ffw', dep.url)!;
   assert.deepEqual(made, [dir]);
-  const verbs = calls.map((c) => c.filter((a) => !a.startsWith('--git-dir'))[0]);
-  assert.deepEqual(verbs, ['init', 'config', 'config', 'config', 'cat-file', 'fetch', 'ls-remote', 'symbolic-ref', 'cat-file', 'update-ref']);
+  const verbs = calls.map((c) => verbOf(c)[0]);
+  assert.deepEqual(verbs, ['init', 'config', 'config', 'config', 'config', 'config', 'cat-file', 'fetch', 'ls-remote', 'symbolic-ref', 'cat-file', 'rev-parse', 'update-ref']);
   assert.ok(calls.some((c) => c.join(' ').includes(`update-ref refs/ff-pin/${KNN_SHA} ${KNN_SHA}`)));
+  const fetch = calls.find((c) => verbOf(c)[0] === 'fetch')!;
+  assert.ok(fetch.join(' ').includes('-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch'), 'a stalled fetch gives up');
 
   calls.length = 0;
+  pinned = false; // brought in by a branch an earlier fetch of another pin fetched
   await ensureMirror('/ffw', dep, git, { exists: () => true, mkdir: () => undefined });
   assert.ok(!calls.some((c) => c.includes('fetch')), 'already there: no fetch');
+  assert.ok(calls.some((c) => verbOf(c)[0] === 'update-ref'), 'a commit already there (brought by a branch) is still pinned');
 });
+
+test('w6412 (review w6423): a mirror whose config already matches gets no config write', async () => {
+  const [dep] = gitDepsOf(JSON.stringify({ dependencies: { 'com.akb.knn': KNN } }));
+  const calls: string[][] = [];
+  const git: MirrorGit = async (args) => {
+    calls.push(args);
+    const v = verbOf(args);
+    if (v[0] === 'config' && v[1] === '--get') return ok(`${dep.url}\n`);
+    if (v[0] === 'rev-parse') return ok(KNN_SHA);
+    if (v[0] === 'config' && v[1] === '--get-all') return ok('+refs/heads/*:refs/heads/*\n+refs/tags/*:refs/tags/*\n');
+    return ok();
+  };
+  await ensureMirror('/ffw', dep, git, { exists: () => true, mkdir: () => undefined });
+  const configs = calls.map(verbOf).filter((v) => v[0] === 'config');
+  assert.deepEqual(configs.map((v) => v[1]), ['--get', '--get-all'], 'reads only');
+  assert.ok(!calls.some((c) => verbOf(c)[0] === 'update-ref'), 'pin already there: no write');
+});
+
+test('w6412 (review w6423): two pins of one repository run one at a time in its mirror', async () => {
+  const PIN2 = 'b'.repeat(40);
+  const files = {
+    'V:/ffw/sandboxes/slot1/Packages/manifest.json': JSON.stringify({ dependencies: { 'com.akb.knn': KNN } }),
+    'V:/ffw/sandboxes/slot2/Packages/manifest.json': JSON.stringify({ dependencies: { 'com.akb.knn': `https://github.com/Final-Factory/KNN.git#${PIN2}` } }),
+  };
+  const have = new Set<string>();
+  let inFlight = 0;
+  let most = 0;
+  const gp = new GitPackages({
+    mode: () => 'on',
+    root: String.raw`V:\ffw`,
+    platform: 'win32',
+    fs: projectFs(files, []),
+    exists: () => true,
+    mkdir: () => undefined,
+    git: async (args) => {
+      inFlight++;
+      most = Math.max(most, inFlight);
+      await new Promise((r) => setTimeout(r, 2));
+      inFlight--;
+      const v = verbOf(args);
+      if (v[0] === 'cat-file') return have.has(v[2].slice(0, 40)) ? ok() : fail('');
+      if (v[0] === 'fetch') {
+        have.add(KNN_SHA);
+        have.add(PIN2);
+      }
+      return ok();
+    },
+  });
+  const [a, b] = await Promise.all([
+    gp.prepare(String.raw`V:\ffw\sandboxes\slot1`, String.raw`V:\ffw\tools\git`, {}),
+    gp.prepare(String.raw`V:\ffw\sandboxes\slot2`, String.raw`V:\ffw\tools\git`, {}),
+  ]);
+  assert.equal(most, 1, 'one git at a time in the mirror');
+  assert.ok(a.env.GIT_CONFIG_COUNT && b.env.GIT_CONFIG_COUNT, 'both editors get the mirror');
+});
+
+test('w6412 (review w6423): a start waits for its mirrors only within its budget', async () => {
+  const gp = new GitPackages({
+    mode: () => 'on',
+    root: String.raw`V:\ffw`,
+    platform: 'win32',
+    fs: projectFs({ 'V:/ffw/sandboxes/slot2/Packages/manifest.json': JSON.stringify({ dependencies: { 'com.akb.knn': KNN } }) }, []),
+    exists: () => true,
+    mkdir: () => undefined,
+    prepareBudgetMs: 20,
+    git: (args) => (verbOf(args)[0] === 'fetch' ? new Promise((r) => setTimeout(() => r(ok()), 200)) : Promise.resolve(verbOf(args)[0] === 'cat-file' ? fail('') : ok())),
+  });
+  const r = await gp.prepare(REPO, String.raw`V:\ffw\tools\git`, {});
+  assert.equal(r.env.GIT_CONFIG_COUNT, undefined);
+  assert.match(r.note!, /could not mirror com\.akb\.knn: still fetching after 0 s; it goes on for the next start/);
+});
+
+test('w6412 (review w6423): git\'s error line reaches a note with its URL credential and token masked', () => {
+  const line = firstLine(fail('fatal: unable to access \'https://x-access-token:ghp_0123456789abcdefghijABCDEFGHIJ0123@github.com/Final-Factory/KNN.git/\': 403'));
+  assert.doesNotMatch(line, /ghp_0123456789abcdefghij|x-access-token:/);
+  assert.match(line, /https:\/\/\[redacted\]@github\.com/);
+});
+
 
 test('w6412: ensureMirror says why when the fetch fails, and refuses a URL its credential does not cover', async () => {
   const [dep] = gitDepsOf(JSON.stringify({ dependencies: { 'com.akb.knn': KNN } }));

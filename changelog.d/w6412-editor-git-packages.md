@@ -8,3 +8,7 @@
   that points at the mirror, so no credential reaches the editor and no tracked file changes. `off` looks at nothing.
   Set it remotely with `ops_worker machine_update editor_git_packages off|warn|on`, which uses the daemon link or the
   installer (`--editor-git-packages`, `-EditorGitPackages`).
+  In `on`, a mirror holds only one git process at a time, even when two sandboxes start on different pins of one
+  repository. A mirror's config is written only when it differs from what it should be. Each pinned commit is kept by
+  a `refs/ff-pin` ref. A start waits at most 3 minutes for its mirrors, and a fetch moving under 1 KB/s for a minute
+  gives up. Git's error line in a note has any URL credential and token masked (the w6423 review).
