@@ -155,3 +155,15 @@ test('w6485: any punctuation around Steam and its version, and any apostrophe, k
     assert.equal(otherPlayerIn(t, NEW), undefined, t);
   }
 });
+
+// w6516's review of PR #1499: the separator alone counts after Steam, "_" is one too, and a long run of punctuation after
+// "Steam" stays linear (the head before took 11 s on 100,000 hyphens).
+test('w6485: a separator alone after Steam keeps the mark, and a long run of punctuation after Steam is quick', () => {
+  for (const t of ['Steam — build', 'Steam / builds', 'Steam_0.50']) assert.ok(otherPlayerIn(t, NEW), t);
+  for (const c of ['-', '.', '_', '— ']) {
+    const t0 = performance.now();
+    otherPlayerIn(`the client runs steam${c.repeat(50_000)}`, NEW);
+    const ms = performance.now() - t0;
+    assert.ok(ms < 500, `steam followed by 50,000 ${JSON.stringify(c)} took ${ms.toFixed(0)} ms`);
+  }
+});
