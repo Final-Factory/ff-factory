@@ -615,9 +615,27 @@ export class PlaceAgain {
     return (this.d.now ?? Date.now)();
   }
 
+  /**
+   * w6381: facts() by its sessions list: within a claims memo that list is the memo's own (sessionsOn), so a machine's facts are
+   * made once until claimsChanged; outside one every call filters afresh and gets a new list. describeAllSandboxes asked facts
+   * per agent line, 0.7 s of its 1.8 s block at 10:44Z on 2026-11-27 (stall profile: facts, inSandbox).
+   */
+  private readonly factsMemo = new WeakMap<SessionInfo[], PlaceFacts>();
+  /** w6381: how many times claims() worked a machine's claims out (not a memo hit), for the tests. */
+  claimsMade = 0;
+
   private facts(machineId: string): PlaceFacts {
+    const sessions = this.sessionsOn(machineId);
+    const kept = this.claimsMemo && this.factsMemo.get(sessions);
+    if (kept) return kept;
+    const made = this.factsOf(machineId, sessions);
+    if (this.claimsMemo) this.factsMemo.set(sessions, made);
+    return made;
+  }
+
+  private factsOf(machineId: string, sessions: SessionInfo[]): PlaceFacts {
     return {
-      sessions: this.sessionsOn(machineId),
+      sessions,
       live: this.d.isLive,
       unityHolders: this.d.unityHolders(machineId),
       now: this.now(),
@@ -686,6 +704,7 @@ export class PlaceAgain {
   claims(machineId: string): Map<string, string> {
     const memo = this.claimsMemo?.get(machineId);
     if (memo) return memo;
+    this.claimsMade++;
     const m = this.d.machine(machineId);
     const out = new Map<string, string>();
     if (!m) return out;
