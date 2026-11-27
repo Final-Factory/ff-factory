@@ -111,6 +111,11 @@ anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macO
   the mark at all three points (`otherPlayerInWords`; start_agent and the re-check take the worker's part of a filed
   run's brief, `pairAskWords`, so FF Factory's own words and their hex session id do not count). A sha in a brief that
   is only context keeps the mark too, failing closed: pass `legacy_data` "none" when no leg runs a pre-w5297 player.
+  A build named without a number counts as another player too (w6458, from w6454's review of PR #1484): "the Steam
+  pre-1.0 build", "installed from Steam", "the published 0.50 player", "the pre-1.0 release" (`INSTALLED_BUILD`). Its
+  words are read only after the pre-1.0 or 0.50 words marked the run, and "a Steam lobby" or "the release branch" are no
+  build; a false match keeps the mark, and `legacy_data` "none" is the way out. newPair joins the worker's brief to its
+  own words with `PAIR_FILED_BY`, the same text `pairAskWords` cuts at.
 
 ## Long runs the daemon starts for a worker (w6367, Windows)
 
