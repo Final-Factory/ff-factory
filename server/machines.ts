@@ -1015,15 +1015,22 @@ export class MachineManager {
 
   /** Each worker's request priority on a machine, for its bench queue (w1628; set by server/index.ts). */
   benchPrioritiesFor?: (machineId: string) => Record<string, BenchPriority>;
+  /** w6381: runs pushBenchPriorities' reads in one placement pass (Agents.placementRead; set by server/index.ts). */
+  benchPass?: <T>(fn: () => T) => T;
   /** Whether a machine's workers ask timed_place before an exclusive timing ticket (w1969; set by server/index.ts). */
   timedAskFor?: (machineId: string) => TimedAskMark | undefined;
 
   /** Send every connected daemon its workers' request priorities for its bench queue (w1628): at connect and each minute. */
   pushBenchPriorities() {
-    for (const id of this.links.keys()) {
-      const sessions = this.benchPrioritiesFor?.(id);
-      if (sessions) this.post(id, this.benchPrioritiesMsg(id, sessions), false);
-    }
+    // w6381: every machine's priorities read in one placement pass (benchPass), then sent: one pass per machine held the
+    // portal 5.8 s at 10:43Z on 2026-11-27.
+    const msgs = (this.benchPass ?? ((fn) => fn()))(() =>
+      [...this.links.keys()].flatMap((id) => {
+        const sessions = this.benchPrioritiesFor?.(id);
+        return sessions ? [{ id, msg: this.benchPrioritiesMsg(id, sessions) }] : [];
+      }),
+    );
+    for (const { id, msg } of msgs) this.post(id, msg, false);
   }
 
   /** The bench_priorities message for one machine: its workers' priorities, whether it hosts one worker, and its timed-run refusal (w1861). */

@@ -6690,6 +6690,23 @@ A report is for a person who asked for one, and people want very few. File one w
     return this.free(sb, machineId);
   }
 
+  /**
+   * sandboxFree of each of a machine's sandboxes, with the machine's claims worked out once (w6381): the page's machine view
+   * asked each sandbox alone, each ask placing every released worker of the machine again (1.1-1.8 s portal blocks at
+   * 10:44-10:51Z on 2026-11-27, stall profile: machineView > sandboxFree > free > claimedBy > claims).
+   */
+  sandboxesFree(machineId: string, sbs: readonly MachineSandbox[]): boolean[] {
+    return this.placeAgain.withClaimsMemo(() => sbs.map((sb) => this.free(sb, machineId)));
+  }
+
+  /**
+   * w6381: runs read-only `fn` (every machine's bench priorities) with places() and each machine's claims computed once: the
+   * minute's pushBenchPriorities asked them per machine, a 5.8 s portal block at 10:43Z on 2026-11-27.
+   */
+  placementRead<T>(fn: () => T): T {
+    return this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(fn));
+  }
+
   /** " (spoken for: …)" when a released worker is being placed again there or its resume waits for it (w640), else "". */
   private claimLine(machineId: string, sandbox: string): string {
     const by = this.placeAgain.claimedBy(machineId, sandbox);
@@ -7686,7 +7703,8 @@ A report is for a person who asked for one, and people want very few. File one w
   describeAllSandboxes(detail = false): string {
     // w6336: one placement pass for the whole list, so every agent line reads its requests from one index (workOf): list_sandboxes
     // blocked the portal 9.2 s at 10:06Z on 2026-11-27, under describeAllSandboxes > agentsPart > workOver's scan of every request.
-    return this.withPlacesOnce(() => this.describeAllSandboxesNow(detail));
+    // w6381: and each machine's claims and placement facts once, not per agent line (1.8 s at 10:44Z on 2026-11-27: facts).
+    return this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(() => this.describeAllSandboxesNow(detail)));
   }
 
   private describeAllSandboxesNow(detail: boolean): string {

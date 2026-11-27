@@ -1,0 +1,162 @@
+// w6381: the event-loop blocks left after w6336 (stall profiles, 2026-11-27 10:42-11:20Z). Each fix keeps its answer and
+// its data; these tests hold that, and that the work is done once where it was done many times. CI runs no timing tests:
+// scripts/bench-loop-blocks.ts measures the times.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { joinedPieces, stringifyPrettyPieces, stringifyPrettySliced, textPieces, writeFileDurableAsync } from './durable.ts';
+import { setup, setupOnMachine, putRequests, LOTH } from './orchestratorsTestKit.ts';
+import type { BenchPriority } from '../shared/types.ts';
+
+const pretty = (v: unknown) => JSON.stringify(v, null, 2);
+
+const odd = Object.assign(Object.create(null), { a: 1, b: [1, 'two', null] });
+const SAMPLES: unknown[] = [
+  {},
+  [],
+  { a: undefined, b: 1, c: () => 1, d: Symbol('x') },
+  [undefined, () => 1, 2],
+  { empty: {}, list: [], nested: { x: [[], {}, [1, [2, { y: 3 }]]] } },
+  { at: new Date(0), own: { toJSON: () => ({ made: true }) }, map: new Map([[1, 2]]), set: new Set([1]) },
+  odd,
+  { s: 'line\nbreak "quoted" \\ back sep \u{1F680} rocket \t tab', k: { 'odd "key"\n': 1 } },
+  { n: [NaN, Infinity, -0, 1e21, 0.1], b: [true, false], z: null },
+  { seq: 9, items: Array.from({ length: 50 }, (_, i) => ({ id: `w${i}`, log: [`line ${i}`, `more\n${i}`], deep: { a: { b: { c: [i] } } } })) },
+  'just a string',
+  42,
+  null,
+  [[[[1]]]],
+];
+
+test('w6381: stringifyPrettyPieces and stringifyPrettySliced write JSON.stringify(v, null, 2) byte for byte, at any depth', async () => {
+  for (const v of SAMPLES) {
+    for (const depth of [0, 1, 2, 3, 6]) {
+      assert.equal((await stringifyPrettyPieces(v, 0, depth)).join(''), pretty(v), `depth ${depth}: ${pretty(v)?.slice(0, 80)}`);
+    }
+    assert.equal(await stringifyPrettySliced(v, 0), pretty(v));
+  }
+});
+
+test('w6381: stringifyPrettyPieces lets the event loop run between records, and throws where JSON.stringify does', async () => {
+  const v = { seq: 1, items: Array.from({ length: 20 }, (_, i) => ({ id: i })) };
+  let turns = 0;
+  const tick = setInterval(() => turns++, 0);
+  const immediates: number[] = [];
+  const spin = () => setImmediate(() => (immediates.push(1), immediates.length < 1000 && spin()));
+  spin();
+  await stringifyPrettyPieces(v, 0);
+  clearInterval(tick);
+  assert.ok(immediates.length >= 10, `the loop ran ${immediates.length} times during the serialize`);
+  const loop: Record<string, unknown> = { a: 1 };
+  loop.self = { back: loop };
+  await assert.rejects(stringifyPrettyPieces({ x: loop }, 0), TypeError);
+  await assert.rejects(stringifyPrettyPieces({ x: [1n] }, 0), TypeError);
+});
+
+test('w6381: a big text goes to disk in pieces that never split a surrogate pair, and the file is the same bytes', async (t) => {
+  const text = `${'a'.repeat(5)}\u{1F680}${'b'.repeat(4)}\u{1F680}\u{1F680}é`;
+  for (const size of [1, 2, 3, 5, 6, 7, 64]) {
+    const pieces = [...textPieces(text, size)];
+    assert.equal(pieces.join(''), text, `size ${size}`);
+    for (const p of pieces) {
+      assert.ok(!/[\ud800-\udbff]$/.test(p) && !/^[\udc00-\udfff]/.test(p), `size ${size}: a pair split at ${JSON.stringify(p)}`);
+      assert.ok(p.length <= Math.max(size, 2), `size ${size}: piece of ${p.length}`);
+    }
+    const joined = [...joinedPieces(['xy', text, '', 'z', text], size)];
+    assert.equal(joined.join(''), `xy${text}z${text}`);
+    for (const p of joined) assert.ok(!/[\ud800-\udbff]$/.test(p), `joined, size ${size}`);
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w6381-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 }));
+  const v = { seq: 3, items: Array.from({ length: 3000 }, (_, i) => ({ id: `w${i}`, brief: `\u{1F680} ${'x'.repeat(400)} é ${i}` })) };
+  const file = path.join(dir, 'work.json');
+  await writeFileDurableAsync(file, await stringifyPrettyPieces(v, 0));
+  assert.equal(fs.readFileSync(file, 'utf8'), pretty(v), 'pieces');
+  const big = pretty(v).repeat(2);
+  await writeFileDurableAsync(file, big);
+  assert.equal(fs.readFileSync(file, 'utf8'), big, 'one text above WRITE_PIECE_CHARS');
+});
+
+test('w6381: the store\'s background saves write the same state.json and work.json as a flush', async (t) => {
+  const { store } = setup(t);
+  putRequests(store, [{ id: 'w1', title: 'Belt tooltip', brief: 'Fix it.\n\u{1F680}' }, { id: 'w2', title: 'Other', brief: 'Not "its".' }]);
+  const s = store as unknown as { stateFile: { serializeAsync?: () => Promise<string | readonly string[]>; serialize: () => string }; workFile: { serializeAsync?: () => Promise<string | readonly string[]>; serialize: () => string } };
+  for (const f of [s.stateFile, s.workFile]) {
+    const out = await f.serializeAsync!();
+    assert.equal(typeof out === 'string' ? out : out.join(''), f.serialize());
+  }
+});
+
+test('w6381: FREE of a machine\'s sandboxes computes its claims once, with the same answers as one at a time', async (t) => {
+  const env = await setupOnMachine(t, {}, { sandboxes: ['alpha', 'beta', 'gamma', 'delta'] });
+  const { agents, store } = env;
+  const sbs = store.machines.get('pc')!.sandboxes!;
+  assert.equal(sbs.length, 4);
+  const one = sbs.map((sb) => agents.sandboxFree('pc', sb));
+  const pa = agents.placeAgain;
+  let c0 = pa.claimsMade;
+  const all = agents.sandboxesFree('pc', sbs);
+  assert.deepEqual(all, one);
+  assert.equal(pa.claimsMade - c0, 1, 'claims once for the machine');
+  c0 = pa.claimsMade;
+  agents.describeAllSandboxes();
+  assert.ok(pa.claimsMade - c0 <= store.machines.size, `describeAllSandboxes: claims ${pa.claimsMade - c0} times for ${store.machines.size} machine(s)`);
+  c0 = pa.claimsMade;
+  agents.placementRead(() => {
+    for (let i = 0; i < 5; i++) agents.benchPriorities('pc');
+  });
+  assert.ok(pa.claimsMade - c0 <= 1, `bench priorities in one pass: claims ${pa.claimsMade - c0} times`);
+  // Outside a memo nothing is kept: each ask computes afresh.
+  c0 = pa.claimsMade;
+  agents.sandboxFree('pc', sbs[0]);
+  agents.sandboxFree('pc', sbs[0]);
+  assert.ok(pa.claimsMade - c0 >= 2);
+});
+
+test('w6381: pushBenchPriorities reads every machine in one pass, then sends', async (t) => {
+  const { machines } = await setupOnMachine(t);
+  const inPass: boolean[] = [];
+  let passes = 0;
+  let open = false;
+  machines.benchPass = (fn) => {
+    passes++;
+    open = true;
+    try {
+      return fn();
+    } finally {
+      open = false;
+    }
+  };
+  machines.benchPrioritiesFor = () => (inPass.push(open), {} as Record<string, BenchPriority>);
+  const sent: { id: string; open: boolean }[] = [];
+  const m = machines as unknown as { post: (id: string, msg: { type: string }, must?: boolean) => void };
+  const post0 = m.post.bind(machines);
+  m.post = (id, msg, must) => {
+    if (msg.type === 'bench_priorities') sent.push({ id, open });
+    post0(id, msg as never, must);
+  };
+  machines.pushBenchPriorities();
+  assert.equal(passes, 1);
+  assert.deepEqual(inPass, [true], 'the connected machine read inside the pass');
+  assert.deepEqual(sent, [{ id: 'pc', open: false }], 'sent after the pass');
+});
+
+test('w6381: warmBoardTexts works out every request\'s concepts ahead, so the first board check makes none and answers the same', async (t) => {
+  const { store, o } = setup(t);
+  const now = new Date().toISOString();
+  for (let i = 0; i < 30; i++) {
+    store.putWork({ id: `w${100 + i}`, title: i === 7 ? 'Conveyor belts jam at the splitter' : `Request number ${i} about turret ammo ${i}`, brief: `Brief ${i}: the turret runs out of ammo near the base.`, priority: 'normal', keys: [], requestedBy: LOTH, requesters: [LOTH], humanAsked: true, status: 'active', createdAt: now, updatedAt: now, sessionIds: [], overlaps: [], asks: 0, log: [] } as never);
+  }
+  const made = await o.warmBoardTexts(30, 0);
+  assert.equal(made, 30);
+  assert.equal(o.boardTextsMade, 30);
+  const q = { keys: [], title: 'belts jam at a splitter', summary: 'The conveyor belt jams where it splits.' };
+  const warm = o.boardCheck(q, 30);
+  assert.equal(o.boardTextsMade, 30, 'the first check made none');
+  assert.equal(warm.matches[0]?.id, 'w107', JSON.stringify(warm));
+  (o as unknown as { boardTexts: Map<string, unknown> }).boardTexts.clear();
+  assert.deepEqual(o.boardCheck(q, 30), warm, 'the same answer as from a cold cache');
+  assert.equal(await o.warmBoardTexts(30, 0), 0, 'a second warm-up makes none');
+});

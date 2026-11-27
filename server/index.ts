@@ -542,6 +542,7 @@ const agents = new Agents(cfg, store, sessions, machines, identity);
 observeAsk = (sid, e) => agents.orchestrators.observeAsk(sid, e);
 // Each machine's bench queue orders tickets by their worker's request priority first (w1628): at connect and each minute.
 machines.benchPrioritiesFor = (id) => agents.benchPriorities(id);
+machines.benchPass = (fn) => agents.placementRead(fn);
 machines.timedAskFor = (id) => agents.timedAskFor(id);
 setInterval(() => machines.pushBenchPriorities(), 60_000).unref();
 // A holder warned that its bench turn ends (w1832, server/benchWarnings.ts): its worker is messaged once per deadline.
@@ -1105,6 +1106,8 @@ const blockerWatch = new BlockerWatch({
   // w4925: a pair run of a commit whose CI failed to compile ends with the errors before its legs run players.
   compile: (repo, sha, person) => ghCompileVerdict(repo, sha, ghRunner(person, `the compile of ${sha.slice(0, 10)}`)),
 });
+// w6381: the board check's concepts made in slices soon after a start, before FFBox's first board_check needs them all at once.
+setTimeout(() => void agents.orchestrators.warmBoardTexts(intake.settings.lookbackDays).catch((e) => console.warn(`board check warm-up failed: ${(e as Error).message}`)), 5_000).unref();
 agents.blockerWatch = blockerWatch;
 // A usage gate keeps the pool's own name for its ref and the hold's end (w1126: "vault-lothsahn-1" never matched and never cleared).
 agents.usageRef = (ref) => usageRefOf(ref);
@@ -2866,7 +2869,10 @@ function hostForUser(h: HostStatus, user: string): HostStatus {
  * "1/3 sandboxes" counts in use as the agents' tools do and never works it out a second way.
  */
 function machineView(m: Machine): Machine {
-  return m.sandboxes?.length ? { ...m, sandboxes: m.sandboxes.map((sb) => ({ ...sb, free: agents.sandboxFree(m.id, sb) })) } : m;
+  if (!m.sandboxes?.length) return m;
+  // w6381: one claims pass for the machine's sandboxes (Agents.sandboxesFree), not one per sandbox.
+  const free = agents.sandboxesFree(m.id, m.sandboxes);
+  return { ...m, sandboxes: m.sandboxes.map((sb, i) => ({ ...sb, free: free[i] })) };
 }
 /**
  * What makes a sandbox free changes without a machine event (a worker's turn ends, a claim lapses, a bench lock goes):
@@ -2875,7 +2881,9 @@ function machineView(m: Machine): Machine {
 const freeSent = new Map<string, string>();
 const freeKey = (v: Machine) => (v.sandboxes ?? []).map((sb) => `${sb.id}:${sb.free ? 1 : 0}`).join(',');
 setInterval(() => {
-  for (const m of machines.list()) if (freeSent.get(m.id) !== freeKey(machineView(m))) emit({ type: 'machine', machine: m });
+  // w6381: every machine's FREE read in one claims memo, then the moved ones sent (each send builds its own view).
+  const moved = agents.placeAgain.withClaimsMemo(() => machines.list().filter((m) => freeSent.get(m.id) !== freeKey(machineView(m))));
+  for (const m of moved) emit({ type: 'machine', machine: m });
 }, 5_000).unref();
 function broadcast(e: ServerEvent) {
   if (e.type === 'machine') {
