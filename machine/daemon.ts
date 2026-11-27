@@ -258,6 +258,13 @@ export interface DaemonConfig {
    */
   tray?: boolean;
   /**
+   * w6350: the tray keeps the live ForegroundLockTimeout at 0 (machine/tray/FFFactoryTray.cs ForegroundLockGuard), which
+   * stops Windows 11's win32k leaking a kernel token for every process that creates a process. The entry point turns it
+   * on; false turns it off (programs then cannot take the foreground at will again, and the leak comes back). docs/machines.md
+   * "The foreground lock guard".
+   */
+  foregroundLockGuard?: boolean;
+  /**
    * The leftover reaper (machine/leftovers.ts): on unless false. A test install beside a computer's real one turns it off
    * (worker.ts --no-cleanup, w1596): it reads every process on the computer and the shared player slots.
    */
@@ -2543,7 +2550,7 @@ export class Daemon {
     // Paused, an agent still at work is finishing its step to hand back (w1532 critic: "1 agent working" under Paused read as a failed pause).
     const agents = working === 0 ? 'No agents working here' : `${working} agent${working === 1 ? '' : 's'} ${p.paused ? 'finishing a step' : 'working here'}`;
     const work = `${agents} · portal ${connected ? 'connected' : 'not connected'}`;
-    this.tray.send({ type: 'state', paused: p.paused, reason: p.reason ?? null, why: v.why, next: v.next ?? null, tip: v.tip ?? null, schedule: v.schedule, work, settings, machine: this.cfg.id, portalUrl: this.cfg.portalUrl, firefox: this.firefox?.enabled ?? false });
+    this.tray.send({ type: 'state', paused: p.paused, reason: p.reason ?? null, why: v.why, next: v.next ?? null, tip: v.tip ?? null, schedule: v.schedule, work, settings, machine: this.cfg.id, portalUrl: this.cfg.portalUrl, firefox: this.firefox?.enabled ?? false, fltGuard: this.cfg.foregroundLockGuard === true });
   }
 
   /** For a still of the tray (w1532): open or close its menu or the schedule window. */
@@ -5598,6 +5605,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   process.env.FF_UNITY_SLOTS = cfg.unitySlotsDir;
   // The tray app (w1532): on unless daemon.json says "tray": false.
   cfg.tray ??= true;
+  // w6350: the tray's foreground lock guard, on unless daemon.json says "foregroundLockGuard": false.
+  cfg.foregroundLockGuard ??= true;
   const d = new Daemon(cfg);
   // w5545: what the daemon starts itself (nightly builds, timed runs, ops) asks for slots and tickets as the daemon.
   Object.assign(process.env, d.rpcEnv(`daemon-${cfg.id}`));
