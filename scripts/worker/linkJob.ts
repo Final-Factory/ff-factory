@@ -236,6 +236,7 @@ export function updateFlagsOf(source: string, f: LinkUpdateFlags): UpdateFlags {
     ...(f.runnerPriority === 'off' || f.runnerPriority === 'warn' || f.runnerPriority === 'enforce' ? { runnerPriority: f.runnerPriority } : {}),
     ...(f.hostRestage === 'warn' || f.hostRestage === 'on' ? { hostRestage: f.hostRestage } : {}),
     ...(f.longRuns === 'off' || f.longRuns === 'warn' || f.longRuns === 'on' ? { longRuns: f.longRuns } : {}),
+    ...(f.liveRunGuard === 'off' || f.liveRunGuard === 'warn' ? { liveRunGuard: f.liveRunGuard } : {}),
   };
 }
 
