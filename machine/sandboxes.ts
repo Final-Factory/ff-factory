@@ -29,6 +29,7 @@ import type { IdleCloseResult } from './liveIdle.ts';
 import { isPersonTicket } from './personPlay.ts';
 import type { DiskLevel, GitStatus, MachineSandboxIdleClosed, MachineSandboxUnity, SandboxPoolSettings, SandboxStatus } from '../shared/types.ts';
 import { describeCounted, type CensusAgent } from '../server/agentCensus.ts';
+import { liveRunWarning, type LiveRunAction } from './liveRunGuard.ts';
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const GB = 1024 ** 3;
@@ -152,6 +153,12 @@ export interface PoolOptions {
    * is live there and no editor or build has the project open.
    */
   releaseSweep?(sandboxPath: string): Promise<{ files: number; bytes: number }>;
+  /**
+   * w6378: the runs of a sandbox's worker that still live there though no agent does (a night it started, a unity-slot
+   * run, a batchmode Unity), each in words; empty when none. With it, a trim, a release or a delete of a sandbox with such
+   * a run logs a WARNING and goes ahead as before (liveRunGuard warn, machine/liveRunGuard.ts). Unset or failing: no line.
+   */
+  liveRun?(id: string, sandboxPath: string): Promise<string[]>;
   /** A line for the daemon's log. */
   log?(line: string): void;
   /** Why a sandbox editor may not start now (the machine's host guard, w466: the drive is gone, disk space is low), or undefined. */
@@ -407,6 +414,8 @@ export class SandboxPool {
   private readonly remade = new Set<string>();
   /** Sandboxes whose Library caches are being trimmed now (w898). */
   private readonly trimming = new Map<string, Promise<TrimResult>>();
+  /** w6378: the last live-run look of each sandbox (tests wait on it); it never holds up what it looks for. */
+  readonly liveRunLooks = new Map<string, Promise<string | undefined>>();
   /** Per sandbox: whether it had a live agent at the last look, so the moment the last one goes is seen. */
   private readonly occupied = new Map<string, boolean>();
   /** w1615: editor starts queued in the bench queue; w1860: the tickets of editors booting or running (held while they run). */
@@ -924,6 +933,7 @@ export class SandboxPool {
       this.changed(r, { status: 'error', statusDetail: `delete refused: ${r.path} is not a sandbox folder under ${s.root}` });
       throw new Error(`refusing to delete ${r.path}`);
     }
+    this.warnLiveRun(id, r.path, 'delete');
     const prov = this.provisioning.get(id);
     this.changed(r, { status: 'deleting', statusDetail: prov ? 'cancelling creation' : 'stopping' });
     if (prov) {
@@ -1034,6 +1044,7 @@ export class SandboxPool {
   release(id: string): string {
     const r = this.require(id);
     if (this.busy.has(id) || r.status === 'creating' || r.status === 'deleting') throw new Error(`sandbox ${id} is ${r.status}; wait until it is done`);
+    this.warnLiveRun(id, r.path, 'release');
     this.recs.delete(id);
     this.editors.delete(id);
     this.unityState.delete(id);
@@ -1062,6 +1073,7 @@ export class SandboxPool {
     if (this.editorUp(id)) return none('its editor is up');
     if (projectOpen(r.path)) return none('an editor or build has the project open');
     const policy = { ...TRIM_DEFAULTS, ...(this.o.trim || {}) };
+    this.warnLiveRun(id, r.path, `Library cache trim (${why})`);
     this.changed(r, { status: 'cleanup', statusDetail: `trimming the Library caches (${why})` });
     const ac = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1108,6 +1120,37 @@ export class SandboxPool {
     })();
     this.trimming.set(id, run);
     return run;
+  }
+
+  /**
+   * w6378, warn only: say in the log when `action` hits a sandbox where a run of its worker still lives (liveRun). Not
+   * awaited and never thrown: the trim, release or delete goes ahead exactly as before, whatever the look answers or how
+   * long it takes (at most 30 s, then it gives up and says so).
+   */
+  private warnLiveRun(id: string, sandboxPath: string, action: LiveRunAction): void {
+    const look = this.o.liveRun;
+    if (!look) return;
+    const said = (async (): Promise<string | undefined> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const holders = await Promise.race([
+          look(id, sandboxPath),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('no answer in 30 s')), 30_000);
+            timer.unref?.();
+          }),
+        ]);
+        const line = liveRunWarning(id, action, holders);
+        if (line) this.o.log?.(line);
+        return line;
+      } catch (e) {
+        this.o.log?.(`sandbox ${id}: the live-run look before its ${action} failed (${(e as Error).message}); it goes ahead as before (w6378)`);
+        return undefined;
+      } finally {
+        clearTimeout(timer);
+      }
+    })();
+    this.liveRunLooks.set(id, said);
   }
 
   /**
