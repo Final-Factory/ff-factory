@@ -87,3 +87,16 @@ test('w6458: a build named without a number keeps the mark; a PR head, a lobby o
     assert.equal(otherPlayerIn(t, NEW), undefined, t);
   }
 });
+
+test('w6467: Steam and a short version keep the mark; the PR\'s own release or Steam build, and release as the build config, do not', () => {
+  assert.match(otherPlayerIn('the client runs Steam 0.50', NEW) ?? '', /names a build no commit is \("Steam 0\.50"\)/);
+  for (const t of ['the client runs Steam 0.50', 'the host runs Steam pre-1.0; the client the PR head', "Steam's 0.50.1 on the host", 'the published 0.50 player and the PR head',
+    'the host runs the Steam 0.50 build, the client a release player of the PR head', 'the client runs a release build of pre-1.0',
+    'the published 0.50 player runs on the host, and the client on the PR head']) {
+    assert.ok(otherPlayerIn(t, NEW), t);
+  }
+  for (const t of ['Build a release player of the PR head', 'the 0.50 release build at the PR head', 'join with the Steam game client of the PR build', 'a Steam lobby on 0.50',
+    'the release build for the PR\'s head', 'Build a release player for the 0.50 line', 'a debug or release build of the 0.50 line', 'a release or debug player of the 0.50 line']) {
+    assert.equal(otherPlayerIn(t, NEW), undefined, t);
+  }
+});

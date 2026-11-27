@@ -116,6 +116,10 @@ anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macO
   words are read only after the pre-1.0 or 0.50 words marked the run, and "a Steam lobby" or "the release branch" are no
   build; a false match keeps the mark, and `legacy_data` "none" is the way out. newPair joins the worker's brief to its
   own words with `PAIR_FILED_BY`, the same text `pairAskWords` cuts at.
+  "Steam" followed by pre-1.0 or a short 0.50 version ("the client runs Steam 0.50") counts too (w6467, from w6463's review
+  of PR #1487). A match is no other player when it is the PR's own build (up to two words, then of, at, from, for or on the
+  PR head or build: "a release player of the PR head") or when "release" is the build config (next to debug or
+  development, or "build a release player"; `excusedBuild`). "The published 0.50 player and the PR head" keeps the mark.
 
 ## Long runs the daemon starts for a worker (w6367, Windows)
 
