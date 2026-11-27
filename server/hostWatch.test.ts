@@ -379,16 +379,16 @@ test('w6486: the poll saves its offset off the event loop, and a going daemon\'s
   assert.equal(fs.existsSync(f.offsetStop), false, 'no stop file while no write races the going daemon');
 
   // A slow disk (BEAST: 6-10 s a write): the poll's next write is held until after the daemon has gone.
-  const writeFile = fs.promises.writeFile;
+  const open = fs.promises.open;
   let release!: () => void;
   const held = new Promise<void>((r) => (release = r));
   let slow = 0;
-  t.mock.method(fs.promises, 'writeFile', async (...a: Parameters<typeof writeFile>) => {
+  t.mock.method(fs.promises, 'open', async (...a: Parameters<typeof open>) => {
     if (String(a[0]) === f.offset) {
       slow++;
       await held;
     }
-    return writeFile(...a);
+    return open(...a);
   });
   call('r2');
   await until('r2 answered while its offset write is held', () => answered.includes('r2') && slow === 1);
@@ -412,7 +412,73 @@ test('w6486: the poll saves its offset off the event loop, and a going daemon\'s
   assert.deepEqual(answered, ['r4'], 'nothing forwarded twice');
 });
 
-test('w6486: a failed offset write is tried again by the next poll', { timeout: 60_000 }, async (t) => {
+test('w6519: an older, shorter offset that lands on the going daemon\'s longer one never leaves a larger number, whenever the daemon exits', { timeout: 60_000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w6519-width-'));
+  const dir = path.join(root, 'o4');
+  const { pid, child } = await fakeHost(dir);
+  const answered: string[] = [];
+  const handlers = () => ({ read_work: async (args: unknown) => (answered.push(String((args as { n: string }).n)), 'ok') });
+  const f = hostFiles(dir);
+  const call = (n: string, pad = '') => fs.appendFileSync(f.out, JSON.stringify({ op: 'rpc', id: n, method: 'read_work', args: { n, pad } }) + '\n');
+  const size = () => fs.statSync(f.out).size;
+  const saved = (p: string) => (fs.existsSync(p) ? Number(fs.readFileSync(p, 'utf8')) : NaN);
+  const first = hostedOn(root, 'o4', { handlers });
+  let second: ReturnType<typeof hostedOn> | undefined;
+  t.after(async () => {
+    t.mock.restoreAll();
+    first.s.detach();
+    second?.s.detach();
+    await cleanUp(root, pid, child);
+  });
+  assert.equal(first.s.adopt(), true);
+  call('r1');
+  await until('r1 answered and its offset saved', () => answered.includes('r1') && saved(f.offset) === size());
+
+  // The poll's next write (3 digits) is held; meanwhile the daemon reads past 1000 (4 digits) and goes. The held write
+  // then lands, and the daemon exits before anything after the write: a truncate that never comes (w6519 on BEAST).
+  const open = fs.promises.open;
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let slow = 0;
+  let wrote = 0;
+  t.mock.method(fs.promises, 'open', async (...a: Parameters<typeof open>) => {
+    if (String(a[0]) !== f.offset) return open(...a);
+    slow++;
+    await held;
+    const file = await open(...a);
+    return new Proxy(file, {
+      get(target, key) {
+        if (key === 'truncate') return () => new Promise(() => {});
+        const v = Reflect.get(target, key, target);
+        if (key === 'write') return async (...w: unknown[]) => ((await (v as (...x: unknown[]) => Promise<unknown>).apply(target, w)), wrote++);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+  });
+  call('r2');
+  await until('r2 answered while its offset write is held', () => answered.includes('r2') && slow === 1);
+  call('r3', 'x'.repeat(1000));
+  await until('r3 answered', () => answered.includes('r3'));
+  const end = size();
+  assert.ok(end >= 1000, `read past 1000 (${end})`);
+  first.s.detach();
+  release();
+  await until('the held, older write landed', () => wrote === 1);
+  const next = Math.max(saved(f.offset) || 0, saved(f.offsetStop) || 0);
+  assert.equal(next, end, `the next daemon reads from where the going one stopped (${end}); daemon.offset holds ${JSON.stringify(fs.readFileSync(f.offset, 'utf8'))}`);
+  t.mock.restoreAll();
+
+  // And so it does: r4 only.
+  answered.length = 0;
+  second = hostedOn(root, 'o4', { handlers });
+  assert.equal(second.s.adopt(), true);
+  call('r4');
+  await until('r4 answered', () => answered.includes('r4'));
+  await new Promise((r) => setTimeout(r, 500));
+  assert.deepEqual(answered, ['r4'], 'nothing forwarded twice');
+});
+
+test('w6486: a failed offset write is tried again by the next poll',{ timeout: 60_000 }, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w6486-retry-'));
   const dir = path.join(root, 'o2');
   const { pid, child } = await fakeHost(dir);
@@ -422,17 +488,79 @@ test('w6486: a failed offset write is tried again by the next poll', { timeout: 
     h.s.detach();
     await cleanUp(root, pid, child);
   });
-  const writeFile = fs.promises.writeFile;
+  const open = fs.promises.open;
   let fails = 2;
-  t.mock.method(fs.promises, 'writeFile', async (...a: Parameters<typeof writeFile>) => {
+  t.mock.method(fs.promises, 'open', async (...a: Parameters<typeof open>) => {
     if (String(a[0]) === f.offset && fails > 0) {
       fails--;
       throw Object.assign(new Error('EBUSY: a scanner holds it'), { code: 'EBUSY' });
     }
-    return writeFile(...a);
+    return open(...a);
   });
   assert.equal(h.s.adopt(), true);
   fs.appendFileSync(f.out, JSON.stringify({ op: 'beat' }) + '\n');
   const size = fs.statSync(f.out).size;
   await until('saved once the disk lets it', () => fails === 0 && fs.existsSync(f.offset) && Number(fs.readFileSync(f.offset, 'utf8')) === size);
+});
+
+test('w6508: a poll write of an earlier start that lands after a new start never puts the old offset over the new one', { timeout: 60_000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w6508-restart-'));
+  const dir = path.join(root, 'o3');
+  const f = hostFiles(dir);
+  const saved = (p: string) => (fs.existsSync(p) ? Number(fs.readFileSync(p, 'utf8')) : NaN);
+  // A host for each start: a node working elsewhere, so the folder stays free for start() to remove (on Windows a
+  // process working in it would hold it).
+  const pids: number[] = [];
+  const h = hostedOn(root, 'o3', {
+    launch: () => {
+      const p = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { cwd: root, stdio: 'ignore', windowsHide: true });
+      pids.push(p.pid!);
+      return p.pid!;
+    },
+  });
+  t.after(async () => {
+    t.mock.restoreAll();
+    h.s.detach();
+    await cleanUp(root, ...pids);
+  });
+  const beat = () => fs.appendFileSync(f.out, JSON.stringify({ op: 'beat' }) + '\n');
+  h.s.send('the first start', 'orchestrator');
+  beat();
+  beat();
+  await until('the first start\'s offset saved', () => saved(f.offset) === fs.statSync(f.out).size && saved(f.offset) > 0);
+
+  // The next poll write is held before its open: still queued when the host starts again (the case on Linux, w6499).
+  const open = fs.promises.open;
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let slow = 0;
+  let landed = 0;
+  t.mock.method(fs.promises, 'open', async (...a: Parameters<typeof open>) => {
+    if (String(a[0]) !== f.offset) return open(...a);
+    if (slow++ === 0) {
+      await held;
+      landed++;
+    }
+    return open(...a);
+  });
+  beat();
+  const old = fs.statSync(f.out).size;
+  await until('the first start\'s next write is held', () => slow === 1);
+
+  // A new start: its folder made again, its offset '0'. Then the held write of the first start goes on.
+  (h.s as unknown as { start(c: { op: 'send'; text: string; from: string }): boolean }).start({ op: 'send', text: 'the second start', from: 'orchestrator' });
+  assert.equal(saved(f.offset), 0, 'the new start saves 0');
+  beat();
+  const end = fs.statSync(f.out).size;
+  await until('the last line of the new start read', () => (h.s as unknown as { tail?: { position: number } }).tail?.position === end);
+  assert.ok(end < old, 'the new start has read less than the old one had');
+
+  // The daemon goes while the first start's write is still held, then that write goes on: it must not land.
+  const offsetWrite = () => (h.s as unknown as { offsetWrite?: Promise<void> }).offsetWrite;
+  h.s.detach();
+  release();
+  await until('the held write went on', () => landed === 1 && !offsetWrite());
+  await new Promise((r) => setTimeout(r, 300));
+  const next = Math.max(saved(f.offset) || 0, saved(f.offsetStop) || 0);
+  assert.equal(next, end, `the next daemon reads from what the new start read (${end}), not from the first start's offset (${old})`);
 });
