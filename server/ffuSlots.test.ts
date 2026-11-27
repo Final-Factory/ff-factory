@@ -9,6 +9,7 @@ import { FFU_SERVER_GROUP, FFU_SLOTS_DEFAULT_MAX, ffuServerExes, ffuSlotMain, re
 import type { CleanupGuard } from './cleanup.ts';
 import { installLeftoverSettings, planInstallLeftovers, type ProcLite } from './installLeftovers.ts';
 import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
+import type { ProcPlace } from './procPlaces.ts';
 
 /**
  * w3764: ffu slots, per-machine ffu worktrees with warm cargo targets (machine/ffuSlots.ts), and the clean-up rule for their
@@ -185,7 +186,7 @@ function target(root: string, slot: string, ageH: number, incBytes = 10, depsByt
   return t;
 }
 
-async function plan(root: string, o: { low?: boolean; procs?: ProcLite[]; inUse?: string[]; settings?: Record<string, unknown>; scope?: 'cargo-cap' | 'ffu-slots' } = {}) {
+async function plan(root: string, o: { low?: boolean; procs?: ProcLite[]; places?: ProcPlace[]; inUse?: string[]; settings?: Record<string, unknown>; scope?: 'cargo-cap' | 'ffu-slots' } = {}) {
   const guard: CleanupGuard = { keep: [path.join(root, 'sandboxes')], inUse: o.inUse ?? [], home: path.join(root, 'home') };
   return planInstallLeftovers({
     root,
@@ -193,6 +194,7 @@ async function plan(root: string, o: { low?: boolean; procs?: ProcLite[]; inUse?
     tempRoots: [path.join(root, 'tmp')],
     guard,
     procs: o.procs ?? [],
+    places: o.places ?? [],
     settings: installLeftoverSettings(o.settings ?? {}),
     now: NOW,
     localWork: async () => false,
@@ -257,33 +259,119 @@ function unitTarget(root: string, slot: string, oldAgeH = 24 * 4) {
   return t;
 }
 
-test('w4258: a test binary running from a slot target no longer keeps it whole: units nothing current uses go, its own stay', async (t) => {
+test('w4258, w6240: a test binary running from a slot target keeps it whole now: no sweep, no trim, held or released', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w4258c-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
   const tg = unitTarget(root, 'slot1');
   fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot1', holder: 'live0004' }] }));
   const checkout = path.join(root, 'ffu-sandboxes', 'slot1', 'ffu');
-  // LothDesktop, 2026-11-15: `cargo test` in the checkout, past its build, running a long test binary from deps/.
+  const inUse = [path.join(root, 'tmp', 'ffa-live0004')];
+  // LothDesktop, 2026-11-15: `cargo test` in the checkout, past its build, running a long test binary from deps/. w4258 swept
+  // beside it; w6240 (biscuit slot4 lost 62 of 257 test binaries under a running test run) keeps the whole target.
   const procs: ProcLite[] = [
     { pid: 10, ppid: 1, cmd: `bash -c "cd ${checkout} && cargo test -p ffu-sim"` },
     { pid: 11, ppid: 10, cmd: 'cargo test -p ffu-sim' },
     { pid: 12, ppid: 11, cmd: `${tg}/debug/deps/golden-5555555555555555 --nocapture` },
   ];
-  const p = await plan(root, { procs, inUse: [path.join(root, 'tmp', 'ffa-live0004')] });
-  const it = p.items.find((i) => i.rule === 'ffu-slot-target');
-  assert.ok(it, `the sweep runs beside the test binary: ${JSON.stringify(p.items.map((i) => i.rule))} ${JSON.stringify((p as { held?: unknown }).held)}`);
-  assert.equal(rel(root, it.path), 'ffu-sandboxes/slot1/target', 'one item for the target...');
-  const gone = [...new Set((it.members ?? []).map((m) => /-([0-9a-f]{16})/.exec(path.basename(m))![1]))].sort();
-  assert.deepEqual(gone, ['2222222222222222', '4444444444444444'], '...whose members are the old sim and the dependency only it used');
-  assert.match(it.why, /stale build output/);
+  const p = await plan(root, { procs, inUse });
+  assert.deepEqual(ffuItems(root, p), [], 'nothing goes while a test binary runs from it');
+  // Low and over the cap: still nothing, and the kept target says why.
+  const low = await plan(root, { procs, inUse, low: true, settings: { ffuSlotTargetCapGB: 1000 / 1024 ** 3 } });
+  assert.deepEqual(ffuItems(root, low), []);
+  const kept = (low as { held?: { path: string; why: string }[] }).held?.find((h) => rel(root, h.path) === 'ffu-sandboxes/slot1/target');
+  assert.match(kept?.why ?? '', /a running process names it \(pid 1[02]/);
+  // Released (no live holder) with the binary still running: kept too.
+  const released = await plan(root, { procs: [procs[2]], low: true });
+  assert.deepEqual(ffuItems(root, released), []);
+  // Once nothing runs from it, the sweep takes the old sim and the dependency only it used, as before.
+  const idle = await plan(root, { inUse });
+  const it = idle.items.find((i) => i.rule === 'ffu-slot-target');
+  assert.ok(it?.members, JSON.stringify(idle.items.map((i) => i.rule)));
+  assert.deepEqual([...new Set(it.members.map((m) => /-([0-9a-f]{16})/.exec(path.basename(m))![1]))].sort(), ['2222222222222222', '4444444444444444']);
+});
 
-  // With a rustc running, the target is still building: nothing goes.
-  const building = await plan(root, { procs: [...procs, { pid: 13, ppid: 11, cmd: `rustc --crate-name ffu_sim --out-dir ${tg}/debug/deps` }], inUse: [path.join(root, 'tmp', 'ffa-live0004')] });
-  assert.deepEqual(ffuItems(root, building), []);
+/**
+ * w6240, the biscuit case (2026-11-27T00:23:32Z, ffu slot4): `cargo test --workspace --all-features --locked --no-run`, then
+ * `python3 tools/run_tests_parallel.py` in the checkout over the built test binaries. Cargo rewrote only the units that changed
+ * (here ffu_sim, 20 min ago, past the settle time); the alarms test binary was current but three hours old, and a pass over
+ * the cap narrowed the window to 15 min, which took it.
+ */
+function biscuitTarget(root: string) {
+  const tg = unitTarget(root, 'slot4');
+  const sim: FakeUnit = { name: 'ffu_sim', hash: '7777777777777777', fp: 12_000_000_000_000_000_013n, workspace: true, ageH: 0.33 };
+  const alarms: FakeUnit = { name: 'alarms', hash: 'bdd02d47710ae4cf', fp: 11_000_000_000_000_000_015n, deps: [sim], workspace: true, ageH: 3 };
+  const alarmsOld: FakeUnit = { name: 'alarms', hash: 'a0a0a0a0a0a0a0a0', fp: 10_000_000_000_000_000_017n, workspace: true, ageH: 24 * 4 };
+  for (const u of [sim, alarms, alarmsOld]) writeCargoUnit(tg, u, NOW);
+  const exe = (name: string, ageH: number) => {
+    const f = path.join(tg, 'debug', 'deps', name);
+    fs.writeFileSync(f, Buffer.alloc(500));
+    fs.chmodSync(f, 0o755);
+    fs.utimesSync(f, (NOW - ageH * HOUR) / 1000, (NOW - ageH * HOUR) / 1000);
+    return f;
+  };
+  const fresh = exe('alarms-bdd02d47710ae4cf', 3);
+  const old = exe('alarms-a0a0a0a0a0a0a0a0', 24 * 4);
+  for (const d of [tg, path.join(tg, 'debug'), ...['deps', '.fingerprint'].map((x) => path.join(tg, 'debug', x))]) fs.utimesSync(d, (NOW - 0.33 * HOUR) / 1000, (NOW - 0.33 * HOUR) / 1000);
+  fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot4', holder: '5d11b00b' }] }));
+  return { tg, fresh, old, checkout: path.join(root, 'ffu-sandboxes', 'slot4', 'ffu'), inUse: [path.join(root, 'tmp', 'ffa-5d11b00b')] };
+}
 
-  // A held target over the cap even after the sweep and its incremental cache stays whole while the test runs.
-  const over = await plan(root, { procs, inUse: [path.join(root, 'tmp', 'ffa-live0004')], settings: { ffuSlotTargetCapGB: 1000 / 1024 ** 3 } });
-  assert.ok(!over.items.some((i) => i.rule === 'ffu-slot-target' && !i.members && rel(root, i.path) === 'ffu-sandboxes/slot1/target'), 'never whole while held or running');
+test("w6240: the latest build's test binaries stay at the 15 min window however old; an older one of the same name goes", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w6240a-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const { fresh, old, inUse } = biscuitTarget(root);
+  // A low pass narrows the window to 15 min (installLeftovers.ts, the windows loop), as the cap did on biscuit.
+  const p = await plan(root, { low: true, inUse });
+  const it = p.items.find((i) => i.rule === 'ffu-slot-target' && i.members);
+  assert.ok(it?.members, JSON.stringify(p.items.map((i) => [i.rule, i.why])));
+  assert.match(it.why, /no workspace build of the last 15 min uses/);
+  const members = it.members.map((m) => path.basename(m));
+  assert.ok(!members.includes(path.basename(fresh)), `the current test binary stays: ${members.join(', ')}`);
+  assert.ok(!members.some((m) => m.includes('bdd02d47710ae4cf')), 'and its fingerprint and files with it');
+  assert.ok(!members.some((m) => m.includes('7777777777777777')), 'and the unit it was built from');
+  assert.ok(members.includes(path.basename(old)), 'the four-day-old binary of the same name still goes');
+});
+
+test('w6240: a test run whose only trace is its working folder in the checkout, or its children running from the target, keeps the slot whole; unreadable processes keep it', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w6240b-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const { tg, checkout, inUse } = biscuitTarget(root);
+  // The runner as biscuit had it: a relative script path, no target or checkout in its argv.
+  const runner: ProcLite = { pid: 900, ppid: 1, cmd: 'python3 tools/run_tests_parallel.py' };
+  const child: ProcLite = { pid: 901, ppid: 900, cmd: 'redteam_race-b158fae8531a6a53 --test-threads 1' };
+  const settings = { ffuSlotTargetCapGB: 1000 / 1024 ** 3 };
+  const before = await plan(root, { low: true, inUse, settings, procs: [runner], places: [{ pid: 900, exe: '/usr/bin/python3' }] });
+  assert.ok(ffuItems(root, before).length, 'without the working folder nothing names the run: the sweep goes ahead (the bug)');
+  const byCwd = await plan(root, { low: true, inUse, settings, procs: [runner], places: [{ pid: 900, exe: '/usr/bin/python3', cwd: checkout }] });
+  assert.deepEqual(ffuItems(root, byCwd), [], 'its working folder in the checkout keeps the target whole');
+  assert.match((byCwd as { held?: { why: string }[] }).held?.[0]?.why ?? '', /a process works in it \(pid 900, working folder .*python3 tools\/run_tests_parallel\.py/);
+  const byExe = await plan(root, { low: true, inUse, settings, procs: [runner, child], places: [{ pid: 901, exe: path.join(tg, 'debug', 'deps', 'redteam_race-b158fae8531a6a53') }] });
+  assert.deepEqual(ffuItems(root, byExe), [], "a child's executable in the target keeps it");
+  const unread = await planInstallLeftovers({
+    root,
+    sandboxes: [],
+    tempRoots: [path.join(root, 'tmp')],
+    guard: { keep: [path.join(root, 'sandboxes')], inUse, home: path.join(root, 'home') },
+    procs: [runner],
+    places: async () => undefined,
+    settings: installLeftoverSettings(settings),
+    now: NOW,
+    localWork: async () => false,
+    low: true,
+    heldMinBytes: 0,
+    alive: () => true,
+    runnerLog: () => undefined,
+  });
+  assert.deepEqual(ffuItems(root, unread), [], 'places that cannot be read keep it');
+  assert.match(unread.held?.find((h) => /slot4/.test(h.path))?.why ?? '', /could not be read, so a program running from it cannot be ruled out/);
+
+  // The re-check before the removal sees a run that started after the plan, for a sweep item too (not only a first-step one).
+  const { ffuSlotBusyNow } = await import('./installLeftovers.ts');
+  const sweep = { path: tg, rule: 'ffu-slot-target', why: 'stale build output', members: [path.join(tg, 'debug', 'deps', 'x')] };
+  const guard = () => ({ keep: [], inUse, home: path.join(root, 'home') });
+  assert.equal(await ffuSlotBusyNow(root, async () => [], guard, () => NOW, async () => [])(sweep), undefined, 'nothing runs: it goes');
+  assert.match((await ffuSlotBusyNow(root, async () => [runner], guard, () => NOW, async () => [{ pid: 900, cwd: checkout }])(sweep)) ?? '', /^since the plan: a process works in it/);
+  assert.match((await ffuSlotBusyNow(root, async () => [runner], guard, () => NOW, async () => undefined)(sweep)) ?? '', /could not be read/);
 });
 
 test("w4258: a slot holder's private cargo target in its temp folder goes once cargo is done with it; another worker's small one stays", async (t) => {
@@ -671,13 +759,13 @@ test('w6044: ffuSlotBusyNow keeps a target whose slot was taken, or that a build
   const it = { path: t1, rule: 'ffu-slot-target', why: 'test', ffuSlot: { id: 'slot1', mark: '@@' } };
   let procs: ProcLite[] | undefined = [];
   const guard = { keep: [], inUse: [] as string[], home: path.join(root, 'home') };
-  const check = ffuSlotBusyNow(root, async () => procs, () => guard, () => NOW);
+  const check = ffuSlotBusyNow(root, async () => procs, () => guard, () => NOW, async () => []);
   assert.equal(await check(it), undefined, 'unchanged: it goes');
   assert.equal(await check({ path: t1, rule: 'ffu-runner-work', why: 'x' }), undefined, 'another item passes');
   procs = [{ pid: 7, ppid: 1, cmd: `${t1}/debug/deps/golden-1 --test-threads 4` } as ProcLite];
-  assert.match((await check(it)) ?? '', /a program runs from it since the plan/);
+  assert.match((await check(it)) ?? '', /since the plan: a running process names it/);
   procs = [{ pid: 8, ppid: 1, cmd: `cargo build --manifest-path ${path.join(root, 'ffu-sandboxes', 'slot1', 'ffu', 'Cargo.toml')}` } as ProcLite];
-  assert.match((await check(it)) ?? '', /a build started in it since the plan/);
+  assert.match((await check(it)) ?? '', /since the plan: a running process names it/, 'a cargo build in the checkout names the slot (w6240)');
   procs = undefined;
   assert.match((await check(it)) ?? '', /process list could not be read/);
   procs = [];

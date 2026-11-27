@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { runOffThread } from './hostProbe.ts';
 import { trustedGh } from '../machine/evidenceGate.ts';
 import { simpleCommands } from './waitGuard.ts';
 
@@ -81,9 +81,9 @@ export interface RerunTarget {
  * messages and log. A failure answers `{ error }`.
  */
 export interface RerunReader {
-  jobs(t: RerunTarget, cwd: string | undefined, env?: Record<string, string | undefined>): RerunJob[] | { error: string };
-  annotations(repo: string | undefined, job: number, cwd: string | undefined, env?: Record<string, string | undefined>): string[] | { error: string };
-  log(repo: string | undefined, job: number, cwd: string | undefined, env?: Record<string, string | undefined>): string | { error: string };
+  jobs(t: RerunTarget, cwd: string | undefined, env?: Record<string, string | undefined>): Maybe<RerunJob[] | { error: string }>;
+  annotations(repo: string | undefined, job: number, cwd: string | undefined, env?: Record<string, string | undefined>): Maybe<string[] | { error: string }>;
+  log(repo: string | undefined, job: number, cwd: string | undefined, env?: Record<string, string | undefined>): Maybe<string | { error: string }>;
 }
 
 export const RULE = '"a flaky test gets its cause fixed. Never rerun it to get green, and never lengthen a timeout on its own."';
@@ -179,8 +179,16 @@ export function runnerStopped(log: string): boolean {
 /** A job the rerun starts again because it failed (a cancelled or skipped job is not a red test). */
 const FAILED = new Set(['failure', 'timed_out']);
 
-function gh(args: string[], cwd: string | undefined, env?: Record<string, string | undefined>): string {
-  return execFileSync(trustedGh(), args, { cwd, encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, ...env } as NodeJS.ProcessEnv });
+type Maybe<T> = T | Promise<T>;
+
+/**
+ * w6237: the trusted gh on the probe thread (server/hostProbe.ts): this check runs in the portal on every `gh run rerun`.
+ * Its output, or a throw carrying gh's stderr (what readJobLog and why() read).
+ */
+async function gh(args: string[], cwd: string | undefined, env?: Record<string, string | undefined>, timeoutMs = 20_000, maxBuffer?: number): Promise<string> {
+  const r = await runOffThread(trustedGh(), args, timeoutMs, { ...(cwd ? { cwd } : {}), env: { ...process.env, ...env } as NodeJS.ProcessEnv, ...(maxBuffer ? { maxBuffer } : {}) });
+  if (r.code !== 0) throw Object.assign(new Error(r.stderr.trim() || `gh exited ${r.code}`), { stderr: r.stderr });
+  return r.stdout;
 }
 
 const why = (e: unknown) => {
@@ -190,29 +198,29 @@ const why = (e: unknown) => {
 
 /** RerunReader through gh api; `{owner}/{repo}` is gh's own placeholder for the cwd's repository. */
 export const ghRerunReader: RerunReader = {
-  jobs(t, cwd, env) {
+  async jobs(t, cwd, env) {
     const repo = t.repo ?? '{owner}/{repo}';
     try {
       if (t.job) {
-        const j = JSON.parse(gh(['api', `repos/${repo}/actions/jobs/${t.job}`], cwd, env)) as RerunJob;
+        const j = JSON.parse(await gh(['api', `repos/${repo}/actions/jobs/${t.job}`], cwd, env)) as RerunJob;
         return [{ id: j.id, name: j.name, conclusion: j.conclusion, steps: (j.steps ?? []).map((s) => ({ name: s.name, status: s.status, conclusion: s.conclusion })), run_attempt: j.run_attempt, runner_name: j.runner_name, completed_at: j.completed_at }];
       }
-      const out = gh(['api', '--paginate', `repos/${repo}/actions/runs/${t.run}/jobs?per_page=100`, '--jq', '.jobs[] | {id, name, conclusion, run_attempt, runner_name, completed_at, steps: [(.steps // [])[] | {name, status, conclusion}]}'], cwd, env);
+      const out = await gh(['api', '--paginate', `repos/${repo}/actions/runs/${t.run}/jobs?per_page=100`, '--jq', '.jobs[] | {id, name, conclusion, run_attempt, runner_name, completed_at, steps: [(.steps // [])[] | {name, status, conclusion}]}'], cwd, env);
       return out.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l) as RerunJob);
     } catch (e) {
       return { error: why(e) };
     }
   },
-  annotations(repo, job, cwd, env) {
+  async annotations(repo, job, cwd, env) {
     try {
-      const out = gh(['api', '--paginate', `repos/${repo ?? '{owner}/{repo}'}/check-runs/${job}/annotations`, '--jq', '.[].message'], cwd, env);
+      const out = await gh(['api', '--paginate', `repos/${repo ?? '{owner}/{repo}'}/check-runs/${job}/annotations`, '--jq', '.[].message'], cwd, env);
       return out.split('\n').filter((l) => l.trim());
     } catch (e) {
       return { error: why(e) };
     }
   },
   log(repo, job, cwd, env) {
-    return readJobLog(repo, job, (args) => execFileSync(trustedGh(), args, { cwd, encoding: 'utf8', timeout: 30_000, maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, ...env } as NodeJS.ProcessEnv }));
+    return readJobLog(repo, job, (args) => gh(args, cwd, env, 30_000, 256 * 1024 * 1024));
   },
 };
 
@@ -221,15 +229,15 @@ export const ghRerunReader: RerunReader = {
  * every cargo log has: "the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway".
  * An older gh (biscuit's 2.46) has no such flag, so it is passed only when gh asks for it. Exported for tests.
  */
-export function readJobLog(repo: string | undefined, job: number, run: (args: string[]) => string): string | { error: string } {
+export async function readJobLog(repo: string | undefined, job: number, run: (args: string[]) => Maybe<string>): Promise<string | { error: string }> {
   const url = `repos/${repo ?? '{owner}/{repo}'}/actions/jobs/${job}/logs`;
   try {
-    return run(['api', url]);
+    return await run(['api', url]);
   } catch (e) {
     if (!/allow-escape-sequences/.test(why(e))) return { error: why(e) };
   }
   try {
-    return run(['api', '--allow-escape-sequences', url]);
+    return await run(['api', '--allow-escape-sequences', url]);
   } catch (e) {
     return { error: why(e) };
   }
@@ -319,7 +327,7 @@ export async function checkFlakyRerun(cmd: string, ctx: { cwd?: string; env?: Re
   for (const t of targets) {
     const what = t.job ? `job ${t.job}` : `run ${t.run}`;
     const where = t.repo ? ` in ${t.repo}` : '';
-    const jobs = read.jobs(t, ctx.cwd, ctx.env);
+    const jobs = await read.jobs(t, ctx.cwd, ctx.env);
     if (!Array.isArray(jobs))
       return `Refused (w3784): ${what}${where} could not be read (${jobs.error}), so this rerun cannot be checked against Ben's rule ${RULE} ${ROUTE} Read the jobs with \`gh api repos/<owner>/<repo>/actions/runs/<id>/jobs\` and \`gh run view <id> --log-failed\`.`;
     const failed = jobs.filter((j) => FAILED.has(String(j.conclusion)));
@@ -328,7 +336,7 @@ export async function checkFlakyRerun(cmd: string, ctx: { cwd?: string; env?: Re
       if (!step) continue;
       const of = `"${j.name}" (job ${j.id})${t.job ? '' : ` of run ${t.run}`}${where}`;
       // w3836: once, a runner that ran out of a resource; a second attempt means the fault is the job's, or the machine's.
-      const log = read.log(t.repo, j.id, ctx.cwd, ctx.env);
+      const log = await read.log(t.repo, j.id, ctx.cwd, ctx.env);
       // w5271: the runner's service was stopped under the step (exit 143 and its stop annotation): the runner died.
       if (typeof log === 'string' && runnerStopped(log)) continue;
       // w6140: a SIGKILL beside the runner's memory pressure is the Linux OOM killer: the same one-time rerun.
@@ -346,10 +354,10 @@ export async function checkFlakyRerun(cmd: string, ctx: { cwd?: string; env?: Re
       const of = `"${j.name}" (job ${j.id})${t.job ? '' : ` of run ${t.run}`}${where}`;
       // w4136: a failed (not timed-out) job whose step never finished, or whose log is gone, died with its runner.
       if (j.conclusion === 'failure' && unfinished(j)) continue;
-      const notes = read.annotations(t.repo, j.id, ctx.cwd, ctx.env);
+      const notes = await read.annotations(t.repo, j.id, ctx.cwd, ctx.env);
       if (Array.isArray(notes) && notes.some((n) => LOST.test(n))) continue;
       if (j.conclusion === 'failure') {
-        const log = read.log(t.repo, j.id, ctx.cwd, ctx.env);
+        const log = await read.log(t.repo, j.id, ctx.cwd, ctx.env);
         if (typeof log !== 'string' && LOG_MISSING.test(log.error)) continue;
       }
       let drop: string | undefined | { error: string } = undefined;

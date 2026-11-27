@@ -1369,6 +1369,67 @@ agents without one stay at the daemon's level (Medium on Windows) and never wait
 (it fails closed above, holding only sandbox workers), so a daemon that fails after an update failed for another reason, and the fence setting stays
 as the update set it.
 
+### 4.4 Per-slot caches and the players broker (w5615, stage 2 of w5544)
+
+lothsahn approved stages 1-3 of the per-slot isolation design (r384, w5544): "per-slot repos, read-only shared caches and
+tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sharedLock` (`ops_worker` `machine_update`
+`shared_lock`: `off`, `warn`, `on`; off when unset; decided once per daemon process, machine/slotCaches.ts):
+
+- **Each sandbox gets its own clones of the tool caches** at `<root>/cache/slots/<sandbox>/<tool>` for uv, pip, npm, nuget,
+  upm, dotnet and ms-playwright (`SLOT_CACHE_TOOLS`). The daemon makes them from the shared seed `<root>/cache/<tool>` with
+  `server/proc.ts` `copyTree`: an APFS clone (`cp -c`) on a Mac, `cp --reflink=auto` on Linux (a full copy where the disk has
+  no reflink), the Windows copy engine on a Dev Drive (block clone on ReFS). A clone is made only while its sandbox is idle
+  (no live agent, no editor), one sandbox per 10-minute tick, under `.ff-new-<tool>` and renamed into place; the marker
+  `.ff-slot-cache.json` is written last. A clone older than a day is merged back into the seed and made again.
+- **Every copy runs with a worker's rights, never the daemon's** (machine/workerCopy.ts, review w6212 B1): a worker can
+  plant a link or junction in its build or its cache clone, and `cp -R`, `cp -a` and Copy-Item would follow or keep it with
+  the daemon's reads (Copy-Item follows a junction: measured on BEAST by the reviewer). So the copy runs inside the workers'
+  Seatbelt profile with its read rules on (macOS), under ff-landlock.py with the write lock and its read half (Linux), or in
+  the Low node with a walk that never enters a link (Windows; with no Low node it refuses rather than copy at Medium). A
+  cache copy keeps a link as a link (uv's cache holds 98 symlinks, measured on m5); a player copy refuses one before and
+  after (a built player holds none: measured on m5's `players/slot1-0`).
+- **No write through a link** (w6212 B2): before it writes or deletes in `players/<slot>`, `cache/slots/<sandbox>` or a
+  seed folder, the daemon checks the folder is a plain folder at its own path (`plainDirAt`), makes missing folders one level
+  at a time below checked ones, and writes files by a fresh name and a rename (`writeFileSafe`), never through a link at the
+  name. A link is what lstat or the entry's Dirent in its parent says is one, and a real path is
+  `realpathSync.native`'s: a `mklink /J` junction made in a worker session stores `\??\Global\F:\...`, which lstat and the JS
+  realpath miss (review w6247, measured on BEAST at Low); `machine/workerCopyJunction.test.ts` makes one on Windows.
+- **Merge-back** copies what the slot downloaded and the seed lacks (uv `archive-v*` entries and wheels, pip wheels, npm
+  `_cacache`, nuget package folders with `.nupkg.metadata`, upm files, finished Playwright browsers) into the seed through a
+  `.ff-merge` stage beside the clone and a rename (a folder) or a hard link then unlink (a file, which fails rather than
+  replace one, w6212 L3). It never replaces a seed entry, leaves an entry touched in the last minute, and drops a file that
+  is no longer a single plain file after the copy. Under `on` merge-back is still a path from one slot's downloads into every
+  slot's seed (w6212 M3); the enforce change has to decide what it trusts there (for example only entries the tool's own
+  index names, or a hash check), and until then `on` runs as `warn`.
+- **The env**: every sandbox agent (machine/daemon.ts `runSpec`) and editor (machine/sandboxes.ts `sandboxEditorEnv`) gets
+  `UV_CACHE_DIR`, `PIP_CACHE_DIR`, `npm_config_cache`, `NUGET_PACKAGES`, `UPM_CACHE_ROOT`, `DOTNET_CLI_HOME` and
+  `PLAYWRIGHT_BROWSERS_PATH` pointing at its clones (under `warn` only once a tool's clone is made; under `on` always), its
+  own `FF_DETERMINISM_AUDIT_DIR` (`cache/slots/<sandbox>/determinism-audit`), and `FF_PLAYER_BROKER=1`.
+- **Mailboxes per slot**: the procs broker (machine/procsBroker.ts) reads `unity-slots/procs/<sandbox>/` and the shared
+  mailbox, answering each ask in the folder it came from; `ff-leftovers` writes into its own sandbox's folder. The unity-slots
+  queue itself needs no per-slot folder: it already goes through the daemon's RPC into the daemon's own folder (w5545).
+- **The players broker** (machine/playersBroker.ts, machine/playersLaunch.ts): RPC calls `players/install` {player, sha,
+  peer}, `players/launch` {peer, args, config}, `players/release` {lease} and `players/status`. The daemon copies the build
+  into the caller's own `players/<sandbox>-<peer>/player` (a clone, never a hard link, so the slot's files are not the
+  worker's), writes `slot.json` as `player_slots.py` does, and starts the player itself: in the player write fence on Linux and
+  macOS (machine/playerFence.ts), through the Low node copy on Windows (never at the daemon's Medium), with no credential in
+  its environment. The slot comes from the caller's token, never the body. The source must be in the caller's sandbox, its
+  own temp folder (`<tempDir>/ffa-<session>`, not all of `<root>/tmp`: w6212 M1) or `<root>/nightly`, and so must a
+  `-logFile` folder the player may write. A launch onto a slot whose player still runs is refused (w6212 L1).
+- **What `warn` watches**: the seeds, `players`, `seed` and `tools` (`sharedLockedFolders`), each folder and its first level
+  (not recursive), one daemon log line per entry an hour: `shared lock (warn): <path> changed and the daemon did not write it`.
+- **What `on` adds** (the enforce PR, separate): those folders become read-only to sandbox workers, a Medium No-Write-Up label
+  on Windows (never an ACE on a folder a Low worker uses, w5599) and out of the Seatbelt and Landlock write sets on macOS and
+  Linux. `on` with a sandbox that has no clones yet holds to `warn` for that daemon run and logs why. In this release `on`
+  enforces nothing and runs as `warn`, and its log line says so (w6212 M2).
+- **Not watched yet** (w6212 L4): a sandbox counts as idle with no live agent and no editor; a `unity-slot run` batch job
+  running in it is not counted, so a clone can be made or refreshed while one runs; the enforce change counts them.
+- **Left shared and writable**: `cache/uv-tools`, `cache/uv-bin`, `cache/xdg` and `cache/cargo` (cargo is the next stage).
+- **Way back**: `shared_lock off` and the daemon restart the update makes (the link job and installer run outside every fence,
+  4.3). The clones stay on disk, unused; the env goes back to the shared caches at the next agent start.
+- **Measured (m5, 2026-11-26)**: `uv run --with pillow` warm on the shared cache 0.042-0.044 s (first run 0.145 s); an APFS
+  clone of `cache/uv` (331 MB) 1.62 s; from the clone 0.067 s first, then 0.042-0.044 s.
+
 ## 5. Migration
 
 ### 5.1 Per machine

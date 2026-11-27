@@ -37,6 +37,9 @@ on:
       - 'server/elevation.ts'
       - 'server/firefox.test.ts'
       - 'server/hostWatch.test.ts'
+      - 'server/junctionDelete.test.ts'
+      - 'server/junctionRmWarn.test.ts'
+      - 'server/junctionRmWarn.ts'
       - 'server/leftovers.test.ts'
       - 'server/machineDeploy.ts'
       - 'server/machineDeployWin.test.ts'
@@ -55,8 +58,13 @@ on:
       - 'server/ownLeftovers.test.ts'
       - 'server/ownLeftovers.ts'
       - 'server/proc.ts'
+      - 'server/remoteGuard.test.ts'
+      - 'server/remoteGuard.ts'
       - 'server/republish.test.ts'
       - 'server/safeGit.ts'
+      - 'server/saveWork.ts'
+      - 'server/switchBranch.ts'
+      - 'scripts/testEnv.ts'
       - 'server/sandboxes.test.ts'
       - 'server/sandboxes.ts'
       - 'server/toolsLabelsWin.test.ts'
@@ -126,7 +134,8 @@ jobs:
       - if: github.event_name == 'schedule' || inputs.all
         run: npm ci --prefix web --no-audit --no-fund
       - name: The tests that need Windows (.github/windows-tests.txt), or every test once a day
-        # The listed files take about 2 min; a quarter of the whole suite about 4 (w5810).
+        # The listed files take about 2 min; a quarter of the whole suite about 4 (w5810). scripts/testEnv.ts first, as
+        # `npm test` loads it on a worker's machine (w6273): with it no test's git asks the runner's credential manager.
         timeout-minutes: 17
         shell: bash
         env:
@@ -141,7 +150,7 @@ jobs:
             mapfile -t files < <(grep -vE '^\s*(#|$)' .github/windows-tests.txt | cut -d'|' -f1 | tr -d ' ')
           fi
           echo "${#files[@]} test files ${shard[*]}"
-          node scripts/test-watchdog.ts --minutes $([ "$ALL" = true ] && echo 15 || echo 9) -- node --test --test-timeout=300000 "${shard[@]}" --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout --test-reporter=./scripts/test-file-times.ts --test-reporter-destination=stdout "${files[@]}"
+          node scripts/test-watchdog.ts --minutes $([ "$ALL" = true ] && echo 15 || echo 9) -- node --import ./scripts/testEnv.ts --test --test-timeout=300000 "${shard[@]}" --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout --test-reporter=./scripts/test-file-times.ts --test-reporter-destination=stdout "${files[@]}"
       - name: Test files' time (the slowest, and a file whose process outlives its tests)
         if: always() && (github.event_name == 'schedule' || inputs.all)
         shell: bash

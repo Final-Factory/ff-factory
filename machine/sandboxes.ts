@@ -2,6 +2,7 @@
 // clone, each on its own branch in the configured sandbox root, with its own Library (seeded warm) and at most one
 // Unity editor. The portal keeps the labels and agents; this keeps the folders, git and the editors, and reports every
 // change as a snapshot. State survives daemon restarts in <app_dir>/sandboxes.json.
+import { slotCacheEnv, type SharedLockSetting } from './slotCaches.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { branchProblem, pickEditorLog, pruneEditorLogs, slugify, withBaseRepoLock } from '../server/sandboxes.ts';
@@ -313,10 +314,11 @@ export async function treeBytes(dir: string): Promise<number | undefined> {
  * (daemon.json `editorTmpdir` "on"), its own TMPDIR inside the root on macOS and Linux (sharedCaches.ts editorTmpdirEnv).
  * No root: none.
  */
-export function sandboxEditorEnv(env: NodeJS.ProcessEnv, sandbox: string, root: string | undefined, tmpdir = false, platform: NodeJS.Platform = process.platform): Record<string, string> {
+export function sandboxEditorEnv(env: NodeJS.ProcessEnv, sandbox: string, root: string | undefined, tmpdir = false, platform: NodeJS.Platform = process.platform, sharedLock: SharedLockSetting = 'off'): Record<string, string> {
   // w6000: without its own TMPDIR the editor gets the system temp folder back, not the daemon's (<root>/tmp-daemon).
   const own = editorTmpdirEnv(root, sandbox, tmpdir, platform);
-  return { ...sandboxGameDataEnv(env, sandbox), ...sandboxUvEnv(env, root), ...(own.TMPDIR ? own : editorSystemTempEnv(env, platform)) };
+  // w5615: with the shared lock, the sandbox's own clones of the tool caches and its own determinism-audit folder.
+  return { ...sandboxGameDataEnv(env, sandbox), ...sandboxUvEnv(env, root), ...slotCacheEnv(root, sandbox, sharedLock, platform), ...(own.TMPDIR ? own : editorSystemTempEnv(env, platform)) };
 }
 
 /**
@@ -339,7 +341,7 @@ export function editorLaunchEnv(env: Record<string, string>, f: { mkdirSync: typ
 }
 
 /** The real machine: git in the main clone, robocopy/cp for the Library, the daemon's Unity code. */
-export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined, fence?: () => EditorFence | undefined, root?: string, editorTmpdir = false): PoolDeps {
+export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined, fence?: () => EditorFence | undefined, root?: string, editorTmpdir = false, sharedLock: () => SharedLockSetting = () => 'off'): PoolDeps {
   // One process listing serves every sandbox's watch in a look (a CIM query costs seconds on Windows).
   const base = realDeps(platform, log);
   let cached: { at: number; p: Promise<Proc[]> } | undefined;
@@ -364,7 +366,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
     },
     procs,
     editor: (sb, logFile, report) => {
-      const env = sandboxEditorEnv(process.env, sb.id, root, editorTmpdir, platform);
+      const env = sandboxEditorEnv(process.env, sb.id, root, editorTmpdir, platform, sharedLock());
       if (editorTmpdir && platform !== 'win32' && !editorTmpdirEnv(root, sb.id, true, platform).TMPDIR) log(`sandbox ${sb.id}: editorTmpdir is on but ${root ?? 'no root'} is too long for it (or unset): the editor keeps the system temp folder`);
       const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence, env: () => editorLaunchEnv(env, fs, (line) => log(`sandbox ${sb.id}: ${line}`)) });
       return { unity, watch: new MacUnityWatch(unity, report, { log }) };

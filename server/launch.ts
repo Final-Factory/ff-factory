@@ -646,7 +646,7 @@ export function standingGitEnv(prior: Record<string, string | undefined>, platfo
  * credentials for spec.login); `editorRunning`, for a machine sandbox, says whether its editor is up (raw branch switches are
  * refused then).
  */
-export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogTool, ToolHandler>>, processEnv: NodeJS.ProcessEnv = process.env, editorRunning?: () => boolean): Options {
+export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogTool, ToolHandler>>, processEnv: NodeJS.ProcessEnv = process.env, editorRunning?: () => boolean, junctionRmLog?: (line: string) => void): Options {
   // w5305: the worker root's own Claude Code folder once its plugins are in, else the legacy ~/.claude (server/claudeHome.ts).
   // w5543: a launch that is not a sandbox's runs at Medium, outside every worker fence: the Medium agents' folder instead.
   const baseEnv = agentClaudeEnv(spec.login ? usageEnv(processEnv) : processEnv, spec.env, undefined, !spec.sandbox);
@@ -682,6 +682,8 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       mainClone: g.mainClone,
       ...(g.privacy ? { privacy: privacyContext(g, agentEnv) } : {}),
       editorRunning,
+      // w6266: the junction rm warning's line goes to a log that outlasts the host (the 'junctionRm' signal), not host.log.
+      ...(junctionRmLog ? { log: junctionRmLog } : {}),
       // w4136: a rerun of a job whose runner's machine dropped from the portal at the job's end passes (server/rerunGuard.ts).
       ...(handlers.portal_logs ? { machineDrops: portalDropReader(handlers.portal_logs) } : {}),
       // The shell's own variables, so `cd $TMPDIR/ffbox && git push origin HEAD:master` is read where it goes (w1132).

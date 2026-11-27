@@ -45,6 +45,14 @@ export const KEPT_FF_ENV = new Set([
   'FF_GAME_REPO',
   'FF_TEST_ENV_CLEAN',
 ]);
+/** What the guard sets for git in every test (w6273, below): no credential helper of the machine's, no prompt. */
+export const TEST_GIT_ENV: Record<string, string> = {
+  GIT_CONFIG_COUNT: '1',
+  GIT_CONFIG_KEY_0: 'credential.helper',
+  GIT_CONFIG_VALUE_0: '',
+  GIT_TERMINAL_PROMPT: '0',
+  GCM_INTERACTIVE: 'never',
+};
 const SESSION_ENV = /^(GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+)|CLAUDECODE|CLAUDE_PID|CLAUDE_EFFORT|CLAUDE_AGENT_SDK_VERSION|CLAUDE_CODE_(?!GIT_BASH_PATH$)[A-Z_]+)$/;
 export function sessionEnvNames(env: Record<string, string | undefined>): string[] {
   return Object.keys(env).filter((k) => (k.startsWith('FF_') && !KEPT_FF_ENV.has(k)) || SESSION_ENV.test(k));
@@ -54,5 +62,14 @@ export function sessionEnvNames(env: Record<string, string | undefined>): string
 // to the real ff-leftovers CLI in w5300RemoveMany), so it must not lose them here (w5915: they were scrubbed there too).
 if (!process.env.FF_TEST_ENV_CLEAN) {
   for (const name of sessionEnvNames(process.env)) delete process.env[name];
+  // w6273: no git a test starts asks this machine for a credential or waits on a prompt. With the session's helper gone,
+  // a test's git that reaches github.com (git-lfs's pre-push hook runs `ls-remote` on the fetch URL, remoteGuard.test.ts)
+  // asked the system's own helper: Git for Windows' `helper-selector`, a picker window nobody sees, waited forever on
+  // LothDesktop; a `manager` with a stored login would hand that person's credentials to the call. An empty
+  // `credential.helper` in command scope (read last) clears every helper the system and user files name (git's
+  // credential.c), and with no terminal prompt a call that needs a login fails at once. A test that wants a helper sets one
+  // in its own GIT_CONFIG_* entries or `-c`, which come after this one.
+  Object.assign(process.env, TEST_GIT_ENV);
+  for (const name of ['GIT_ASKPASS', 'SSH_ASKPASS']) delete process.env[name];
   process.env.FF_TEST_ENV_CLEAN = '1';
 }

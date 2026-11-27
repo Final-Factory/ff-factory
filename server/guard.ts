@@ -1,5 +1,5 @@
-import { execFileSync, spawnSync } from 'node:child_process';
-import { gitFenceSync } from './safeGit.ts';
+import { gitOffThread } from './safeGit.ts';
+import { runOffThread } from './hostProbe.ts';
 import { STALE_EVIDENCE, TRUSTED_GIT, checkoutScript, evidenceGated, evidenceRefusal, evidenceVerdict, noScriptRefusal, refreshTrustedCheckout, trustedAgentsCheckout, trustedAppDir, trustedEvidenceRun, trustedGh, trustedGit } from '../machine/evidenceGate.ts';
 import { repoIsPublic } from './publicGit.ts';
 import { checkStrayWrite } from './strayWrite.ts';
@@ -8,6 +8,7 @@ import { daemonShell, daemonToolProblem, type DaemonReads } from './daemonReads.
 import { readTargets } from './secretGuard.ts';
 import { checkOffDriveScan, checkOutsideRootDelete } from './rootFence.ts';
 import { checkSystemTempWrite } from './tmpWriteFence.ts';
+import { junctionRmLogLine, junctionRmMessage, junctionRmScan } from './junctionRmWarn.ts';
 import { headBranch, isUrgentBranch } from './releaseHandBack.ts';
 import fs from 'node:fs';
 import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, type MainCloneGrant } from './mainCloneGuard.ts';
@@ -127,6 +128,13 @@ export function sandboxGuard(opts: {
    */
   tmpWriteEnforce?: boolean;
   /**
+   * w6266: on Windows, a Bash `rm -r` whose target folder holds a link (a junction Git Bash's rm deletes through) is logged
+   * and the agent warned; the command still runs (server/junctionRmWarn.ts). Absent: the platform decides (on for win32).
+   */
+  junctionRmWarn?: boolean;
+  /** Where the guard's warn lines go. Default: console.log with a timestamp (the daemon's log). */
+  log?: (line: string) => void;
+  /**
    * w3670: the machine daemon's folder (a protected path) and its install root: the worker READS the daemon's diagnostic files
    * there (server/daemonReads.ts DAEMON_READ_ALLOW), every other read there and of the install's secrets folder is refused, and
    * writes stay refused. Absent: the folder is only a protected path.
@@ -217,7 +225,20 @@ export function sandboxGuard(opts: {
       ? checkTiming(tool, args, { project: opts.sandboxPath, cwd, env: opts.env, root: opts.workerRoot, session: opts.session, sandbox: opts.sandboxId, host: opts.host, ownHold: opts.timingHold })
       : undefined;
 
-  return async (input) => {
+  const junctionWarn = opts.junctionRmWarn ?? (opts.platform ?? process.platform) === 'win32';
+  const log = opts.log ?? ((line: string) => console.log(`${new Date().toISOString()} ${line}`));
+  // w6266: the warning rides on a command every other check let through, never on a refusal, and never refuses itself.
+  const warned: HookCallback = async (input, toolUseID, o) => {
+    const r = await check(input, toolUseID, o);
+    if (!junctionWarn || input.hook_event_name !== 'PreToolUse' || input.tool_name !== 'Bash' || Object.keys(r).length) return r;
+    const args = (input.tool_input ?? {}) as Record<string, unknown>;
+    const scan = junctionRmScan(String(args.command ?? ''), { cwd: input.cwd || opts.sandboxPath, env: opts.env });
+    const line = junctionRmLogLine(opts.session ?? opts.env?.FF_SESSION_ID, scan);
+    if (line) log(line);
+    return scan.found.length ? { hookSpecificOutput: { hookEventName: 'PreToolUse' as const, additionalContext: junctionRmMessage(scan.found) } } : r;
+  };
+
+  const check: HookCallback = async (input) => {
     if (input.hook_event_name !== 'PreToolUse') return {};
     const tool = input.tool_name;
     const args = (input.tool_input ?? {}) as Record<string, unknown>;
@@ -243,7 +264,7 @@ export function sandboxGuard(opts: {
       // first: it may ask the portal whether the runner's machine went down (w4136), which is async.
       const flakyRerun = await checkFlakyRerun(cmd, { cwd: input.cwd || opts.sandboxPath, env: opts.env, reader: opts.rerunJobs, drops: opts.machineDrops });
       const reason =
-        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, branch: opts.branch ?? ((d) => (fs.existsSync(d) ? repoBranch(d) : undefined)), prBase: opts.prBase ?? ghPrBase, evidence: opts.evidence ?? ghEvidence, publicIdentity: opts.publicIdentity, env: opts.env }) ??
+        (await checkShellAsync(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, branch: opts.branch ?? ((d) => (fs.existsSync(d) ? repoBranch(d) : undefined)), prBase: opts.prBase ?? ghPrBase, evidence: opts.evidence ?? ghEvidence, publicIdentity: opts.publicIdentity, env: opts.env })) ??
         (opts.privacy ? checkPrivacyShell(withoutTextArgs(cmd), { ...opts.privacy, cwd: input.cwd || opts.sandboxPath }) : undefined) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, opts.env) : undefined) ??
         checkReleaseBranchCommit(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, repoBranch, opts.env) ??
@@ -349,6 +370,7 @@ export function sandboxGuard(opts: {
     }
     return {};
   };
+  return warned;
 }
 
 const PROTECTED_BRANCH = /^(?:refs\/heads\/)?(?:master|main)$/i;
@@ -899,23 +921,35 @@ export function repoBranch(dir: string): string | undefined {
   }
 }
 
-/** A repo's remotes (name -> push URL), or undefined when `dir` is not a readable git repo. */
-export type RemoteResolver = (dir: string) => Map<string, string> | undefined;
+/** A value now, or one a lookup answers later (w6237: the guard's own lookups spawn off the event loop, so they are async). */
+export type Maybe<T> = T | Promise<T>;
 
-export const gitRemotes: RemoteResolver = (dir) => {
+/** A repo's remotes (name -> push URL), or undefined when `dir` is not a readable git repo. */
+export type RemoteResolver = (dir: string) => Maybe<Map<string, string> | undefined>;
+
+/**
+ * w6237: the trusted git (w5542) behind the fence (server/safeGit.ts, w5541), both spawns on the probe thread: the guard
+ * runs in the portal, and a git started on its loop held every page and API call while it started (w6234). The output,
+ * or undefined on any failure.
+ */
+async function trustedGitOut(args: string[], timeoutMs: number): Promise<string | undefined> {
   try {
-    // w5541: the fence (server/safeGit.ts) on the trusted git (w5542).
-    const f = gitFenceSync(['-C', dir, 'remote', '-v']);
-    const out = execFileSync(trustedGit(), [...TRUSTED_GIT, ...f.args], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env: f.env });
-    const m = new Map<string, string>();
-    for (const line of out.split('\n')) {
-      const [name, url, kind] = line.trim().split(/\s+/);
-      if (name && url && kind === '(push)') m.set(name, url);
-    }
-    return m;
+    const r = await gitOffThread(args, { bin: trustedGit(), pre: TRUSTED_GIT, timeoutMs });
+    return r.code === 0 ? r.stdout : undefined;
   } catch {
     return undefined;
   }
+}
+
+export const gitRemotes: RemoteResolver = async (dir) => {
+  const out = await trustedGitOut(['-C', dir, 'remote', '-v'], 5000);
+  if (out === undefined) return undefined;
+  const m = new Map<string, string>();
+  for (const line of out.split('\n')) {
+    const [name, url, kind] = line.trim().split(/\s+/);
+    if (name && url && kind === '(push)') m.set(name, url);
+  }
+  return m;
 };
 
 /** One spelling per repo: "github.com/owner/name" for every GitHub URL form and gh's OWNER/REPO, else the normalised URL or path. */
@@ -931,31 +965,37 @@ export function repoKey(url: string): string {
  * The base branch of a pull request (`pr`: its number, URL or branch; absent: the current branch's), in `repo` (gh's -R)
  * or the repo of `dir`, or undefined when it cannot be read.
  */
-export type PrBaseResolver = (pr: string | undefined, repo: string | undefined, dir: string | undefined) => string | undefined;
+export type PrBaseResolver = (pr: string | undefined, repo: string | undefined, dir: string | undefined) => Maybe<string | undefined>;
+
+/** The trusted gh's trimmed output, run on the probe thread (w6237), or undefined when it failed or said nothing. */
+async function trustedGhOut(args: string[], dir: string | undefined): Promise<string | undefined> {
+  const r = await runOffThread(trustedGh(), args, 15_000, dir ? { cwd: dir } : {});
+  return r.code === 0 ? r.stdout.trim() || undefined : undefined;
+}
 
 /** PrBaseResolver through gh (`gh pr view --json baseRefName`); a failure (offline, no such PR) reads as unknown. */
-export const ghPrBase: PrBaseResolver = (pr, repo, dir) => {
-  try {
-    const out = execFileSync(trustedGh(), ['pr', 'view', ...(pr ? [pr] : []), ...(repo ? ['-R', repo] : []), '--json', 'baseRefName', '-q', '.baseRefName'], { cwd: dir, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
-    return out.trim() || undefined;
-  } catch {
-    return undefined;
-  }
-};
+export const ghPrBase: PrBaseResolver = (pr, repo, dir) =>
+  trustedGhOut(['pr', 'view', ...(pr ? [pr] : []), ...(repo ? ['-R', repo] : []), '--json', 'baseRefName', '-q', '.baseRefName'], dir);
 
-export type EvidenceResolver = (pr: string | undefined, repo: string | undefined, dir: string | undefined, env?: Record<string, string | undefined>) => string | undefined;
+export type EvidenceResolver = (pr: string | undefined, repo: string | undefined, dir: string | undefined, env?: Record<string, string | undefined>) => Maybe<string | undefined>;
 
 /** What ghEvidence runs with; tests replace each. */
 export interface GhEvidenceDeps {
   /** The PR's URL (`gh pr view --json url`), or undefined when gh cannot read it. */
-  prUrl?: (pr: string | undefined, repo: string | undefined, dir: string | undefined) => string | undefined;
+  prUrl?: (pr: string | undefined, repo: string | undefined, dir: string | undefined) => Maybe<string | undefined>;
   /** The daemon's folder, where the trusted checkout lives (evidenceGate.ts trustedAppDir). */
   appDir?: string;
   /** Brings the trusted checkout up to date (evidenceGate.ts refreshTrustedCheckout): what failed, or undefined. */
-  refresh?: (co: string, force: boolean) => string | undefined;
-  run?: (cmd: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv }) => { status: number | null; stdout: string; stderr: string; error?: Error };
+  refresh?: (co: string, force: boolean) => Maybe<string | undefined>;
+  run?: (cmd: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv }) => Maybe<{ status: number | null; stdout: string; stderr: string; error?: Error }>;
   exists?: (p: string) => boolean;
   log?: (line: string) => void;
+}
+
+/** w6237: the python check (up to 2 minutes) on the probe thread, never on the portal's loop. */
+async function evidenceRunOffThread(cmd: string, args: string[], o: { cwd: string; env: NodeJS.ProcessEnv }) {
+  const r = await runOffThread(cmd, args, 120_000, o);
+  return { status: r.code < 0 ? null : r.code, stdout: r.stdout, stderr: r.stderr, ...(r.code < 0 ? { error: new Error(r.stderr || `${cmd} did not run`) } : {}) };
 }
 
 /** gh, run by the guard from a trusted PATH and never from the worker's folder (w5542: Windows looks there first). */
@@ -971,15 +1011,9 @@ export interface GhEvidenceDeps {
  * can write: a planted "999" copy there would have run at the host's level. Its python and gh come from a PATH with no
  * worker-writable folder, with no PYTHON* settings, no user site (-s) and the checkout as working directory.
  */
-export function makeGhEvidence(d: GhEvidenceDeps = {}): EvidenceResolver {
-  return (pr, repo, dir, env) => {
-    const url = (d.prUrl ?? ((p, r, w) => {
-      try {
-        return execFileSync(trustedGh(), ['pr', 'view', ...(p ? [p] : []), ...(r ? ['-R', r] : []), '--json', 'url', '-q', '.url'], { cwd: w, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
-      } catch {
-        return undefined;
-      }
-    }))(pr, repo, dir);
+export function makeGhEvidence(d: GhEvidenceDeps = {}): (...a: Parameters<EvidenceResolver>) => Promise<string | undefined> {
+  return async (pr, repo, dir, env) => {
+    const url = await (d.prUrl ?? ((p, r, w) => trustedGhOut(['pr', 'view', ...(p ? [p] : []), ...(r ? ['-R', r] : []), '--json', 'url', '-q', '.url'], w)))(pr, repo, dir);
     const m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(url ?? '');
     if (!m || !evidenceGated(m[1])) return undefined;
     const workerEnv = { ...process.env, ...env } as NodeJS.ProcessEnv;
@@ -990,19 +1024,19 @@ export function makeGhEvidence(d: GhEvidenceDeps = {}): EvidenceResolver {
     const refresh = d.refresh ?? ((c: string, force: boolean) => refreshTrustedCheckout(c, {}, { force }));
     const log = d.log ?? ((line: string) => console.log(`${new Date().toISOString()} ${line}`));
     const why = (s: string) => `Not merged: ${s}. Fix the evidence or the claim (gh pr edit ${m[2]} --body-file <f>), then merge with ff-pr merge.`;
-    const fetched = refresh(co, false);
+    const fetched = await refresh(co, false);
     if (!exists(script)) return why(`${noScriptRefusal(m[1], m[2])}${fetched ? ` (the guard's trusted copy: ${fetched})` : ''}`);
-    const check = () => {
+    const check = async () => {
       const t = trustedEvidenceRun({ script, repo: m[1], pr: m[2], workerEnv, appDir, ...(dir ? { sandboxDir: dir } : {}), exists });
       if ('error' in t) return { code: 127, text: t.error, v: { ok: false, lines: [t.error] } };
-      const r = (d.run ?? ((cmd, args, o) => spawnSync(cmd, args, { ...o, encoding: 'utf8', timeout: 120_000, windowsHide: true })))(t.python, t.args, { cwd: t.cwd, env: t.env });
+      const r = await (d.run ?? evidenceRunOffThread)(t.python, t.args, { cwd: t.cwd, env: t.env });
       const code = r.status ?? (r.error ? 127 : 1);
       log(`w5542 evidence check ${m[1]}#${m[2]}: ${t.python} ${t.args.slice(0, 2).join(' ')}: exit ${code}`);
       return { code, text: `${r.stdout ?? ''}\n${r.stderr ?? ''}`, v: evidenceVerdict(code, r.stdout ?? '', r.stderr ?? (r.error ? r.error.message : '')) };
     };
-    let c = check();
+    let c = await check();
     // w4926: a copy behind the released one refuses for a reason no PR edit fixes: fetch the checkout and check once more.
-    if (!c.v.ok && STALE_EVIDENCE.test(c.text) && !refresh(co, true)) c = check();
+    if (!c.v.ok && STALE_EVIDENCE.test(c.text) && !(await refresh(co, true))) c = await check();
     return c.v.ok ? undefined : why(evidenceRefusal(m[1], m[2], c.code, c.v));
   };
 }
@@ -1030,39 +1064,88 @@ export interface PublicIdentity {
   name?: string;
   email?: string;
   /** Author and committer emails of the commits a push from `dir` to `remote` would publish. Default: git log. */
-  pushedEmails?: (dir: string, remote: string, srcs: string[]) => string[] | undefined;
+  pushedEmails?: (dir: string, remote: string, srcs: string[]) => Maybe<string[] | undefined>;
   /** Whether GitHub reports a repo ("github.com/owner/name") as public. Default: repoIsPublic (gh, cached). */
-  isPublic?: (key: string) => boolean | undefined;
+  isPublic?: (key: string) => Maybe<boolean | undefined>;
 }
 
 export const isNoreplyEmail = (email: string) => /@users\.noreply\.github\.com$/i.test(email.trim());
 
 /** The emails on commits reachable from `srcs` that `remote` does not have yet (by its tracking refs). */
-export const gitPushedEmails = (dir: string, remote: string, srcs: string[]): string[] | undefined => {
-  try {
-    const not = /[/:\\]/.test(remote) ? '--remotes' : `--remotes=${remote}`;
-    const f = gitFenceSync(['-C', dir, 'log', '--no-show-signature', '--format=%ae%n%ce', ...srcs, '--not', not, '--']);
-    const out = execFileSync(trustedGit(), [...TRUSTED_GIT, ...f.args], { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env: f.env });
-    return [...new Set(out.split('\n').map((l) => l.trim()).filter(Boolean))];
-  } catch {
-    return undefined;
-  }
+export const gitPushedEmails = async (dir: string, remote: string, srcs: string[]): Promise<string[] | undefined> => {
+  const not = /[/:\\]/.test(remote) ? '--remotes' : `--remotes=${remote}`;
+  const out = await trustedGitOut(['-C', dir, 'log', '--no-show-signature', '--format=%ae%n%ce', ...srcs, '--not', not, '--'], 15_000);
+  return out === undefined ? undefined : [...new Set(out.split('\n').map((l) => l.trim()).filter(Boolean))];
 };
+
+/** What checkShell throws when a lookup has not answered yet; checkShellAsync waits for it and checks again. */
+class Pending {
+  readonly wait: Promise<unknown>;
+  constructor(wait: Promise<unknown>) {
+    this.wait = wait;
+  }
+}
+
+const isThenable = (v: unknown): v is Promise<unknown> => !!v && typeof (v as { then?: unknown }).then === 'function';
+
+/** A lookup's value, or (still running) a Pending for checkShellAsync. checkShell itself stays synchronous. */
+function now<T>(v: Maybe<T>): T {
+  if (isThenable(v)) throw new Pending(v);
+  return v as T;
+}
+
+/** A lookup that answers each set of arguments once per check: a pending answer, then the value itself once it is in. */
+function settled<A extends unknown[], R>(f: (...a: A) => Maybe<R>, seen: Map<string, unknown>, tag: string): (...a: A) => Maybe<R> {
+  return (...a) => {
+    const k = `${tag}\0${JSON.stringify(a)}`;
+    if (!seen.has(k)) {
+      const r = f(...a);
+      seen.set(k, isThenable(r) ? r.then((v) => (seen.set(k, v), v), () => (seen.set(k, undefined), undefined)) : r);
+    }
+    return seen.get(k) as Maybe<R>;
+  };
+}
+
+/**
+ * w6237: checkShell with lookups that answer later (the guard's own git, gh and python, all on the probe thread). A lookup
+ * not in yet stops the check with a Pending; it is awaited and the check runs again, with every answer so far kept, until
+ * it ends. The portal's loop is never held: the guard runs on every shell command of every agent.
+ */
+export async function checkShellAsync(command: string, ctx?: ShellContext): Promise<string | undefined> {
+  if (!ctx) return checkShell(command);
+  const seen = new Map<string, unknown>();
+  const pub = ctx.publicIdentity;
+  const c: ShellContext = {
+    ...ctx,
+    remotes: settled(ctx.remotes, seen, 'remotes'),
+    ...(ctx.prBase ? { prBase: settled(ctx.prBase, seen, 'prBase') } : {}),
+    ...(ctx.evidence ? { evidence: settled(ctx.evidence, seen, 'evidence') } : {}),
+    ...(pub ? { publicIdentity: { ...pub, pushedEmails: settled(pub.pushedEmails ?? gitPushedEmails, seen, 'emails'), isPublic: settled(pub.isPublic ?? ((k: string) => repoIsPublic(k)), seen, 'public') } } : {}),
+  };
+  for (let round = 0; ; round++) {
+    try {
+      return checkShell(command, c);
+    } catch (e) {
+      if (!(e instanceof Pending) || round > 100) throw e;
+      await e.wait;
+    }
+  }
+}
 
 /** Why a push to a public repo is refused (a commit with a private email), or undefined. */
 function checkPublicIdentity(ctx: ShellContext | undefined, remote: string, srcs: string[], dir: string | undefined): string | undefined {
   const pub = ctx?.publicIdentity;
   if (!pub || !dir) return undefined;
-  const url = ctx!.remotes(dir)?.get(remote) ?? (/[/:\\]/.test(remote) ? remote : undefined);
+  const url = now(ctx!.remotes(dir))?.get(remote) ?? (/[/:\\]/.test(remote) ? remote : undefined);
   if (!url) return undefined;
   const target = repoKey(url);
   const listed = pub.repos.some((r) => repoKey(r) === target);
   if (!listed && !/^github\.com\/[\w.-]+\/[\w.-]+$/i.test(target)) return undefined;
-  const emails = (pub.pushedEmails ?? gitPushedEmails)(dir, remote, srcs);
+  const emails = now((pub.pushedEmails ?? gitPushedEmails)(dir, remote, srcs));
   const bad = (emails ?? []).filter((e) => !isNoreplyEmail(e) && e.toLowerCase() !== pub.email?.trim().toLowerCase());
   if (!bad.length) return undefined;
   // Only now ask GitHub (cached): most pushes carry no private email at all.
-  if (!listed && (pub.isPublic ?? repoIsPublic)(target) !== true) return undefined;
+  if (!listed && now((pub.isPublic ?? repoIsPublic)(target)) !== true) return undefined;
   const name = pub.name ?? '<your name>';
   const email = pub.email ?? '<id>+<login>@users.noreply.github.com';
   return `This push publishes commits with the email(s) ${bad.join(', ')} to ${target}, whose history is public. Commit as the public identity instead: in this clone run git config user.name "${name}" and git config user.email "${email}", then rewrite your unpushed commits with git rebase -r @{u} --exec "git commit --amend --no-edit --reset-author" and push again.`;
@@ -1113,7 +1196,7 @@ function pushTarget(ctx: ShellContext | undefined, remote: string | undefined, d
     return { game: game.has(key), known: true, saw: `it pushes to ${key}`, key };
   }
   if (!dir) return unknown(`remote ${remote} could not be read: the directory it runs in could not be followed${lost ? ` (\`${lost}\` has a variable the shell does not have, or runs a command)` : ' (no directory is known for it)'}`);
-  const remotes = ctx.remotes(dir);
+  const remotes = now(ctx.remotes(dir));
   if (!remotes) return unknown(`remote ${remote} could not be read: ${dir} is not a git repo`);
   const url = remotes.get(remote);
   if (!url) return unknown(`remote ${remote} could not be read: ${dir} has remotes ${[...remotes].map(([n, u]) => `${n}=${plainUrl(u)}`).join(', ') || '(none)'}`);
@@ -1159,7 +1242,7 @@ function ghIsGameRepo(ctx: ShellContext | undefined, repo: string | undefined, d
   if (!ctx?.gameRepos.length) return true;
   const game = new Set(ctx.gameRepos.map(repoKey));
   if (repo) return game.has(repoKey(repo));
-  const remotes = dir ? ctx.remotes(dir) : undefined;
+  const remotes = dir ? now(ctx.remotes(dir)) : undefined;
   if (!remotes?.size) return true;
   return [...remotes.values()].some((u) => game.has(repoKey(u)));
 }
@@ -1169,7 +1252,7 @@ function ghIsEvidenceRepo(ctx: ShellContext | undefined, repo: string | undefine
   if (ghIsGameRepo(ctx, repo, dir)) return true;
   const gated = (r: string) => evidenceGated(repoKey(r).replace(/^github\.com\//, ''));
   if (repo) return gated(repo);
-  const remotes = dir ? ctx?.remotes(dir) : undefined;
+  const remotes = dir ? now(ctx?.remotes(dir)) : undefined;
   return [...(remotes?.values() ?? [])].some(gated);
 }
 
@@ -1438,12 +1521,12 @@ export function checkShell(command: string, ctx?: ShellContext): string | undefi
       // w1166: a PR opened into develop before it was retired (or by a session on older code) is not merged there: #1579
       // merged into develop at 23:20 UTC on 2026-10-12, after the last sweep into master, and had to be carried over again.
       if (sub === 'pr merge' && ctx?.prBase && ghIsGameRepo(ctx, repoFlag, dir)) {
-        const base = ctx.prBase(ghPrMergeArgument(seg), repoFlag, dir);
+        const base = now(ctx.prBase(ghPrMergeArgument(seg), repoFlag, dir));
         if (base && RETIRED_BRANCH.test(base)) return retiredMerge(ghPrMergeArgument(seg));
       }
       // w3088: then its Evidence check, as ff-pr merge runs it, on the game repo and ffu (w3098).
       if (sub === 'pr merge' && ctx?.evidence && ghIsEvidenceRepo(ctx, repoFlag, dir)) {
-        const refused = ctx.evidence(ghPrMergeArgument(seg), repoFlag, dir, ctx.env);
+        const refused = now(ctx.evidence(ghPrMergeArgument(seg), repoFlag, dir, ctx.env));
         if (refused) return refused;
       }
       if (lower[1] === 'api') {
@@ -1460,11 +1543,11 @@ export function checkShell(command: string, ctx?: ShellContext): string | undefi
           const intoDevelop = lower.some((w, i) => ['-f', '--field', '--raw-field'].includes(lower[i - 1] ?? '') && /^base=(?:refs\/heads\/)?develop$/.test(w));
           if (intoDevelop && !pulls[3]) return `PRs into the Final Factory game repo's develop are blocked. ${DEVELOP_RETIRED}`;
           if (pulls[3] && ctx?.prBase) {
-            const base = ctx.prBase(pulls[2], apiRepo, dir);
+            const base = now(ctx.prBase(pulls[2], apiRepo, dir));
             if (base && RETIRED_BRANCH.test(base)) return retiredMerge(pulls[2]);
           }
         }
-        const refused = writes && pulls?.[3] && ghIsEvidenceRepo(ctx, apiRepo, dir) ? ctx?.evidence?.(pulls[2], apiRepo, dir, ctx.env) : undefined;
+        const refused = writes && pulls?.[3] && ghIsEvidenceRepo(ctx, apiRepo, dir) ? now(ctx?.evidence?.(pulls[2], apiRepo, dir, ctx.env)) : undefined;
         if (refused) return refused;
         const pvr = lower.map((w) => /(?:^|\/)repos\/([^/\s]+\/[^/\s]+)\/private-vulnerability-reporting/.exec(w)?.[1]).find(Boolean);
         if (pvr && method && method !== 'GET' && ghIsGameRepo(ctx, pvr, dir)) return "Changing the game repo's security settings is the user's call, not an agent's.";

@@ -146,6 +146,8 @@ export interface LinkUpdateFlags {
   toolsDiskLock?: 'warn' | 'on';
   /** CI jobs first on a Windows CI-first machine, off, warn or enforce (w6110, machine/ciFirstWin.ts), Windows only: daemon.json `winCiFirst`; unset: carried. A daemon that predates it ignores it. */
   winCiFirst?: 'off' | 'warn' | 'enforce';
+  /** The shared-cache lock's mode (w5615, docs/worker-root.md "Per-slot caches and the players broker"), any OS: daemon.json `sharedLock`; unset: carried. A daemon that predates it ignores it. */
+  sharedLock?: 'off' | 'warn' | 'on';
   /** The ffu CI runners' scheduled tasks and listeners at Normal priority, off, warn or enforce (w6163, machine/runnerPriority.ts), Windows only: daemon.json `runnerPriority`; unset: carried. A daemon that predates it ignores it. */
   runnerPriority?: 'off' | 'warn' | 'enforce';
 }
@@ -188,8 +190,11 @@ export type DaemonSandbox = Omit<MachineSandbox, 'purpose' | 'sessionIds'>;
  * warn?, kernel? } (machine/workerCaps.ts); `warn`: warn mode, the cap would have been hit and nothing was ended; `kernel`:
  * Linux, the kernel acted and the host ended nothing. An older portal ignores it, and one that predates the two flags words a
  * warn hit as an enforced one (its ledger line says "ended 0").
+ * junctionRm (w6266, no bump): a Windows worker's guard warned of an `rm -r` over a folder holding a junction, arg { line }
+ * (server/junctionRmWarn.ts). The daemon writes the line to daemon.log and the portal to its own log, both of which outlast
+ * the host (whose host.log goes with its folder). An older daemon or portal drops it.
  */
-export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize' | 'workerCap';
+export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize' | 'workerCap' | 'junctionRm';
 
 /** The refusal of unity and switch on a machine's main clone, by the portal and by the daemon (w536). */
 export const MAIN_CLONE_NO_AGENTS = "a machine's main clone takes no agents (w536): give a sandbox";

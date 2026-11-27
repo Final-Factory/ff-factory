@@ -348,3 +348,71 @@ test('w5558: the clean-up\'s census gives the command lines under the install fo
     b.done();
   }
 });
+
+// ---------------------------------------------------------------- w5615: a mailbox per sandbox
+
+test('w5615: procsMailbox is procs/<sandbox> for a sandbox worker and the shared procs folder for anyone else', () => {
+  const dir = path.join(path.sep, 'slots');
+  assert.equal(procsMailbox(dir, 'slot3'), path.join(dir, 'procs', 'slot3'));
+  assert.equal(procsMailbox(dir, 'w5615.x-2'), path.join(dir, 'procs', 'w5615.x-2'));
+  assert.equal(procsMailbox(dir), path.join(dir, 'procs'));
+  for (const bad of ['', '..', '../slot3', 'a/b', 'a\\b', 'a..b', '.hidden', 'a b', 'x'.repeat(65)]) assert.equal(procsMailbox(dir, bad), path.join(dir, 'procs'), `"${bad}" falls back to the shared mailbox`);
+});
+
+test('w5615: the daemon answers an ask in the sandbox subfolder it was written in, and in the shared folder as before', async () => {
+  const slots = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'procs-sandbox-'));
+  try {
+    const seen: string[] = [];
+    const broker = new ProcsBroker({
+      dir: procsMailbox(slots),
+      answer: async (a) => {
+        seen.push(a.op);
+        return `answer to ${a.op}`;
+      },
+    });
+    const mine = procsMailbox(slots, 'slot3');
+    const theirs = procsMailbox(slots, 'slot4');
+    const shared = procsMailbox(slots);
+    for (const d of [mine, theirs]) fs.mkdirSync(d, { recursive: true });
+    const ask = (op: string) => JSON.stringify({ op, who: WHO });
+    fs.writeFileSync(path.join(mine, 'ask-a1.json'), ask('procs'));
+    fs.writeFileSync(path.join(theirs, 'ask-b1.json'), ask('census'));
+    fs.writeFileSync(path.join(shared, 'ask-c1.json'), ask('procs'));
+    assert.equal(await broker.tick(), 3);
+    assert.deepEqual(seen.sort(), ['census', 'procs', 'procs']);
+    // each answer is beside its ask, and only there
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(mine, 'ans-a1.json'), 'utf8')), { ok: true, result: 'answer to procs' });
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(theirs, 'ans-b1.json'), 'utf8')), { ok: true, result: 'answer to census' });
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(shared, 'ans-c1.json'), 'utf8')), { ok: true, result: 'answer to procs' });
+    assert.deepEqual(fs.readdirSync(mine), ['ans-a1.json']);
+    assert.deepEqual(fs.readdirSync(theirs), ['ans-b1.json']);
+    assert.deepEqual(fs.readdirSync(shared).filter((n) => n.endsWith('.json')), ['ans-c1.json']);
+    assert.equal(await broker.tick(), 0, 'nothing left to answer');
+  } finally {
+    fs.rmSync(slots, { recursive: true, force: true });
+  }
+});
+
+test('w5615: a worker asking through its sandbox mailbox is answered there, a bad ask too, and a stale answer in a subfolder is removed', async () => {
+  const slots = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'procs-sandbox-'));
+  try {
+    let now = Date.now();
+    const broker = new ProcsBroker({ dir: procsMailbox(slots), answer: async () => 'ok', now: () => now });
+    const mine = procsMailbox(slots, 'slot3');
+    const timer = setInterval(() => void broker.tick(), 20);
+    try {
+      // askDaemon makes the subfolder itself (the daemon may not have seen the sandbox yet)
+      assert.equal(await askDaemon<string>(mine, { op: 'procs', who: WHO }, { timeoutMs: 5_000, pollMs: 10 }), 'ok');
+      fs.writeFileSync(path.join(mine, 'ask-bad.json'), '{"op":"rm"}');
+      await new Promise((r) => setTimeout(r, 100));
+      assert.match(fs.readFileSync(path.join(mine, 'ans-bad.json'), 'utf8'), /not an ask this mailbox answers/);
+    } finally {
+      clearInterval(timer);
+    }
+    now += STALE_MS + 1_000;
+    await broker.tick();
+    assert.deepEqual(fs.readdirSync(mine), [], 'the answer nobody took goes after a while, in the subfolder too');
+  } finally {
+    fs.rmSync(slots, { recursive: true, force: true });
+  }
+});
