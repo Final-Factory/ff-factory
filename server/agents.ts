@@ -1057,7 +1057,9 @@ export class Agents {
         const h = sessions.sessions.get(id);
         return h ? this.keepIdle(h, true, !!h.info.machineId && machines.canSaveWork(h.info.machineId)) : 'gone';
       },
-      queued: (id) => sessions.queued().some((q) => q.id === id),
+      // w6428: within a page's read (pageRead) the queued ids once: each ask copied the whole send queue, once per released
+      // worker in claims and again in waiting (live 2026-11-27 18:04Z: place{free 62ms x39 claims 49ms x6}).
+      queued: (id) => (this.pageMemo ? (this.pageMemo.queued ??= new Set(sessions.queued().map((q) => q.id))).has(id) : sessions.queued().some((q) => q.id === id)),
       stopLive: (id, why) => {
         const h = sessions.sessions.get(id);
         if (!h) return;
@@ -3873,6 +3875,16 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * w2709's report r36), though the ledger (shared/fleet.ts, by holdsOf) showed it on w2709.
    */
   private workIdsOf(info: SessionInfo, bySession?: Map<string, WorkItem[]>, byId?: ReadonlyMap<string, WorkItem>): string[] {
+    const memo = !bySession ? this.pageMemo?.work : undefined;
+    if (!memo) return this.workIdsNow(info, bySession, byId);
+    const had = memo.get(info.id);
+    if (had && had.rev === this.store.workRev && had.title === info.title) return [...had.ids];
+    const ids = this.workIdsNow(info);
+    memo.set(info.id, { rev: this.store.workRev, title: info.title, ids });
+    return [...ids];
+  }
+
+  private workIdsNow(info: SessionInfo, bySession?: Map<string, WorkItem[]>, byId?: ReadonlyMap<string, WorkItem>): string[] {
     // w6336: within withPlacesOnce, every worker's requests from one index (a scan of every request per worker was 1-3 s
     // of each blockerWatch tick and state build in the 2026-11-27 stall profiles, under workIdsOf, live and holdsOf).
     const index = bySession ? undefined : this.holdsIndexNow();
@@ -6788,12 +6800,20 @@ A report is for a person who asked for one, and people want very few. File one w
   pageRead<T>(fn: () => T): T {
     if (this.freeMemo) return fn();
     this.freeMemo = new Map();
+    this.pageMemo = { work: new Map() };
     try {
       return this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(fn));
     } finally {
       this.freeMemo = undefined;
+      this.pageMemo = undefined;
     }
   }
+
+  /**
+   * w6428: within pageRead (a read that changes nothing), the send queue's ids and each worker's requests (workIdsOf, by
+   * session id and title, at the ledger's workRev), read once: the page's placement asked both per released worker twice.
+   */
+  private pageMemo?: { queued?: Set<string>; work: Map<string, { rev: number; title: string | undefined; ids: string[] }> };
 
   private freeNow(x: { id: string; kind?: 'light'; status: string; sessionIds: string[]; lingering?: unknown[]; path?: string; git?: { dirty: number } }, machineId?: string): boolean {
     this.freeMade++;
