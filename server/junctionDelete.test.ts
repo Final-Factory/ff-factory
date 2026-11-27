@@ -87,4 +87,8 @@ test('w6264: a Windows worker is told to delete a folder with rd, never rm -r; o
   assert.match(w, /Remove-Item -LiteralPath "\$env:TEMP\\<name>" -Recurse -Force/);
   assert.match(w, /never `rm -r`: Git Bash's `rm -rf` goes through a junction/);
   for (const p of ['darwin', 'linux']) assert.doesNotMatch(diskHygiene(p), /On Windows a folder goes with/);
+  // w6266 (the w6265 review's should-fix): the win32 brief never gives rm -rf as the delete, only as the macOS and Linux one.
+  assert.doesNotMatch(w, /plain `rm -rf "\$TMPDIR\/<name>"` written out/);
+  const rmRf = [...w.matchAll(/`rm -rf "\$TMPDIR\/<name>"`(.{0,20})/g)].map((m) => m[1]);
+  assert.ok(rmRf.length >= 1 && rmRf.every((after) => after.startsWith(' on macOS and Linux')), rmRf.join(' | '));
 });

@@ -87,7 +87,7 @@ export function cpuSince(before: Map<string, number>, after: Map<string, number>
   return ms;
 }
 
-const SIGNALS: SignalName[] = ['turnEnd', 'permission', 'result', 'ended', 'rateLimit', 'tempSize', 'workerCap'];
+const SIGNALS: SignalName[] = ['turnEnd', 'permission', 'result', 'ended', 'rateLimit', 'tempSize', 'workerCap', 'junctionRm'];
 
 export const hostsDir = (appDir: string) => path.join(appDir, 'hosts');
 
@@ -1174,7 +1174,7 @@ export async function runHost(dir: string, start: HostStart): Promise<void> {
     pushCapNote(capNote(h));
     events.emit('workerCap', s, h);
   }) : undefined;
-  s = new AgentSession(start.info, sink, () => buildOptions(spec, handlers, process.env, spec.sandbox ? () => editorUp : undefined), events);
+  s = new AgentSession(start.info, sink, () => buildOptions(spec, handlers, process.env, spec.sandbox ? () => editorUp : undefined, (line) => events.emit('junctionRm', s, { line })), events);
   const session = s;
   bus.on('event', (e) => {
     if (e.type === 'delta' && e.sessionId === id) out({ op: 'delta', text: e.text });
