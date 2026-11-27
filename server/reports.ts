@@ -258,10 +258,19 @@ export class ReportStore {
 
   private dir = (id: string) => path.join(this.root, id);
 
+  /** w6336: each report's excerpt, for the body it was made of (every page connect lists them all). */
+  private excerpts = new Map<string, { body: string; excerpt: string }>();
+
   private summary(f: ReportFile): ReportSummary {
     const { history, media: _media, ...rest } = f;
-    const text = plainText(this.bodies.get(f.id) ?? '');
-    return { ...rest, revisions: history.length, excerpt: text.length > EXCERPT ? `${text.slice(0, EXCERPT - 1)}…` : text };
+    const body = this.bodies.get(f.id) ?? '';
+    let e = this.excerpts.get(f.id);
+    if (e?.body !== body) {
+      const text = plainText(body);
+      e = { body, excerpt: text.length > EXCERPT ? `${text.slice(0, EXCERPT - 1)}…` : text };
+      this.excerpts.set(f.id, e);
+    }
+    return { ...rest, revisions: history.length, excerpt: e.excerpt };
   }
 
   /** Every report, newest first. */

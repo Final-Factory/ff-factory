@@ -339,6 +339,8 @@ export interface SocketHandlers {
   onFailure: () => Promise<boolean>;
   /** w5907: the sessionsRev to send on a reconnect after a gap this long (ms), so the server sends only what changed. */
   have?: (gapMs: number) => string | undefined;
+  /** w6336: the hashes of the parts the page holds (shared/pageParts.ts partsHave), so a reconnect resends only what changed. */
+  parts?: () => string | undefined;
 }
 
 /** Heard nothing (not even the server's ping) for this long: the socket is dead, even if it still reads open. */
@@ -374,6 +376,8 @@ export function connectSocket(h: SocketHandlers): () => void {
     if (tries) q.set('tries', String(tries));
     const have = everOpened && lostAt ? h.have?.(Date.now() - lostAt) : undefined;
     if (have) q.set('have', have);
+    const parts = everOpened ? h.parts?.() : undefined;
+    if (parts) q.set('parts', parts);
     return `${base}?${q}`;
   };
 
