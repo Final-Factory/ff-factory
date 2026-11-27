@@ -22,7 +22,7 @@ import { accountOf } from './SystemMeters';
 import { Chip, Confirm, Dot, Icon, Menu, ModelChip, ToggleChip } from './ui';
 import { TimersButton } from './Timers';
 import { IntakeApproveCard, WaitingTab } from './WaitingTab';
-import { orchestratorAsks, ownerAnswersFor, waitingItems } from '../../../shared/waiting';
+import { orchestratorAsks, ownerAnswersFor, waitingItems, waitingTotals } from '../../../shared/waiting';
 import { useKeepScroll } from '../scrollKeep';
 import { ReportPage, ReportsTab, WorkReports } from './Reports';
 
@@ -116,7 +116,9 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
   const queue = app.me ? waitingItems(open, live, { userId: app.me.userId, displayName: app.me.displayName, reviewer }) : [];
   // w1868: and the viewer's orchestrator's open questions, each a card of its own.
   const asks = app.me ? orchestratorAsks(app.sessions, work, app.me) : [];
-  const onMe = queue.filter((i) => i.mine).length + asks.length;
+  // w6436: one count of the queue and the cards together, for the tab, its badge, its tooltip and the banner.
+  const totals = waitingTotals(queue, asks);
+  const onMe = totals.onMe;
   const account = session ? accountOf(app, session.id) : undefined;
   // Its context and last compaction (w535).
   const ctx = session ? contextGlance(session, now) : undefined;
@@ -189,9 +191,9 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
         </button>
         <button role="tab" aria-selected={current === 'waiting'} className={`tab${current === 'waiting' ? ' active' : ''}`} onClick={() => setTab('waiting')} data-testid="tab-waiting">
           Waiting on input{' '}
-          {queue.length > 0 && (
-            <span className={onMe ? 'tone-amber' : 'dim'} title={`${onMe} on you, ${queue.length - onMe} on someone else`}>
-              {queue.length}
+          {totals.total > 0 && (
+            <span className={onMe ? 'tone-amber' : 'dim'} title={`${onMe} on you, ${totals.onOthers} on someone else`}>
+              {totals.total}
             </span>
           )}
         </button>
@@ -211,7 +213,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
         </button>
       </nav>
 
-      {current === 'requests' && <Requests app={app} work={work} open={open} stalled={stalled} closed={closed} focus={focus} now={now} waiting={queue.length} onMe={onMe} />}
+      {current === 'requests' && <Requests app={app} work={work} open={open} stalled={stalled} closed={closed} focus={focus} now={now} waiting={totals.total} onMe={onMe} />}
       {current === 'waiting' && <WaitingTab app={app} items={queue} asks={asks} now={now} />}
       {current === 'intake' && app.intake && <IntakeTab app={app} intake={app.intake} work={work} now={now} />}
       {current === 'reports' && (reportId ? <ReportPage key={reportId} app={app} id={reportId} now={now} /> : <ReportsTab app={app} now={now} />)}
