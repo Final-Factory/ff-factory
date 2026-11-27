@@ -1413,6 +1413,25 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
   `UV_CACHE_DIR`, `PIP_CACHE_DIR`, `npm_config_cache`, `NUGET_PACKAGES`, `UPM_CACHE_ROOT`, `DOTNET_CLI_HOME` and
   `PLAYWRIGHT_BROWSERS_PATH` pointing at its clones (under `warn` only once a tool's clone is made; under `on` always), its
   own `FF_DETERMINISM_AUDIT_DIR` (`cache/slots/<sandbox>/determinism-audit`), and `FF_PLAYER_BROKER=1`.
+- **After a sharedLock switch** (w6287): the switch restarts the daemon, and the new daemon adopts the running agent hosts
+  (w605). A host keeps the environment it started with, so an agent adopted across the switch keeps the old mode's cache
+  paths and `FF_PLAYER_BROKER` until its next host start (a stop, the idle reap after an hour, a code update's restart);
+  agents started after the switch get the new mode at once. Seen on LothDesktop (w6213, 2026-11-27): after off -> warn at
+  03:49:16Z, 12 hosts were adopted, and worker 95c5d71d (slot2) still had `FF_PLAYER_BROKER` unset and `UV_CACHE_DIR` /
+  `npm_config_cache` on the shared `V:\ffw\cache` at 03:53Z. `machine_update shared_lock` says so in its reply.
+  Each host records a hash of the variables the switch decides (`lockenv.sha` in its host folder, machine/agentHost.ts
+  `lockEnvOf`; Daemon `lockEnvFor`: the slot clones, the audit folder and `FF_PLAYER_BROKER`, none when off). When an
+  adopted agent is idle and its hash differs from what the daemon gives now, daemon.json `hostRestage` decides:
+  - `warn` (the default; lothsahn's lockout rule): one daemon log line per host, `agent host <id>: its agent host started on
+    another shared-lock environment ... hostRestage warn: it keeps the old cache paths and FF_PLAYER_BROKER until its next
+    host start`. Nothing is stopped.
+  - `on`: the daemon sends its host a `restage` command. The host ends its agent only if it is idle when it reads the command:
+    a message read before it has started a turn, and then the restage is skipped and asked again at that turn's end. A turn is
+    never cut. The next message starts a new host on the new environment, in the same conversation (the path the idle reap
+    takes). A host from before w6287 has no `lockenv.sha` and is left alone (a code update restarts it anyway).
+  - Not covered: a Unity editor running across the switch keeps its old environment until it is started again, and so does
+    a CI runner's job (neither is ever restarted mid-run). `hostRestage` has no `machine_update` key yet, and turning it on is
+    a separate, reviewed step.
 - **Mailboxes per slot**: the procs broker (machine/procsBroker.ts) reads `unity-slots/procs/<sandbox>/` and the shared
   mailbox, answering each ask in the folder it came from; `ff-leftovers` writes into its own sandbox's folder. The unity-slots
   queue itself needs no per-slot folder: it already goes through the daemon's RPC into the daemon's own folder (w5545).
@@ -1438,7 +1457,8 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
   running in it is not counted, so a clone can be made or refreshed while one runs; the enforce change counts them.
 - **Left shared and writable**: `cache/uv-tools`, `cache/uv-bin`, `cache/xdg` and `cache/cargo` (cargo is the next stage).
 - **Way back**: `shared_lock off` and the daemon restart the update makes (the link job and installer run outside every fence,
-  4.3). The clones stay on disk, unused; the env goes back to the shared caches at the next agent start.
+  4.3). The clones stay on disk, unused; the env goes back to the shared caches at each agent's next host start (see "After a
+  sharedLock switch" above).
 - **Measured (m5, 2026-11-26)**: `uv run --with pillow` warm on the shared cache 0.042-0.044 s (first run 0.145 s); an APFS
   clone of `cache/uv` (331 MB) 1.62 s; from the clone 0.067 s first, then 0.042-0.044 s.
 

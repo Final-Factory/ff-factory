@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_GITHUB_ROUTE, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsBrief, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem, sdkVersion, installerUrl, workerToolsRemote, workerUpdateFlags, workerUpdateRemote } from './opsWorker.ts';
+import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_GITHUB_ROUTE, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, SHARED_LOCK_DELAY_NOTE, checkOpsShell, inScratch, opsBrief, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem, sdkVersion, installerUrl, workerToolsRemote, workerUpdateFlags, workerUpdateRemote } from './opsWorker.ts';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { isMidTurn, OPS_SEND_REFUSED, SessionManager, setQueryForTesting } from './sessions.ts';
 import { Store } from './store.ts';
@@ -1031,7 +1031,9 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', sharedLock: 'maybe' as never }), /shared_lock: off, warn or on/);
   assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', sharedLock: '' as never }), /shared_lock: off, warn or on/);
   assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', sharedLock: 'enforce' as never }), /shared_lock: off, warn or on/);
-  ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerFence: 'on', sharedLock: 'warn' });
+  // w6287: the reply says the agents the new daemon adopts keep the old mode until their next host start.
+  const shReply = ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerFence: 'on', sharedLock: 'warn' });
+  assert.ok(shReply.includes(SHARED_LOCK_DELAY_NOTE), shReply);
   await new Promise((r) => setTimeout(r, 300));
   const shLin = store.readTranscript(OPS_ID, 220).filter((e) => e.kind === 'user').at(-1) as { text: string };
   assert.ok(shLin.text.includes(`--worker-fence on --shared-lock warn'`), shLin.text);
