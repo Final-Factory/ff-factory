@@ -213,6 +213,11 @@ const ROWS: Row[] = [
   { name: 'merged in after a hand-back, a worker that no longer exists leaves the hand-off to carry it (w6277 F3)', build: (k) => { const w = k.req([A], 'w5869', { [A]: H }); k.handBack(w); k.merge(w, ['deadbeef'], { deadbeef: 2 * H }); return w; }, resumed: [], never: [A], handOff: ['w5869'] },
   { name: 'a worker placed after the hand-back stays newest over one merged in later (w6277)', build: (k) => { const w = k.req([A], 'w5869', { [A]: H }); k.handBack(w); k.place(w, N); k.merge(w, [M], { [M]: 2 * H }); return w; }, resumed: [N], never: [A, M], noHandOff: ['w5869'] },
   { name: 'a worker moved off it before the hand-back comes back with a merged request and must not take the answer (w6288 F4, w2079)', build: (k) => { const w = k.req([E, A], 'w5869', { [E]: 2 * H, [A]: H }); k.moveOff(w, E); k.handBack(w); k.merge(w, [E], { [E]: 3 * H }); return w; }, resumed: [], never: [A, E], handOff: ['w5869'] },
+  // w6302 review probes (w6309): a moved-off worker merged back never takes the answer, whatever its merged link's time (R1).
+  { name: 'P5 moved off before the hand-back, comes back with a merged request sent after the hand-back', build: (k) => { const w = k.req([E, A], 'w5869', { [E]: 2 * H, [A]: H }); k.moveOff(w, E); k.handBack(w); k.merge(w, [E], { [E]: -1000 }); return w; }, resumed: [], never: [A, E], handOff: ['w5869'] },
+  { name: 'P7 moved off, merged back beside a working worker: the working one is shifted and takes it', build: (k) => { const w = k.req([E, A], 'w5869', { [E]: 2 * H, [A]: H }); k.moveOff(w, E); k.handBack(w); k.merge(w, [E, N], { [E]: 3 * H, [N]: 2 * H }); return w; }, resumed: [N], never: [A, E], noHandOff: ['w5869'] },
+  { name: 'P8 moved off, merged back as the newer of two: the other is still shifted', build: (k) => { const w = k.req([E, A], 'w5869', { [E]: 2 * H, [A]: H }); k.moveOff(w, E); k.handBack(w); k.merge(w, [E, N], { [E]: 2 * H, [N]: 3 * H }); return w; }, resumed: [N], never: [A, E], noHandOff: ['w5869'] },
+  { name: 'moved off, merged back, then placed on it again: it is its worker and takes it (w6309)', build: (k) => { const w = k.req([E, A], 'w5869', { [E]: 2 * H, [A]: H }); k.moveOff(w, E); k.handBack(w); k.merge(w, [E], { [E]: -1000 }); k.place(w, E, -2000); return w; }, resumed: [E], never: [A], noHandOff: ['w5869'] },
   // w1812 twins: the same question from the asker on w5869 and w5871.
   { name: 'twins: answered on the kept one, the other moved to a new worker', build: (k) => { const w = k.req([A], 'w5869', { [A]: 2 * H }); k.moveOff(w); k.place(w, N); return k.req([A], 'w5871', { [A]: H }); }, resumed: [A, N], never: [] },
   { name: 'twins: answered on the kept one, the other handed back', build: (k) => { const w = k.req([A], 'w5869', { [A]: H }); k.handBack(w); return k.req([A], 'w5871', { [A]: H }); }, resumed: [A], never: [], handOff: ['w5869'] },
@@ -239,3 +244,33 @@ for (const row of ROWS) {
     assert.deepEqual(resumed, [...row.resumed].sort(), `resumed ${JSON.stringify(resumed)}: "${said}"`);
   });
 }
+
+// w6302 review R2 (w6309): a merge lists a moved-off worker on the request again, but its own stale resumes are still
+// refused, before and after another worker is placed; a person's [answer] or [note] to it still goes (w2495).
+test('P9 a moved-off worker merged back is refused its stale resume once another is placed', async (t) => {
+  const env = await setup(t, 'on');
+  const k = kit(env);
+  const w = k.req([E, A], 'w5869', { [E]: 2 * H, [A]: H });
+  k.moveOff(w, E);
+  k.handBack(w);
+  k.merge(w, [E], { [E]: 3 * H });
+  const o = env.agents.orchestrators;
+  assert.ok(env.store.work.get('w5869')!.sessionIds.includes(E), 'the merge keeps it listed (keep rather than kill)');
+  assert.match(o.staleResume('w5869', E, 'CI on #9 finished') ?? '', /was moved off worker/);
+  k.place(env.store.work.get('w5869')!, N);
+  assert.match(o.staleResume('w5869', E, 'CI on #9 finished') ?? '', /was moved off worker/);
+  assert.equal(o.staleResume('w5869', E, '[answer] yes, ship it'), undefined);
+  assert.equal(o.staleResume('w5869', E, '[note] use the old flag'), undefined);
+  assert.equal(o.staleResume('w5869', N, 'CI on #9 finished'), undefined);
+});
+
+test('a moved-off worker merged back, then placed on it again, is not refused its resumes (w6309)', async (t) => {
+  const env = await setup(t, 'on');
+  const k = kit(env);
+  const w = k.req([E, A], 'w5869', { [E]: 2 * H, [A]: H });
+  k.moveOff(w, E);
+  k.handBack(w);
+  k.merge(w, [E], { [E]: 3 * H });
+  k.place(env.store.work.get('w5869')!, E);
+  assert.equal(env.agents.orchestrators.staleResume('w5869', E, 'CI on #9 finished'), undefined);
+});

@@ -139,6 +139,16 @@ export function personsResume(m: { text: string; resumeOf?: { note: string } }):
   const note = m.resumeOf?.note ?? /^\[wake_me\][^\n]*?Your note: ([\s\S]*)$/.exec(m.text)?.[1] ?? '';
   return note.startsWith(ANSWER_MARK) || note.startsWith(NOTE_MARK);
 }
+/**
+ * w6309 (the w6302 review, R1 and R2): worker `sid` was moved off `w` and not sent or linked to it since. Off its list, or
+ * on it again only through a merge (which keeps the mark and brings no link of its own for it): either way it never takes
+ * `w` up again (w2079). Every placement and link links its worker, so a worker put on `w` again is not off it.
+ */
+export function offSince(w: Pick<WorkItem, 'sessionIds' | 'links' | 'movedOff'>, sid: string): boolean {
+  const off = w.movedOff?.[sid];
+  if (!off) return false;
+  return !w.sessionIds.includes(sid) || !(Date.parse(w.links?.[sid]?.at ?? '') >= Date.parse(off));
+}
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
 /** A request Blocked on a machine its worker was cut off on is named to the dispatcher after this long offline (w2433, ledger.offlineNoticeMinutes). */
 export const OFFLINE_NOTICE_MS = 60 * 60_000;
@@ -1522,7 +1532,8 @@ It is for your part of the work, not an answer to another worker's question.`;
     const hbAt = (x: WorkItem) => at(x.handedBack?.at);
     const onNow = (x: WorkItem): string | undefined => {
       const now = latestWorker(x);
-      if (!now || now === asker) return undefined;
+      // w6309 (R1): nor one moved off it and back only through a merge.
+      if (!now || now === asker || offSince(x, now)) return undefined;
       const link = x.links?.[now]?.at;
       return !x.handedBack || (link && at(link) >= hbAt(x)) ? now : undefined;
     };
@@ -4543,9 +4554,13 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       for (const r of w.requesters) if (!isFor(t, r.userId)) t.requesters.push(r);
       // w6288: a worker moved off t that comes back with w is never shifted past t's hand-back below (w2079).
       const offT = new Set(Object.keys(t.movedOff ?? {}).filter((sid) => !t.sessionIds.includes(sid)));
+      // w6309 (the w6302 review, R1 and R2): such a worker stays listed, so the merge takes no running worker off its work
+      // (keep rather than kill) and a person's answer or note still reaches it (w2495), but it keeps its moved-off mark and its
+      // link on w does not come with it: it is off t since its move (offSince), so it is never t's worker now (answerNeedsYou)
+      // and its own stale resumes are refused (staleResume). Linking it to w after the move does not put it back on t.
       t.sessionIds = [...new Set([...t.sessionIds, ...w.sessionIds])];
       // When each was given it travels with it, so its newest worker stays the newest (latestWorker, w1696).
-      if (w.links) t.links = { ...w.links, ...t.links };
+      if (w.links) t.links = { ...Object.fromEntries(Object.entries(w.links).filter(([sid]) => !offT.has(sid))), ...t.links };
       // w6271 (the w6269 review): workers merged onto a request handed back since their own links join t after that hand-back,
       // or answerNeedsYou takes them for gone and an answer on t goes only into the old hand-off. Their links all shift by one
       // offset, so the newest of them lands just after the hand-back (w6277: keeping their order among themselves, and a worker
@@ -5049,13 +5064,15 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (!isOpen(w) && w.status !== 'stalled' && !answer) return `${w.id} is ${w.status}`;
     // w2079: a worker its request was moved off does not take it up again beside the new one. eca53c32 was moved off w1903 at
     // 19:34Z on 2026-10-24 (to c62e5ad1 on m5/slot3); the sweep's resume reached it at 19:40Z, and both pushed to PR #2369.
-    if (w.movedOff?.[sessionId] && !w.sessionIds.includes(sessionId)) {
+    // w6309 (the w6302 review, R2): one a merge listed on it again is off it too, unless a placement linked it since; it is
+    // on the merged work, so a person's answer or note to it still goes (w2495), but none of its own resumes.
+    if (offSince(w, sessionId) && (!w.sessionIds.includes(sessionId) || !answer)) {
       const left = (w.gateResumes ?? []).filter((r) => r.session !== sessionId);
       if (left.length !== (w.gateResumes ?? []).length) {
         w.gateResumes = left.length ? left : undefined;
         this.store.putWork(w);
       }
-      return `${w.id} was moved off worker ${sessionId} at ${w.movedOff[sessionId]}; it is with ${latestWorker(w) ?? 'no worker yet'} now`;
+      return `${w.id} was moved off worker ${sessionId} at ${w.movedOff?.[sessionId]}; it is with ${latestWorker(w) ?? 'no worker yet'} now`;
     }
     return undefined;
   }
