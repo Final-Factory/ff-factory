@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AppState } from '../shared/types.ts';
-import { dropKeptParts, fillKeptParts, hashText, partsHave, PARTS_HAVE_MAX, readPartsHave } from '../shared/pageParts.ts';
+import { dropKeptParts, fillKeptParts, HASH_MEMO_CHARS, hashOf, hashText, partsHave, PARTS_HAVE_MAX, readPartsHave } from '../shared/pageParts.ts';
 
 /** A state with the parts a reconnect may keep, as plain JSON values (what the page parses). */
 function stateOf(work: { id: string; title: string }[], machineNote = 'up'): AppState {
@@ -89,4 +89,17 @@ test('w6336: the hash is stable, short and tells different JSON apart', () => {
   const work = Array.from({ length: 100 }, (_, i) => ({ id: `w${6000 + i}`, title: `t${i}` }));
   const have = partsHave(wire(stateOf(work)));
   assert.ok(have && have.length < PARTS_HAVE_MAX && have.includes('work:'), `parts ${have?.length}`);
+});
+
+test('w6382: a part hashed again gives what its JSON hashes to, before and after the memo empties', () => {
+  const a = { id: 'r1', text: 'one' };
+  assert.equal(hashOf(a), hashText(JSON.stringify(a)));
+  assert.equal(hashOf(a), hashText(JSON.stringify(a)));
+  a.text = 'two';
+  assert.equal(hashOf(a), hashText(JSON.stringify(a)));
+  assert.equal(hashOf(undefined), hashText('null'));
+  // Past its size the memo starts again; the hashes stay the same.
+  const big = 'x'.repeat(HASH_MEMO_CHARS / 2 + 1);
+  for (const v of [big, `${big}y`, big]) assert.equal(hashOf(v), hashText(JSON.stringify(v)));
+  assert.equal(hashOf(a), hashText(JSON.stringify(a)));
 });

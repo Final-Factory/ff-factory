@@ -97,6 +97,11 @@ export class PageSessionsCache {
   private changes = new Map<string, number>();
   private off = new Map<string, number>();
   private copies = new Map<string, { at: number; withResult: boolean; copy: SessionInfo }>();
+  /**
+   * How many sessions the last pageSessions call had to look at again (keepsOnPage), for the 'page socket open' line: the
+   * cache's misses. The first build after the 2026-11-27 14:31Z deploy spent 60 ms in `keeps`, as if it missed for most.
+   */
+  checked = 0;
 
   note(e: { type: string; session?: { id: string }; id?: string }) {
     const id = e.type === 'session' ? e.session?.id : e.type === 'session_removed' ? e.id : undefined;
@@ -112,6 +117,7 @@ export class PageSessionsCache {
     if (named.has(s.id)) return true;
     const at = this.changes.get(s.id) ?? 0;
     if (this.off.get(s.id) === at) return false;
+    this.checked++;
     const keeps = keepsOnPage(s, named, now);
     if (!keeps) this.off.set(s.id, at);
     return keeps;
@@ -133,6 +139,7 @@ export class PageSessionsCache {
 export function pageSessions(sessions: Iterable<SessionInfo>, named: ReadonlySet<string>, now: number, cache?: PageSessionsCache): { sessions: SessionInfo[]; older: number } {
   const out: SessionInfo[] = [];
   let older = 0;
+  if (cache) cache.checked = 0;
   for (const s of sessions) {
     if (cache ? cache.keeps(s, named, now) : keepsOnPage(s, named, now)) out.push(cache ? cache.copy(s, named, now) : pageSession(s, named, now));
     else older++;

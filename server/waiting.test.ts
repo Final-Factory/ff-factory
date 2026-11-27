@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkItem } from '../shared/types.ts';
-import { decisionsOn, decisionsOnMe, intakeRecommendation, waitAge, waitingItems } from '../shared/waiting.ts';
+import { decisionsOn, decisionsOnMe, intakeRecommendation, waitAge, waitingItems, waitingTotals } from '../shared/waiting.ts';
 import type { WorkLive } from '../shared/workState.ts';
 
 const BEN = { userId: 'ben', displayName: 'Ben' };
@@ -71,4 +71,18 @@ test('a decision the sidebar counts is in the tab even while a worker is mid-tur
   assert.deepEqual(decisionsOn(work, me).map((d) => d.text), ['Approve or decline w1', 'Answer w2: Which?', 'Answer w3: d']);
   // A closed request has no live state and stays out.
   assert.deepEqual(waitingItems(work, new Map(), me), []);
+});
+
+test('the tab, badge, tooltip and banner share one count: cards join the total, a card about a queued request counts once (w6436)', () => {
+  const work = [item('w1'), item('w2', { requestedBy: LOTH, requesters: [LOTH] }), item('w3', { requestedBy: LOTH, requesters: [LOTH] })];
+  const live = new Map<string, WorkLive>([['w1', waiting('x', ['Ben'])], ['w2', waiting('x', ['Lothsahn'])], ['w3', waiting('x', ['Lothsahn'])]]);
+  const queue = waitingItems(work, live, { ...BEN, reviewer: false });
+  const ask = (seq: number, request?: string) => ({ sessionId: 's', a: { seq, at: ago(0), request, ask: { question: 'q' } } as never, w: work.find((w) => w.id === request) });
+  // Two cards: one about the waiting request w2 (someone else's), one about nothing queued.
+  const t = waitingTotals(queue, [ask(1, 'w2'), ask(2)]);
+  assert.deepEqual(t, { total: 4, onMe: 3, onOthers: 1 });
+  assert.ok(t.onMe <= t.total && t.onOthers >= 0);
+  // Cards alone never push on-you past the total, even with no queue.
+  assert.deepEqual(waitingTotals([], [ask(1), ask(2), ask(3)]), { total: 3, onMe: 3, onOthers: 0 });
+  assert.deepEqual(waitingTotals(queue, []), { total: 3, onMe: 1, onOthers: 2 });
 });

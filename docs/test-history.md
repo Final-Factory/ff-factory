@@ -124,6 +124,23 @@ label never replaces one a person or worker set.
   fingerprints. Each run records every path that differs from the merge base with origin/master, with its blob hash.
 - **The master batch** labels its own failures from `verdict.json`.
 
+## Off the portal's loop
+
+Recording a full suite (about 22,000 cases) once held the portal's event loop 1 to 13 s (w6415, stall profiles of
+2026-11-27). Now:
+
+- Every run is recorded in one writer thread (`server/testHistoryWriter.ts`, `TestHistory.addRunApart`), on its own
+  connection. It runs `addRun`'s own code, one run at a time in the order the runs came, each in one transaction: a reader
+  sees none of a run or all of it, and a run that fails part way leaves no row. The prune runs there too (`pruneApart`).
+- A local run is acknowledged to its daemon only once it is committed, so the daemon sends the file again if it is not.
+- The loop's own small writes (labels, `ci_seen`, meta, coverage, a run's start tags, `set_label`) wait until the
+  writer thread is idle (`TestHistory.idle`), so they never wait for its lock on the loop.
+- The ready-made queries, the labeller's pending list and the master-line streak reads run in a worker thread on a
+  read-only connection (`allApart`). The labeller lets the loop run every 40 ms of its own work.
+
+Measured on a 64 MB copy built for it (LothDesktop, 2026-11-27): a 22,000-case run took 16.7 s with a cold cache on the
+loop the old way. In the writer thread the loop was held at most 29 ms.
+
 ## The tables
 
 - `tests(id, name, class, categories, performance, first_seen, last_seen)`: `performance` = tagged
