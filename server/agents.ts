@@ -1041,11 +1041,13 @@ export class Agents {
       pass: (run) => {
         this.workByWorker = workByWorker(this.store.work.values());
         this.waitLivePass = {};
+        this.holdsPass = {};
         try {
           return run();
         } finally {
           this.workByWorker = undefined;
           this.waitLivePass = undefined;
+          this.holdsPass = undefined;
         }
       },
       // Uncommitted changes keep no process when its daemon saves them before the release (w656).
@@ -1702,7 +1704,12 @@ export class Agents {
 
   /** The requests that can concern worker `id`: its own during a release pass (workByWorker), else all of them. */
   private workOf(id: string): Iterable<WorkItem> {
-    return this.workByWorker ? (this.workByWorker.get(id) ?? []) : this.store.work.values();
+    if (this.workByWorker) return this.workByWorker.get(id) ?? [];
+    // w6336: within withPlacesOnce too, built again once a request is saved or dropped (Store.workRev).
+    const pass = this.placesPass;
+    if (!pass) return this.store.work.values();
+    if (pass.byWorker?.rev !== this.store.workRev) pass.byWorker = { rev: this.store.workRev, of: workByWorker(this.store.work.values()) };
+    return pass.byWorker.of.get(id) ?? [];
   }
 
   /** Why an idle worker's process should go (w384), or undefined: its requests are closed, handed to another worker, or it has been idle an hour. */
@@ -7311,9 +7318,13 @@ A report is for a person who asked for one, and people want very few. File one w
     }
   }
 
-  /** Within withPlacesOnce: holdsIndex of the ledger, built again once a request is saved or dropped (Store.workRev). */
+  /**
+   * Within withPlacesOnce or a release pass: holdsIndex of the ledger, built again once a request is saved or dropped
+   * (Store.workRev). w6336: after #1446 the release pass alone still scanned the ledger per worker (0.6 s of workIdsOf, 0.4 s of
+   * live in its 2.6 s block at 10:06Z on 2026-11-27).
+   */
   private holdsIndexNow(): ReturnType<typeof holdsIndex> | undefined {
-    const pass = this.placesPass;
+    const pass = this.placesPass ?? this.holdsPass;
     if (!pass) return undefined;
     if (pass.holds?.rev !== this.store.workRev) pass.holds = { rev: this.store.workRev, ...holdsIndex([...this.store.work.values()]) };
     return pass.holds;
@@ -7325,7 +7336,15 @@ A report is for a person who asked for one, and people want very few. File one w
   }
 
   /** places(), and per machine preemptOccupants and benchPriorities (w6336), each computed once within withPlacesOnce. */
-  private placesPass?: { places?: Computer[]; occupants?: Map<string, Occupant[]>; bench?: Map<string, Record<string, BenchPriority>>; holds?: { rev: number } & ReturnType<typeof holdsIndex> };
+  private placesPass?: {
+    places?: Computer[];
+    occupants?: Map<string, Occupant[]>;
+    bench?: Map<string, Record<string, BenchPriority>>;
+    holds?: { rev: number } & ReturnType<typeof holdsIndex>;
+    byWorker?: { rev: number; of: Map<string, WorkItem[]> };
+  };
+  /** During a release pass: its holdsIndex (holdsIndexNow). */
+  private holdsPass?: { holds?: { rev: number } & ReturnType<typeof holdsIndex> };
 
   /** w3843: within withPlacesOnce and a claims memo, the next asks compute afresh (placesChanged and PlaceAgain.claimsChanged). */
   private placementChanged(): void {
@@ -7665,6 +7684,12 @@ A report is for a person who asked for one, and people want very few. File one w
   }
 
   describeAllSandboxes(detail = false): string {
+    // w6336: one placement pass for the whole list, so every agent line reads its requests from one index (workOf): list_sandboxes
+    // blocked the portal 9.2 s at 10:06Z on 2026-11-27, under describeAllSandboxes > agentsPart > workOver's scan of every request.
+    return this.withPlacesOnce(() => this.describeAllSandboxesNow(detail));
+  }
+
+  private describeAllSandboxesNow(detail: boolean): string {
     // The portal holds no sandboxes of its own (w510): every sandbox is a machine's, sorted by status within its machine (w509).
     const parts: string[] = [];
     for (const m of this.machines.list()) {
