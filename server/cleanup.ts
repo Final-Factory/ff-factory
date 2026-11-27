@@ -158,11 +158,14 @@ export interface CleanupRun {
 const P = (p: string) => (/^[a-zA-Z]:[\\/]|^\\\\/.test(p) ? path.win32 : p.startsWith('/') ? path.posix : path);
 const normOf = (p: string) => P(p).resolve(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 /**
- * norm's answers for the paths P judges as Windows or POSIX paths (absolute ones, which no working folder changes). w6486:
- * BEAST's daemon spent 13 s of one block in norm and within, called pairwise by planInstallLeftovers. Emptied when it
- * grows past NORM_CACHE_MAX.
+ * norm's answers for the absolute paths, which no working folder changes: a drive path, a POSIX path, and a UNC path
+ * with its server and share. w6508: a UNC path with no share (`\\`, `\\server`, `\\\x`) resolves against the working
+ * folder's drive, so it is worked out each time, as a relative one is. w6486: BEAST's daemon spent 13 s of one block in
+ * norm and within, called pairwise by planInstallLeftovers. Emptied when it grows past NORM_CACHE_MAX.
  */
-const ABSOLUTE = /^[a-zA-Z]:[\\/]|^\\\\|^\//;
+const ABSOLUTE = /^[a-zA-Z]:[\\/]|^\\\\[^\\/]+[\\/]+[^\\/]|^\//;
+/** Whether norm keeps its answer for `p` (for the tests). */
+export const normKept = (p: string) => ABSOLUTE.test(p);
 const normCache = new Map<string, string>();
 const NORM_CACHE_MAX = 50_000;
 /** A path as compared: resolved, forward slashes, no trailing slash, lower case. */
