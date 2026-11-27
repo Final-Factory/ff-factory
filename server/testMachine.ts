@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { gitExecFileSync } from './safeGit.ts';
+import { removeTmp, tmpDir } from './testTmp.ts';
 import type { AddressInfo } from 'node:net';
 import { Daemon, type Probes, type SessionFactory } from '../machine/daemon.ts';
 import type { LiveDeps } from '../machine/live.ts';
@@ -49,7 +50,7 @@ const gitIn = (dir: string, ...a: string[]) => gitExecFileSync(['-C', dir, '-c',
 let template: string | undefined;
 function repoTemplate(): string {
   if (template && fs.existsSync(template)) return template;
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-msb-template-'));
+  const root = tmpDir('ff-msb-template-');
   const origin = path.join(root, 'origin.git');
   const main = path.join(root, 'FinalFactory');
   gitExecFileSync(['init', '-q', '--bare', '-b', 'master', origin], { windowsHide: true });
@@ -62,7 +63,6 @@ function repoTemplate(): string {
   gitIn(main, 'push', '-q', '-u', 'origin', 'master');
   fs.mkdirSync(path.join(main, 'Library', 'Artifacts'), { recursive: true });
   fs.writeFileSync(path.join(main, 'Library', 'Artifacts', 'warm.bin'), 'imported');
-  process.on('exit', () => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
   return (template = root);
 }
 
@@ -70,14 +70,15 @@ function repoTemplate(): string {
 export function testRepos(prefix = 'ff-msb-', parent = os.tmpdir()): TestRepos {
   fs.mkdirSync(parent, { recursive: true });
   const from = repoTemplate();
-  const root = fs.mkdtempSync(path.join(parent, prefix));
+  // w6476: a test that fails before stop() leaves its repos to the process's exit.
+  const root = parent === os.tmpdir() ? tmpDir(prefix) : fs.mkdtempSync(path.join(parent, prefix));
   const origin = path.join(root, 'origin.git');
   const main = path.join(root, 'FinalFactory');
   fs.cpSync(path.join(from, 'origin.git'), origin, { recursive: true });
   fs.cpSync(path.join(from, 'FinalFactory'), main, { recursive: true });
   gitIn(main, 'remote', 'set-url', 'origin', origin);
   const sbRoot = path.join(root, 'ffsb');
-  return { root, origin, main, sbRoot, git: gitIn, cleanup: () => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }) };
+  return { root, origin, main, sbRoot, git: gitIn, cleanup: () => removeTmp(root) };
 }
 
 /**

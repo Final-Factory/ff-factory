@@ -165,13 +165,13 @@ const CENSUS: Record<string, [number, string]> = {
   'server/guard.ts': [1, 'a comment of the guard\'s path rules'],
   'server/index.ts': [3, 'the portal\'s own local sessions\' temp folders: the portal VM only (deploy/vm), whose agents get TMPDIR=/tmp/ffa-<session> there'],
   'server/machineDeploy.ts': [2, 'the portal\'s deploy bundle staging (scpBundle): the portal VM only'],
-  'server/machineSandboxesTestKit.ts': [2, 'test kit: the test run\'s TMPDIR (CI runners: <root>/runner-tmp, w5834)'],
   'server/orchestratorsTestKit.ts': [2, 'test kit: the test run\'s TMPDIR'],
   'server/ownLeftovers.ts': [1, 'a comment'],
   'server/rootFence.ts': [1, 'a comment of the guard\'s path rules'],
   'server/tempDelete.ts': [1, 'a comment of the guard\'s delete rules'],
   'server/testHistoryCi.ts': [2, 'the portal\'s test history download: its data folder, os.tmpdir() only when that is missing (portal VM)'],
-  'server/testMachine.ts': [4, 'test kit: the test run\'s TMPDIR'],
+  'server/testMachine.ts': [3, 'test kit: the test run\'s TMPDIR'],
+  'server/testTmp.ts': [2, 'test kit: a test\'s own folder in the test run\'s TMPDIR, removed when it is done (w6476)'],
   'server/testPorts.ts': [1, 'test kit: port lock files in the test run\'s TMPDIR'],
 };
 

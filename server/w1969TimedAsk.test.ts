@@ -4,11 +4,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { checkTimedAsk, decideTimedPlace, smallTimedRank, timedAskMark, timedTicketCommand, SMALL_TIMED_MAX_AGENTS, TIMED_LEG_WAIT_MS } from './timedAsk.ts';
 import { readTimedAsk, writeBenchPriorities } from '../machine/benchLock.ts';
 import type { Computer } from './placement.ts';
+import { tmpDir } from './testTmp.ts';
 
 const GB = 1024 ** 3;
 const box = (id: string, maxAgents: number, platform: string, o: Partial<Computer> = {}): Computer => ({ id, online: true, live: 1, midTurn: 0, maxAgents, sandboxes: 1, maxSandboxes: Math.max(1, Math.ceil(maxAgents / 2)), freeSandboxes: 1, memUsedBytes: 16 * GB, memTotalBytes: 64 * GB, editors: 0, maxEditors: 2, platform, ...o });
@@ -118,8 +118,8 @@ test('w1969: the guard refuses an exclusive timing ticket on a big computer unti
   assert.equal(checkTimedAsk('npm test', { mark }, now), undefined);
 });
 
-test('w1969: the mark and each session\'s verdict go through priorities.json to the guard', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w1969-'));
+test('w1969: the mark and each session\'s verdict go through priorities.json to the guard', (t) => {
+  const root = tmpDir('w1969-', t);
   const until = new Date(Date.now() + 3_600_000).toISOString();
   writeBenchPriorities(root, { s1: { priority: 'normal', requests: ['w1891'], timed: { verdict: 'here', why: 'same machine', until } }, s2: { priority: 'urgent', requests: ['w1901'], exempt: 'nightly' } }, new Date(), false, undefined, timedAskMark(at('beast')));
   const s1 = readTimedAsk(root, 's1')!;

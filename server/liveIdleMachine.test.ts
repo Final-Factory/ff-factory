@@ -3,9 +3,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { DIALOG_POLL_MS, DIALOG_RESCUE_MS, EXIT_NOW_SNIPPET, INSPECT_SNIPPET, LEAVE_PLAY_SNIPPET, SAVE_AND_QUIT_SNIPPET, backupScenes, idleCloseEditor, idleReopenNote, parseLook, type IdleCloseDeps } from '../machine/liveIdle.ts';
+import { tmpDir } from './testTmp.ts';
 
 interface FakeEditor {
   playing: boolean;
@@ -282,8 +282,8 @@ test('w2116: without dialog and rescue (the idle close) a dialog is waited out a
   assert.equal(ed.up(), true);
 });
 
-test('w2116: backupScenes keeps Unity\'s scene backups and each dirty scene file, with a note, under Logs/', () => {
-  const sb = fs.mkdtempSync(path.join(os.tmpdir(), 'w2116-'));
+test('w2116: backupScenes keeps Unity\'s scene backups and each dirty scene file, with a note, under Logs/', (t) => {
+  const sb = tmpDir('w2116-', t);
   fs.mkdirSync(path.join(sb, 'Temp', '__Backupscenes'), { recursive: true });
   fs.writeFileSync(path.join(sb, 'Temp', '__Backupscenes', '0.backup'), 'unity backup');
   fs.mkdirSync(path.join(sb, 'Assets', 'Scenes'), { recursive: true });

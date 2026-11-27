@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import http from 'node:http';
@@ -27,6 +26,7 @@ import { testRepos } from './testMachine.ts';
 import type { Config } from './config.ts';
 import type { GitStatus, ImageInput, PermissionMode, SandboxPoolSettings, SessionInfo, WorkItem } from '../shared/types.ts';
 import { pairRoom, warmText } from '../shared/capacity.ts';
+import { tmpDir } from './testTmp.ts';
 import {
   GB,
   until,
@@ -570,8 +570,7 @@ test('stale output on a machine: the portal sends the ledger facts, a dry run co
 test('machine sandboxes: an editor start takes a Unity slot: batch builds started outside the gate count, a restart keeps its slot (w469)', async (t) => {
   const r = repos();
   t.after(r.cleanup);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-msb-slots-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = tmpDir('ff-msb-slots-', t);
   const HUB = 'C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.19f1\\Editor\\Unity.exe';
   const build = (pid: number, project: string) => ({ pid, ppid: 77, name: 'Unity.exe', cmd: `"${HUB}" -batchmode -quit -projectPath ${project} -executeMethod BuildScript.Build` });
   let procs = [build(501, 'D:\\work\\ffsb\\pr-fix'), build(502, 'D:\\work\\ffsb\\ui-fix')];
@@ -595,8 +594,7 @@ test('machine sandboxes: an editor start takes a Unity slot: batch builds starte
 test('w4775: editor starts at the same moment take the free Unity slots one at a time: with one free, one starts and the rest are refused (lothdesktop, 2026-11-19 11:50Z: three starts with two free, "Unity editors 4 of 3")', async (t) => {
   const r = repos();
   t.after(r.cleanup);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-msb-slots-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = tmpDir('ff-msb-slots-', t);
   const HUB = 'C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.19f1\\Editor\\Unity.exe';
   const procs = [{ pid: 501, ppid: 77, name: 'Unity.exe', cmd: `"${HUB}" -batchmode -quit -projectPath D:\\work\\ffsb\\pr-fix -executeMethod BuildScript.Build` }];
   let slots: UnitySlots | undefined;
@@ -617,8 +615,7 @@ test('w4775: editor starts at the same moment take the free Unity slots one at a
 test('w1962: queued editor starts that fill the Unity slots each start at their turn, never refused for the slot they hold (LothDesktop, 2026-10-23: "needs 1, 0 free (3 of 3 in use) ... 3 granted not started yet")', async (t) => {
   const r = repos();
   t.after(r.cleanup);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-msb-slots-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = tmpDir('ff-msb-slots-', t);
   const tickets: ReturnType<typeof fakeTicket>[] = [];
   let slots: UnitySlots | undefined;
   const { p, events, running } = pool(r, { settings: { maxUnity: 2, maxSandboxes: 3 }, slots: () => slots!, bootTicket: () => {

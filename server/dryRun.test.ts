@@ -4,7 +4,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
@@ -14,6 +13,7 @@ import webpush from 'web-push';
 import WebSocket from 'ws';
 import { DRY_RUN_WHY, dryRun, dryRunStartRefusal } from './dryRun.ts';
 import { Store } from './store.ts';
+import { tmpDir } from './testTmp.ts';
 import { SessionManager } from './sessions.ts';
 import { MachineManager } from './machines.ts';
 import { Waker } from './wake.ts';
@@ -39,10 +39,11 @@ function on(t: { after: (fn: () => void) => void }) {
   return { off: () => (process.env.FFSB_DRY_RUN = '0'), on: () => (process.env.FFSB_DRY_RUN = '1') };
 }
 
-function tmp(t: { after: (fn: () => void) => void }, prefix: string) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 }));
-  return dir;
+// w6476: removed when the file's process exits, not in t.after: those hooks run in the order registered, so a folder removed
+// there is written to again by the store.flush() a test registers after it (ffsb-dry-links-*), and the server a test spawned
+// still holds its folder until a later hook kills it.
+function tmp(_t: unknown, prefix: string) {
+  return tmpDir(prefix);
 }
 
 /** A socket that records what an upgrade handler answers. */
@@ -315,11 +316,14 @@ test('dry run: the real server says so in its health and its log, turns away dae
   const env: NodeJS.ProcessEnv = { ...process.env, FFSB_DRY_RUN: '1', FFSB_CONFIG: path.join(base, 'config.json'), HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: path.join(home, '.claude') };
   for (const k of ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'DISCORD_TOKEN']) delete env[k];
   const child = spawn(process.execPath, [path.join(import.meta.dirname, 'index.ts')], { cwd: path.join(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe'] });
-  t.after(() => child.kill());
+  const exited = new Promise<number | null>((r) => child.once('exit', (code) => r(code)));
+  t.after(async () => {
+    child.kill();
+    await exited;
+  });
   let log = '';
   child.stdout.on('data', (d) => (log += d));
   child.stderr.on('data', (d) => (log += d));
-  const exited = new Promise<number | null>((r) => child.once('exit', (code) => r(code)));
   const until = async (what: RegExp, ms: number) => {
     const end = Date.now() + ms;
     while (!what.test(log)) {

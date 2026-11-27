@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { Store } from './store.ts';
 import { gzipFile } from './dataGuard.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * w2026: the transcript reads background passes make never hold the event loop: the ledger sweep's `gh pr create` scan reads only
@@ -17,8 +17,8 @@ const T = '2026-10-24T09:00:00.000Z';
 let seq = 0;
 const line = (o: object) => JSON.stringify({ seq: ++seq, t: T, ...o });
 
-test('w2026: prCreateResults reads a transcript once, then only what was appended, never a line still being written', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-scan-'));
+test('w2026: prCreateResults reads a transcript once, then only what was appended, never a line still being written', async (t) => {
+  const dir = tmpDir('pr-scan-', t);
   const store = new Store(dir);
   const f = path.join(dir, 'transcripts', 's1.jsonl');
   fs.mkdirSync(path.dirname(f), { recursive: true });
@@ -36,8 +36,8 @@ test('w2026: prCreateResults reads a transcript once, then only what was appende
   assert.equal((await store.prCreateResults('s1')).length, 2);
 });
 
-test('w2026: a tail read of a compressed transcript comes from its tail file, not a synchronous unzip of the whole', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gz-tail-'));
+test('w2026: a tail read of a compressed transcript comes from its tail file, not a synchronous unzip of the whole', async (t) => {
+  const dir = tmpDir('gz-tail-', t);
   const store = new Store(dir);
   for (let i = 0; i < 50; i++) store.append('s1', { kind: 'system', text: `line ${i}` });
   const f = path.join(dir, 'transcripts', 's1.jsonl');

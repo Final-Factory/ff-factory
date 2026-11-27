@@ -3,13 +3,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { TestHistory, labelFailures, parseNunit, type RunInfo, type TestCase } from './testHistory.ts';
+import { tmpDir } from './testTmp.ts';
 
 const T0 = Date.parse('2026-11-20T12:00:00Z');
 const NOW = T0 + 3 * 86_400_000;
-const tmp = (what: string) => fs.mkdtempSync(path.join(os.tmpdir(), `test-history-writer-${what}-`));
+const tmp = (what: string) => tmpDir(`test-history-writer-${what}-`);
 const history = () => new TestHistory({ dataDir: tmp('db'), now: () => NOW });
 const at = (h: number) => new Date(T0 + h * 3_600_000).toISOString();
 

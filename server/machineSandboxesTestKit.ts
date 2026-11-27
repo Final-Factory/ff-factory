@@ -3,7 +3,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import http from 'node:http';
@@ -26,13 +25,14 @@ import { copyTree, removeTree, run } from './proc.ts';
 import { readGitStatus } from './gitStatus.ts';
 import { borrowsFrom, configText, finishConversion, gitPathForm, isSlotRepo, isWorktree, keptStashPrefix, worktreeRecordOf } from '../machine/slotRepo.ts';
 import { testRepos } from './testMachine.ts';
+import { tmpDir } from './testTmp.ts';
 import type { Config } from './config.ts';
 import type { GitStatus, ImageInput, PermissionMode, SandboxPoolSettings, SessionInfo, WorkItem } from '../shared/types.ts';
 import { pairRoom, warmText } from '../shared/capacity.ts';
 
 
 // Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
-process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
+process.env.FF_UNITY_SLOTS = tmpDir('ff-slots-');
 
 export const GB = 1024 ** 3;
 

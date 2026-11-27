@@ -53,6 +53,7 @@ import { AttachmentStore } from './attachments.ts';
 import { readCrashHold, readTimedAsk, writeBenchPriorities } from '../machine/benchLock.ts';
 import { checkCrashHoldLaunch } from './guard.ts';
 import { CRASH_HOLD_WINDOW_MS, liveCrashHolds, noteBench, recentPlayers, riskyTicket, type PlayerSeen } from './crashHolds.ts';
+import { tmpDir } from './testTmp.ts';
 import {
   shortSlowTurns,
   BEN,
@@ -1208,7 +1209,7 @@ test('w2653: a worker exports the spend record only once its person grants it, a
   const { store, machines, agents, dispatcher, chat, call } = await setupOnMachine(t);
   const ben = chat(BEN).info;
   const loth = chat(LOTH).info;
-  agents.spend = new SpendStore(fs.mkdtempSync(path.join(os.tmpdir(), 'spend-grant-')), { work: () => store.work.values(), session: (id) => store.sessions.get(id), priorResults: () => 1 });
+  agents.spend = new SpendStore(tmpDir('spend-grant-'), { work: () => store.work.values(), session: (id) => store.sessions.get(id), priorResults: () => 1 });
   await call(ben, 'request_work', { title: 'What a finished request costs', brief: 'From the spend record.' });
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Cost per request', title: 'Spend', work_id: 'w1' });
   assert.equal(started.isError, false, started.text);

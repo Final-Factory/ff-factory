@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { batchUnityIn, holdKey, nightsIn, slotRunsFor, switchHoldRefusal } from '../machine/switchHolds.ts';
 import type { SlotRequest } from '../machine/unitySlots.ts';
+import { tmpDir } from './testTmp.ts';
 
 // The w3610 case (2026-11-08): the w3598 night's attempt 2 builds master f19f2af5 with build_player.sh in lothdesktop/slot1,
 // and a second worker there calls switch_branch at 05:01 EST (10:01 UTC).
@@ -15,7 +15,7 @@ const night = { tag: '2026-11-08', date: '2026-11-08', rehearsal: false, status:
 const build: SlotRequest = { id: 'b1', holder: 'sandbox:slot1', count: 1, pid: 40100, label: 'nightly build f19f2af5', session: 'w3598-worker', createdAt: NOW - 600_000, grantedAt: Date.parse('2026-11-08T09:58:00Z') };
 
 function history(states: Record<string, unknown>) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-nh-'));
+  const root = tmpDir('ff-nh-');
   fs.mkdirSync(path.join(root, 'state'));
   for (const [n, st] of Object.entries(states)) fs.writeFileSync(path.join(root, 'state', n), JSON.stringify(st));
   return root;

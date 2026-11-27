@@ -3,9 +3,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { keepInMat, matPathIn, setMatValue, unityFloat } from '../machine/matText.ts';
+import { tmpDir } from './testTmp.ts';
 
 const COMET = [
   '%YAML 1.1',
@@ -91,8 +91,8 @@ test('refuses what is not a material, and a path outside Assets or the sandbox',
   for (const bad of ['Assets/../ProjectSettings/x.mat', 'Packages/x.mat', 'Assets/x.shader', '/etc/x.mat', 'Assets//x.mat']) assert.throws(() => matPathIn(root, bad), bad);
 });
 
-test('keepInMat writes the file in the sandbox and says what changed', () => {
-  const dir = fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), 'w1839-keep-'));
+test('keepInMat writes the file in the sandbox and says what changed', (t) => {
+  const dir = tmpDir('w1839-keep-', t);
   const file = path.join(dir, 'Assets', 'Resources', 'Vfx', 'VfxComet.mat');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, COMET);

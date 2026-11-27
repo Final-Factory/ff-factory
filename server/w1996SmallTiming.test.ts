@@ -19,11 +19,10 @@ import type { TicketState } from '../machine/benchQueue.ts';
 import { TIMED_DEFAULTS, type TimedRunOrder, type TimedRunReport } from '../shared/timedRun.ts';
 import type { AttachmentStore } from './attachments.ts';
 import type { Machine } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 const tmp = (t: { after(fn: () => void): void }, tag: string) => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), tag));
-  t.after(() => fs.rmSync(d, { recursive: true, force: true }));
-  return d;
+  return tmpDir(tag, t);
 };
 
 const GB = 1024 ** 3;
@@ -31,7 +30,7 @@ const box = (id: string, maxAgents: number, platform: string, o: Partial<Compute
 const fleet = () => [box('beast', 6, 'win32', { live: 6 }), box('lothdesktop', 10, 'win32', { live: 9 }), box('lothlaptop', 1, 'win32', { live: 1 }), box('m3', 2, 'darwin'), box('biscuit', 4, 'linux'), box('m5', 4, 'darwin', { live: 0, noTimedRuns: 'Ben' })];
 const at = (id: string) => fleet().find((c) => c.id === id)!;
 
-test('w1996: timed_run goes to small worker computers too, play-only first, then the fewest runs ahead and agent slots; Windows only', () => {
+test('w1996: timed_run goes to small worker computers too, play-only first, then the fewest runs ahead and agent slots; Windows only', (tc) => {
   const machines = [
     { id: 'beast', platform: 'win32', sandboxRoot: 'F:/ffw/sandboxes' },
     { id: 'lothlaptop', platform: 'win32', sandboxRoot: 'C:/ffw/sandboxes' },
@@ -42,7 +41,7 @@ test('w1996: timed_run goes to small worker computers too, play-only first, then
   const agents: Record<string, number> = { beast: 6, lothlaptop: 1, m3: 2, m5: 4 };
   const online = new Set(['beast', 'lothlaptop', 'm3', 'm5']);
   const tr = new TimedRuns({
-    dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'w1996tr-')),
+    dataDir: tmp(tc, 'w1996tr-'),
     store: {} as AttachmentStore,
     machines: () => machines,
     isOnline: (id) => online.has(id),
@@ -64,14 +63,14 @@ test('w1996: timed_run goes to small worker computers too, play-only first, then
   assert.deepEqual(rankTargets([T('b', 'small', 1, 1), T('a', 'small', 0, 3), T('p', 'play-only', 2, 0)]).map((x) => x.id), ['p', 'a', 'b']);
 });
 
-test('w1996: a computer a person holds is shown but never picked for a timed run', () => {
+test('w1996: a computer a person holds is shown but never picked for a timed run', (t) => {
   const machines = [
     { id: 'lothlaptop', platform: 'win32', sandboxRoot: 'C:/ffw/sandboxes' },
     { id: 'desktop-coosego', platform: 'win32', playOnly: 'play only' },
   ] as unknown as Machine[];
   const holds: Record<string, string> = { lothlaptop: 'lothsahn using it, 2026-10-24: hold until he says it\'s free' };
   const tr = new TimedRuns({
-    dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'w1996held-')),
+    dataDir: tmp(t, 'w1996held-'),
     store: {} as AttachmentStore,
     machines: () => machines,
     isOnline: () => true,

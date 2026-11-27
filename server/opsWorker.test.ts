@@ -14,6 +14,7 @@ import { fakeQuery } from '../e2e/fakeAgent.ts';
 import type { Config } from './config.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
 import type { SessionInfo } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 /** The orchestration worker (w597, docs/ops-worker.md): who reaches it, its guard, its socket, its one session. */
 
@@ -203,7 +204,7 @@ test('the header: the CLI\'s arguments only, and only Claude Code\'s own environ
 
 /** A fake fff-ops.socket: answers each connection with `reply(header)`, then echoes. */
 async function fakeSocket(reply: (header: string) => string | undefined) {
-  const p = process.platform === 'win32' ? `\\\\.\\pipe\\ffsb-ops-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-')), 's.sock');
+  const p = process.platform === 'win32' ? `\\\\.\\pipe\\ffsb-ops-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(tmpDir('ffsb-ops-'), 's.sock');
   const headers: string[] = [];
   const server = net.createServer({ allowHalfOpen: true }, (c) => {
     let buf = '';
@@ -272,7 +273,7 @@ test('the spawner: the launcher\'s ERR, a refused connection and no socket becom
  * interrupt, and exits `exitMs` after its input ends with no turn open; the unit frees the connection `unitLagMs` later.
  */
 async function fakeSystemd(o: { exitMs: number; unitLagMs: number }) {
-  const p = process.platform === 'win32' ? `\\\\.\\pipe\\ffsb-ops-sd-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-')), 's.sock');
+  const p = process.platform === 'win32' ? `\\\\.\\pipe\\ffsb-ops-sd-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(tmpDir('ffsb-ops-'), 's.sock');
   const log: string[] = [];
   let open = 0;
   let most = 0;
@@ -354,7 +355,7 @@ test('a fresh job starts a new process that runs it, from every state the last o
   // The real Agent SDK, through opsSpawner, against the stand-in socket: the path a job takes in the portal VM.
   setQueryForTesting(query);
   const sd = await fakeSystemd({ exitMs: 300, unitLagMs: 100 });
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-f-'));
+  const dir = tmpDir('ffsb-ops-f-');
   const store = new Store(dir);
   const sessions = new SessionManager({} as Config, store);
   const told: string[] = [];
@@ -417,7 +418,7 @@ test('a fresh job starts a new process that runs it, from every state the last o
 
 test('the one session: only an allowed orchestrator reaches it, a job needs its person\'s turn, the harness cannot send', async () => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-s-'));
+  const dir = tmpDir('ffsb-ops-s-');
   const store = new Store(dir);
   const sessions = new SessionManager({} as Config, store);
   let personTurn = true;
@@ -468,7 +469,7 @@ test('the one session: only an allowed orchestrator reaches it, a job needs its 
 
 test("every new job and every change of caller starts a fresh conversation and process, on the caller's token (w738); a follow-up keeps both", async () => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-f-'));
+  const dir = tmpDir('ffsb-ops-f-');
   const store = new Store(dir);
   const sessions = new SessionManager({} as Config, store);
   let personTurn = true;
@@ -534,7 +535,7 @@ test("every new job and every change of caller starts a fresh conversation and p
 /** w1133 (lothsahn, 2026-10-12: "Every time you call the ops worker with a new request, you should clear its context or use a new session. Same thing with Ben's operator"). */
 function freshJobRig(opts: { slowStepMs?: number } = {}) {
   setQueryForTesting(fakeQuery({ stepMs: 1, slowStepMs: opts.slowStepMs ?? 1 }) as never);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-n-'));
+  const dir = tmpDir('ffsb-ops-n-');
   const store = new Store(dir);
   const sessions = new SessionManager({} as Config, store);
   const st = { personTurn: true, clock: Date.now(), starts: [] as (string | undefined)[], sent: [] as string[] };
@@ -678,7 +679,7 @@ test('w1133: a new job is refused while the worker is mid-turn on the open job (
 
 test('w631: a job sent for ledger requests: the ids are checked, the worker is told how to close them, and its turn end goes to the ledger', async () => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-w-'));
+  const dir = tmpDir('ffsb-ops-w-');
   const store = new Store(dir);
   const sessions = new SessionManager({} as Config, store);
   const told: string[] = [];
@@ -719,7 +720,7 @@ test('w631: a job sent for ledger requests: the ids are checked, the worker is t
 
 test('w1039: a click of the person\'s that covers a deploy opens it; one that covers nothing else does not, and a job needs the requests the click named', async () => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-click-'));
+  const dir = tmpDir('ffsb-ops-click-');
   const store = new Store(dir);
   const sessions = new SessionManager({} as Config, store);
   const asked: string[] = [];
@@ -745,7 +746,7 @@ test('w1039: a click of the person\'s that covers a deploy opens it; one that co
 
 test("w5507: in a turn relayed text joined, the ops gates hand the person's words to the turn check: send's words, deploy's text or words, restart's words", async () => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-w-'));
+  const dir = tmpDir('ffsb-ops-w-');
   const store = new Store(dir);
   const sessions = new SessionManager({} as Config, store);
   // Lothsahn's turn that a relayed message joined: only "ship the portal now", his own words, counts.
@@ -771,7 +772,7 @@ test("w5507: in a turn relayed text joined, the ops gates hand the person's word
 
 test('a deploy: only in a person\'s own turn, a grant good once for 15 minutes, and a report asked for after the restart', async () => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-d-'));
+  const dir = tmpDir('ffsb-ops-d-');
   const store = new Store(dir);
   const sessions = new SessionManager({} as Config, store);
   let personTurn = false;
@@ -821,7 +822,7 @@ test('a deploy: only in a person\'s own turn, a grant good once for 15 minutes, 
 
 test('w974: a restart: only in a person\'s own turn, its own grant good once for 15 minutes, never a deploy\'s, and a report asked for after the restart', async () => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-r-'));
+  const dir = tmpDir('ffsb-ops-r-');
   const store = new Store(dir);
   const sessions = new SessionManager({} as Config, store);
   let personTurn = false;
@@ -912,7 +913,7 @@ test('w974: the guard lets fffctl restart through (the root wrapper holds the gr
 
 test('w855: machine_update opens a job in a harness turn, for the person\'s own open request, with a command the server wrote', async () => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-m-'));
+  const dir = tmpDir('ffsb-ops-m-');
   const store = new Store(dir);
   const sessions = new SessionManager({} as Config, store);
   const machines: Record<string, { id: string; root?: string; platform?: string; target: string; local?: boolean }> = {
@@ -1160,7 +1161,7 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
 
 test('w1596: machine_update of a machine whose daemon updates over its own link: the portal runs it, no ssh and no worker job; the report goes to the caller', async () => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-link-'));
+  const dir = tmpDir('ffsb-ops-link-');
   const store = new Store(dir);
   const sessions = new SessionManager({} as Config, store);
   const told: string[] = [];
@@ -1320,7 +1321,7 @@ test('w1106: a background poll is refused, in the command or in a scratch script
 
 test('w1106: a timer is set within a job and keeps it; a fire reopens that job (fresh after it ended), carries its open requests, and its turn end goes to that person', async () => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-t-'));
+  const dir = tmpDir('ffsb-ops-t-');
   const store = new Store(dir);
   const sessions = new SessionManager({} as Config, store);
   const told: string[] = [];

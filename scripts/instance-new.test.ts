@@ -23,6 +23,7 @@ import {
   taskScript,
 } from './instance/new.ts';
 import { listProblem, readList, settingsDiff } from './instance/update-all.ts';
+import { tmpDir } from '../server/testTmp.ts';
 
 // A folder of this computer's kind, so the portal's own loadConfig takes its paths (it refuses F:/ paths off Windows).
 const DIR = path.join(os.tmpdir(), 'ff-instance-new-test', 'atlas');
@@ -205,8 +206,7 @@ test('parseOptions: required options, machines lower-cased, --dry-run', () => {
 });
 
 test('the list entry goes into a temp list, checked and written atomically; a second one is refused', (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w14-new-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const root = tmpDir('w14-new-', t);
   const file = path.join(root, 'instances.json');
   const before = { version: 1, leader: { url: 'https://lead.test', stableMinutes: 5 }, instances: [{ name: 'lens-scout', dir: 'F:/ffw/lens-factory', portalTask: 'fflensscout-portal' }] };
   fs.writeFileSync(file, JSON.stringify(before));

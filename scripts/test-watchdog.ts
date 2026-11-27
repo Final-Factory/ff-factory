@@ -92,7 +92,9 @@ async function main(argv: string[]) {
     console.error('usage: node scripts/test-watchdog.ts --minutes <n> -- <command> [args...]');
     return 2;
   }
-  const inflight = process.env.FF_TEST_INFLIGHT || path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ff-inflight-')), 'inflight.json');
+  // w6476: a folder made here for the reporter's file goes when the run ends (one was left in the temp folder per run).
+  const own = process.env.FF_TEST_INFLIGHT ? undefined : fs.mkdtempSync(path.join(os.tmpdir(), 'ff-inflight-'));
+  const inflight = process.env.FF_TEST_INFLIGHT || path.join(own!, 'inflight.json');
   const started = Date.now();
   // Its own process group on a Mac or Linux, so the whole tree can be ended; Windows ends a tree by its parent links.
   const child = spawn(cmd[0], cmd.slice(1), { stdio: 'inherit', env: { ...process.env, FF_TEST_INFLIGHT: inflight }, detached: process.platform !== 'win32' });
@@ -118,6 +120,7 @@ async function main(argv: string[]) {
     child.on('exit', (c, sig) => resolve(c ?? (sig ? 128 : 1)));
   });
   clearTimeout(timer);
+  if (own) fs.rmSync(own, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   return hung ? 124 : code;
 }
 

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
+import { tmpDir } from './testTmp.ts';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseHolders, holdersScript, type Holder } from './agentNodeHolders.ts';
@@ -16,7 +16,7 @@ import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodeHome, agentNodePathDir
  * running the installed node.exe.
  */
 
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'agent-node-'));
+const tmp = () => tmpDir('agent-node-');
 const unpackedName = AGENT_NODE.zip.replace(/\.zip$/, '');
 const shaOf = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 
@@ -636,6 +636,8 @@ test("w5839: the holder read, run: before trust it names only a Low process that
     });
     return Object.assign(p, { out: () => out });
   };
+  // w6476: the folder is removed at exit; a killed node.exe still holds its file until it has ended.
+  const stop = (p: ReturnType<typeof run> extends Promise<infer P> ? P : never) => new Promise<void>((res) => (p.exitCode !== null || p.signalCode ? res() : (p.once('exit', () => res()), p.kill())));
   const hold = (file: string, flags: string) => run(`open ${file}`, `require('fs').openSync(${JSON.stringify(path.join(dir, file))}, '${flags}')`);
   // A legitimate Low worker: its working folder there and a file open for reading.
   const reader = await hold('f.js', 'r');
@@ -658,7 +660,7 @@ test("w5839: the holder read, run: before trust it names only a Low process that
       assert.deepEqual(w?.map((h) => h.pid), [writer.pid], `a writer is named on a check: ${last}`);
       assert.equal(w![0].path.toLowerCase(), path.join(real, 'g.js').toLowerCase());
     } finally {
-      writer.kill();
+      await stop(writer);
     }
     // A write handle opened through a second hard link that was deleted since (w5951's review, B1): the file is back to one
     // name, so the nlink check passes, and Windows gives no path for the handle. It is matched by its file id. Write-only
@@ -672,10 +674,10 @@ test("w5839: the holder read, run: before trust it names only a Low process that
       assert.ok(!fs.existsSync(path.join(side, 'x.js')));
       assert.deepEqual(read(true)?.map((h) => h.pid), [sneak.pid], `a writer through a deleted link is named on a check: ${last}`);
     } finally {
-      sneak.kill();
+      await stop(sneak);
     }
   } finally {
-    reader.kill();
+    await stop(reader);
   }
 });
 
@@ -749,7 +751,7 @@ function Get-NetFirewallRule { param($Direction, $Name) [pscustomobject]@{ Name 
 function Get-Process { param($ErrorAction) ${opts.procsThrow ? "throw 'Access is denied';" : ''} ${opts.running === false ? '' : `[pscustomobject]@{ Id = 42; Path = '${node}' };`} [pscustomobject]@{ Id = 4; Path = $null } }
 function Get-NetTCPConnection { param($State, $OwningProcess, $ErrorAction) if ($State -eq 'Listen') { [pscustomobject]@{ LocalPort = 8891 } } else { foreach ($p in ${arr(opts.peers ?? ['127.0.0.1', '100.86.157.116'])}) { [pscustomobject]@{ LocalPort = 8891; RemoteAddress = $p } }; [pscustomobject]@{ LocalPort = 50000; RemoteAddress = '8.8.8.8' } } }
 `;
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'fwcheck-')), 'check.ps1');
+  const file = path.join(tmpDir('fwcheck-'), 'check.ps1');
   fs.writeFileSync(file, mocks + firewallCheckScript([node], 'F:\\ffw\\tmp', [node]));
   const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8' });
   fs.rmSync(path.dirname(file), { recursive: true, force: true });

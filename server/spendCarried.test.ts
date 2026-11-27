@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { carriedTotals, listUsd, sumTok, zeroTok, type ModelTok, type TurnUsage } from '../shared/spend.ts';
@@ -9,6 +8,7 @@ import { SpendStore, backfillTurnUsd, estimateTurn, type SpendContext } from './
 import { firstResultBase } from './sessions.ts';
 import { Store } from './store.ts';
 import type { Requester, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * w2007: a resumed CLI's older saved totals (the whole running total) were billed as one turn. Ben's orchestrator's four turns
@@ -27,7 +27,7 @@ const coordinator = (id: string, patch: Partial<SessionInfo> = {}): SessionInfo 
 const tok = (o: Partial<ModelTok[string]>) => ({ ...zeroTok(), ...o });
 
 function world(items: WorkItem[], sessions: SessionInfo[]) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spend-carried-'));
+  const dir = tmpDir('spend-carried-');
   const ctx: SpendContext = { work: () => items, session: (id) => sessions.find((s) => s.id === id), priorResults: () => 1, now: () => T0 + 3_600_000 };
   return { dir, spend: new SpendStore(dir, ctx) };
 }
@@ -150,7 +150,7 @@ test('correctCarried (w2007): the turns the carried-totals rule recorded itself 
 });
 
 test('Store.scanTranscript (w2007): the lines it keeps, in order, from the file or its .gz, read in pieces', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scan-'));
+  const dir = tmpDir('scan-');
   const store = new Store(dir);
   store.append('a', { kind: 'user', text: 'first', from: 'orchestrator' });
   store.append('a', { kind: 'tool_result', toolUseId: 't', isError: false, text: 'x'.repeat(5 * 1024 * 1024) }); // longer than a read

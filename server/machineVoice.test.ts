@@ -5,7 +5,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -19,8 +18,9 @@ import { Daemon, type Probes } from '../machine/daemon.ts';
 import { DaemonVoice, MAX_REMOTE_WAV_BYTES, freeVramMiB, voiceConfigOf, type VoiceEngine } from '../machine/voice.ts';
 import { encodeWav } from '../shared/voice.ts';
 import type { HostStats } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
-process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
+process.env.FF_UNITY_SLOTS = tmpDir('ff-slots-');
 
 const until = async (what: string, cond: () => boolean, ms = 5000) => {
   const end = Date.now() + ms;
@@ -183,7 +183,7 @@ function localVoice(tmp: string, over: Partial<VoiceConfig> = {}): VoiceConfig {
 }
 
 async function setup(opts: { used?: { mib: number }; voice?: Partial<VoiceConfig>; idleMinutes?: number } = {}) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-machinevoice-'));
+  const tmp = tmpDir('ffsb-machinevoice-');
   const voice = localVoice(tmp, opts.voice);
   const cfg = { dataDir: tmp, limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' }, voice } as unknown as Config;
   const store = new Store(tmp);
@@ -468,7 +468,7 @@ test('w615: a clip that timed out on a live link keeps the next ones off that ma
 });
 
 test('w615: the machine has 10 s to return the text, whatever the clip and whether its model is loaded (lothsahn)', async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-voicetimeout-'));
+  const tmp = tmpDir('ffsb-voicetimeout-');
   const cfg = { dataDir: tmp, voice: localVoice(tmp) } as unknown as Config;
   assert.equal(cfg.voice.remote.timeoutSeconds, 10);
   const waits: number[] = [];

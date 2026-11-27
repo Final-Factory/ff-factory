@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -17,6 +16,7 @@ import { FFBOX_HASH_FILE, ffboxTokenHash } from './configMigration.ts';
 import { redactSecrets } from './secrets.ts';
 import { MockConnector, SAMPLE_CLASSES, SAMPLE_CONVERSATION_ANSWER, SAMPLE_CONVERSATIONS, SAMPLE_INTAKE } from '../e2e/mockConnector.ts';
 import type { Config } from './config.ts';
+import { tmpDir } from './testTmp.ts';
 
 const until = async (what: string, cond: () => boolean, ms = 5000) => {
   const end = Date.now() + ms;
@@ -27,7 +27,7 @@ const until = async (what: string, cond: () => boolean, ms = 5000) => {
 };
 
 async function setup(t: { after: (fn: () => Promise<void> | void) => void }, opts: { enabled?: boolean; dataDir?: string } = {}) {
-  const dataDir = opts.dataDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-providers-'));
+  const dataDir = opts.dataDir ?? tmpDir('ffsb-providers-');
   const token = mintProviderToken();
   const cfg = { dataDir, providers: { ffbox: { enabled: opts.enabled ?? true, tokenSha256: tokenSha256(token) } } } as unknown as Config;
   const pm = new ProviderManager(cfg);
@@ -49,7 +49,8 @@ async function setup(t: { after: (fn: () => Promise<void> | void) => void }, opt
     for (const c of connectors) c.close();
     pm.close();
     server.close();
-    if (!opts.dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
+    // w6476: the folder goes when this file's process exits (tmpDir): the links' close events, after pm.close(), arm a save that
+    // would write providers/ffbox.json back into a folder removed here.
   });
   return { cfg, pm, url, token, connect, dataDir, remote };
 }
@@ -65,8 +66,7 @@ test('tokens: ffpv1_ plus 43 base64url characters, stored as SHA-256, redacted e
 });
 
 test('set_app_config: providers.ffbox.token is kept only as its hash, never echoed; enabled is a boolean', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcfg-prov-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = tmpDir('appcfg-prov-', t);
   const file = path.join(dir, 'config.json');
   fs.writeFileSync(file, JSON.stringify({ port: 8790 }, null, 2));
   const was = process.env.FFSB_SECRETS_DIR;
@@ -358,8 +358,7 @@ test('switched off while connected: closed with 4403 at once; a newer connection
 });
 
 test('state survives a restart, and the welcome gives back where each stream left off', async (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-providers-restart-'));
-  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const dataDir = tmpDir('ffsb-providers-restart-');
   {
     const { connect, pm } = await setup(t, { dataDir });
     const c = connect();
@@ -430,8 +429,7 @@ test('queries: asked live, and the answer is kept for later; the last query is i
 });
 
 test('queries: no answer in time, offline or refused: the last answer kept, labelled with its time', async (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-providers-q-'));
-  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const dataDir = tmpDir('ffsb-providers-q-');
   const { connect, pm, cfg } = await setup(t, { dataDir });
   const c = connect();
   await c.hello({ protocol: 2, accepts: ['query'], queries: ['config', 'status'] });
