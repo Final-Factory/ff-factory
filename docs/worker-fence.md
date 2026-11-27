@@ -122,7 +122,10 @@ anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macO
   or "build a release player" with no pre-1.0 or 0.50 after it; `excusedBuild`). Never excused (w6469's review of PR
   #1492): Steam with a version, a match with an installed-type word in it or just before it (published, shipped, live),
   and a joining word or role before the PR head ("Steam 0.50 and clients on the PR head"). A Steam or a pre-1.0/0.50 release is never the build config either ("the
-  Steam release or debug build", "a debug or pre-1.0 release": w6474's review). Anything else keeps the mark.
+  Steam release or debug build", "a debug or pre-1.0 release": w6474's review).
+  Plurals count ("Steam builds and the clients on the PR head"), and so does the version named before Steam or as
+  "v0.50" or "(pre-1.0)" after it ("0.50 from Steam", "the 0.50 Steam client", "Steam v0.50"); a match holding both
+  Steam and a version is never excused (w6485, from 497345e4's reviews of PR #1492). Anything else keeps the mark.
 
 ## Long runs the daemon starts for a worker (w6367, Windows)
 

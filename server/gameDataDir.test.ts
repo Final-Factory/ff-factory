@@ -114,3 +114,16 @@ test('w6467: Steam and a short version keep the mark; the PR\'s own release or S
     assert.equal(otherPlayerIn(t, NEW), undefined, t);
   }
 });
+
+// w6485 (497345e4's reviews of PR #1492): plurals, and the version named before Steam, keep the mark too.
+test('w6485: plural Steam builds and a version named before Steam keep the mark; the PR\'s own Steam builds and a lobby do not', () => {
+  assert.match(otherPlayerIn('0.50 from Steam', NEW) ?? '', /names a build no commit is \("0\.50 from Steam"\)/);
+  for (const t of ['the Steam players and builds of the PR head', 'Steam builds and the clients on the PR head', '0.50 from Steam', 'pre-1.0 on Steam',
+    'the 0.50 Steam client', 'Steam v0.50', 'Steam (pre-1.0)', 'the host runs the Steam copies', 'the 0.50 Steam client of the PR head', 'v0.50.1 via Steam']) {
+    assert.ok(otherPlayerIn(t, NEW), t);
+  }
+  for (const t of ['a Steam lobby on 0.50', 'the Steam build of the PR head', 'the Steam builds of the PR head', 'Build a release player of the PR head',
+    'join through a Steam lobby', 'join with the Steam game client of the PR build']) {
+    assert.equal(otherPlayerIn(t, NEW), undefined, t);
+  }
+});
