@@ -68,10 +68,6 @@ boot_age() {
 }
 in_maintenance() { [ -f "$MAINT" ] && [ $(($(now) - $(stat -c %Y "$MAINT"))) -lt 7200 ]; }
 agent_ok() { guest_agent '{"execute":"guest-ping"}' 10 >/dev/null; }
-ssh_guest() {
-  ssh -i "$FFF_VM_ETC/ssh/id_ed25519" -o UserKnownHostsFile="$FFF_VM_ETC/ssh/known_hosts" -o StrictHostKeyChecking=accept-new \
-    -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=4 -o BatchMode=yes "$VM_ADMIN_USER@$NET_VM_IP" "$@"
-}
 firewall_ok() { nft list table inet fff_vm 2>/dev/null | matches -F "$FFF_VM_MARK"; }
 
 # The firewall table must be there whenever the VM runs (a reload of nftables.service with "flush ruleset" drops it).
