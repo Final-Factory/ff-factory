@@ -77,3 +77,13 @@ test('w6235: legacy_data that names another commit or a 0.50 build is not settle
   assert.equal(otherPlayerIn(`the pre-1.0 line at ${NEW}`, '20786882d8'), undefined);
   assert.equal(otherPlayerIn('read from its words: pre-1.0 or the 0.50 line; it acceded to the deadbeef plan', NEW), undefined);
 });
+
+test('w6458: a build named without a number keeps the mark; a PR head, a lobby or the release branch does not', () => {
+  assert.match(otherPlayerIn('the host runs the Steam pre-1.0 build', NEW) ?? '', /^its legacy_data names a build no commit is \("Steam pre-1\.0 build"\), but FF Factory checked only 20786882d8 for the FF_GAME_DATA_DIR backport, so the mark stays \(w6235\)$/);
+  for (const t of ['the host runs the Steam pre-1.0 build', 'the client was installed from Steam', 'the published 0.50 player', 'the pre-1.0 release', "Steam's 0.50 version", 'the installed pre-1.0 copy', 'the live 0.50 build']) {
+    assert.ok(otherPlayerIn(t, NEW), t);
+  }
+  for (const t of ['join through a Steam lobby', 'the pre-1.0 release branch at the PR head', 'Build the 0.50 line at the PR head and run the MP scenarios.', 'Run the MP scenarios at the PR head.', 'MP-activity-fingerprint on pre-1.0', 'Build a player of the 0.50 line']) {
+    assert.equal(otherPlayerIn(t, NEW), undefined, t);
+  }
+});

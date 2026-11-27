@@ -90,7 +90,7 @@ import { inheritedPayer, isSamePerson, personForWork, sessionPerson, tokenPerson
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { mergeOwnerProblem, mergeOwnerRefusal, type MergeOwner } from './mergeOwner.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
-import { dataDirClearedText, otherPlayerInWords, type DataDirVerdict } from './gameDataDir.ts';
+import { dataDirClearedText, otherPlayerInWords, PAIR_FILED_BY, type DataDirVerdict } from './gameDataDir.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashHold, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkHandedUp, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { designGoAsk } from './designGo.ts';
@@ -6079,9 +6079,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const title = clip(`Pair run for ${w.id}: ${x.what}`, 120);
     const brief = clip(
       [
-        x.brief,
-        '',
-        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1945, request_pair): ${pairText(pair)}. ${pair.legs === 1 ? 'Its one leg starts alone, a worker in a game sandbox that runs the host and the client on its own computer (start_agent with sandbox alone);' : 'Its legs start together, one worker in a game sandbox on each computer (start_agent with pair_sandboxes);'} ${PLAYERS_IN_SANDBOX} each leg's first message says which leg it is and where the others are, and message_pair reaches them. ${w.id}'s worker is Blocked on this request's report: the host leg (leg 1) reports the result with a line "For ${w.id}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), and every leg ends with DONE once the run is over. Do not merge ${w.id}'s pull request: its own worker does.${pair.legacyData ? ` ${LEGACY_INTEGRITY_CHECK}` : ''}${x.retryOf ? ` This is a retry of ${x.retryOf}, whose legs did not deliver the result (w2041)${x.avoid?.length ? `: no leg goes on ${x.avoid.join(' or ')}, where one failed` : ''}; start it fresh, nothing of ${x.retryOf}'s legs carries over.` : ''}${warm ? ` ${warmText(warm)}` : ''}`,
+        // w6458: PAIR_FILED_BY joins the worker's brief to FF Factory's words, so pairAskWords can take the worker's part back.
+        `${x.brief}${PAIR_FILED_BY}${sessionId} on ${w.id} (w1945, request_pair): ${pairText(pair)}. ${pair.legs === 1 ? 'Its one leg starts alone, a worker in a game sandbox that runs the host and the client on its own computer (start_agent with sandbox alone);' : 'Its legs start together, one worker in a game sandbox on each computer (start_agent with pair_sandboxes);'} ${PLAYERS_IN_SANDBOX} each leg's first message says which leg it is and where the others are, and message_pair reaches them. ${w.id}'s worker is Blocked on this request's report: the host leg (leg 1) reports the result with a line "For ${w.id}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), and every leg ends with DONE once the run is over. Do not merge ${w.id}'s pull request: its own worker does.${pair.legacyData ? ` ${LEGACY_INTEGRITY_CHECK}` : ''}${x.retryOf ? ` This is a retry of ${x.retryOf}, whose legs did not deliver the result (w2041)${x.avoid?.length ? `: no leg goes on ${x.avoid.join(' or ')}, where one failed` : ''}; start it fresh, nothing of ${x.retryOf}'s legs carries over.` : ''}${warm ? ` ${warmText(warm)}` : ''}`,
       ].join('\n'),
       8000,
     );

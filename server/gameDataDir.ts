@@ -88,9 +88,25 @@ export function otherPlayerIn(said: string, commit: string, where = 'legacy_data
   const c = commit.toLowerCase();
   const sha = (said.match(/\b[0-9a-f]{7,40}\b/gi) ?? []).find((h) => /\d/.test(h) && !(h.toLowerCase().startsWith(c) || c.startsWith(h.toLowerCase())));
   const version = /\b0\.50\.\d+\.\d+\b/.exec(said)?.[0];
-  if (!sha && !version) return undefined;
-  return `its ${where} names ${sha ? `commit ${sha.slice(0, 10)}` : `build ${version}`}, but FF Factory checked only ${c.slice(0, 10)} for the FF_GAME_DATA_DIR backport, so the mark stays (w6235)`;
+  const installed = sha || version ? undefined : INSTALLED_BUILD.map((r) => r.exec(said)?.[0]).find(Boolean);
+  if (!sha && !version && !installed) return undefined;
+  const named = sha ? `commit ${sha.slice(0, 10)}` : version ? `build ${version}` : `a build no commit is ("${clip(installed!.replace(/\s+/g, ' '), 60)}")`;
+  return `its ${where} names ${named}, but FF Factory checked only ${c.slice(0, 10)} for the FF_GAME_DATA_DIR backport, so the mark stays (w6235)`;
 }
+
+/**
+ * w6458 (w6454's review of PR #1484): a build named without a number, "the host runs the Steam pre-1.0 build", is a player no
+ * commit is: Steam's copy, or an installed, published or released one. The mark itself already needs pre-1.0 or 0.50 words
+ * (or legacy_data), so these need none of their own. "Steam" alone is not one (a Steam lobby or join runs the PR's own
+ * player), and neither is the pre-1.0 release branch or line, which is git, not a build. Fails closed: a false match keeps
+ * the mark, and legacy_data "none" is the way out.
+ */
+export const INSTALLED_BUILD: readonly RegExp[] = [
+  /\bsteam(?:'s)?\s+(?:[\w.-]+\s+){0,3}?(?:build|player|version|branch|install(?:ation)?|copy|release|game)\b/i,
+  /\b(?:installed|downloaded)\s+(?:from|via|through|on)\s+steam\b/i,
+  /\b(?:installed|published|public|released|release|shipped|live|retail)\s+(?:[\w.-]+\s+){0,2}?(?:build|player|version|copy|game)\b/i,
+  /\b(?:pre-1\.0|0\.50(?:\.\d+)*)\s+release\b(?!\s+(?:branch|line))/i,
+];
 
 /**
  * w6451 (w6442's review of PR #1477): a pair run is marked from its what or brief too (mentionsLegacyPlayer), so those words
