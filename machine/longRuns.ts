@@ -14,21 +14,29 @@
  *   run itself, as before.
  * - At Low integrity, through the Low node copy (machine/lowIntegrity.ts LowCopies), as the players broker's players are:
  *   with no Low copy it is refused, never started at the daemon's Medium.
- * - In a job of its own with the worker caps' mode and limits (machine/workerCaps.ts, winJob.cs: no breakaway, and in
- *   enforce the commit and process limits), made before the run starts anything: a keeper node waits for the job, then
- *   starts the run as its child and exits with its exit code.
+ * - Always in a job of its own (machine/workerCaps.ts, winJob.cs: no breakaway; under enforce the commit and process
+ *   limits), made before the run starts anything: a keeper node waits for the job, then starts the run as its child and
+ *   exits with its exit code. No job helper, no run, whatever workerCaps says.
+ * - The keeper itself starts with the daemon's bare basics (no NODE_OPTIONS or any other variable the worker chose); the
+ *   run's environment comes to it over stdin with "go".
  * - Carrying no FF_SESSION_ID or FF_FOR_PERSON, so the leftovers sweep (machine/leftovers.ts) does not count it as its
  *   worker's leftovers, and the worker's own `ff-leftovers end` leaves it; FF_LONG_RUN names it instead.
- * Only fixed routes run (SANCTIONED): `nightly`, the game repo's scripts/nightly/nightly_run.sh in the caller's own
- * sandbox, and only for a session the portal marks exempt "nightly" (it works an open nightly-run request; the same mark
- * the bench uses, w1832); and `probe`, the daemon's own few lines (a sleep with an exit trap) for proving the route on a
- * machine. Nothing else a worker names is run.
+ * - Bounded: the keeper ends the run's whole tree after MAX_RUN_S, and `runs/stop` ends it sooner (its own sandbox's only).
+ * Only one route runs (SANCTIONED): `nightly`, the game repo's scripts/nightly/nightly_run.sh in the caller's own sandbox,
+ * and only for a session the portal marks exempt "nightly" (it works an open nightly-run request; the same mark the bench
+ * uses, w1832). Nothing else a worker names is run. What that script does is the nightly worker's own code, as it is
+ * today when it starts the night itself; the route changes only who its parent is, never its fence.
  *
  * daemon.json `longRuns` (off | warn | on; ops_worker machine_update long_runs). warn, the default (lothsahn's lockout
  * rule: warn-only first): every check is made and the daemon logs what it would start, then refuses with mode "warn", so
  * the caller starts the run itself as before. on: it starts. off: refused at once. The game's client falls back to its own
  * start on any refusal or error, so a bad switch costs a night at most what it costs today, and warn or off is the way back
  * (docs/worker-fence.md "Long runs").
+ *
+ * The env file (w6376 review): it holds the worker's daemon token, so the daemon removes it once read. It is accepted only
+ * as `long-run-env-<digits>.json` directly in the caller's own sandbox folder, a plain file with one link, opened and
+ * checked by its handle; the daemon then removes that name and nothing else (never a path a link resolved to), so no call
+ * can make the daemon delete or read a file of its own. Every refusal of it says the same thing.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -47,33 +55,34 @@ export function longRunsSetting(v: unknown): LongRunsSetting {
 /** The routes a worker may ask for, and nothing else. */
 export const SANCTIONED = {
   nightly: { script: 'scripts/nightly/nightly_run.sh' },
-  probe: {},
 } as const;
 export type LongRunName = keyof typeof SANCTIONED;
 
-/** The probe's script, the daemon's own: `bash -c PROBE_SCRIPT probe <out> <seconds>`. Its exit trap writes the last line. */
-export const PROBE_SCRIPT =
-  'out="$1"; s="$2"; trap \'echo "exit trap $(date -u +%Y-%m-%dT%H:%M:%SZ) pid $$" >> "$out"\' EXIT; echo "started $(date -u +%Y-%m-%dT%H:%M:%SZ) pid $$ FF_LONG_RUN=$FF_LONG_RUN FF_SESSION_ID=${FF_SESSION_ID:-none}" >> "$out"; i=0; while [ "$i" -lt "$s" ]; do sleep 60; i=$((i + 60)); echo "alive $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$out"; done';
-
 /**
- * The keeper (run by the Low node copy): `node -e KEEPER_SCRIPT <exe> <cwd> <args JSON>`. It waits for "go" on stdin (the
- * daemon sends it once the keeper is in the run's job, so everything the run starts is in the job), then starts the run as
- * its child and exits with its code. After "go" its stdin may close (the daemon restarts): it keeps running. No "go" in a
- * minute, or stdin closed first: it exits without starting anything.
+ * The keeper (run by the Low node copy): `node -e KEEPER_SCRIPT <exe> <cwd> <args JSON> <limit s>`. It waits for one line
+ * `go <env JSON>` on stdin (the daemon sends it once the keeper is in the run's job, so everything the run starts is in the
+ * job), then starts the run as its child with that environment and exits with its code. After "go" its stdin may close
+ * (the daemon restarts): it keeps running. No "go" in a minute, or stdin closed first: it exits without starting anything.
+ * At the limit it ends the run's whole tree (taskkill /T /F on Windows) and exits 124.
  */
 export const KEEPER_SCRIPT =
-  "const{spawn}=require('node:child_process');const[,b,c,a]=process.argv;let go=false,buf='';const t=setTimeout(()=>process.exit(3),60000);process.stdin.on('error',()=>{});process.stdin.on('end',()=>{if(!go)process.exit(2)});process.stdin.on('data',(d)=>{if(go)return;buf+=d;if(!buf.includes('go\\n'))return;go=true;clearTimeout(t);const p=spawn(b,JSON.parse(a),{cwd:c,stdio:'ignore',windowsHide:true});p.on('error',()=>process.exit(4));p.on('exit',(code)=>process.exit(code??1))});";
+  "const{spawn}=require('node:child_process');const[,b,c,a,l]=process.argv;let go=false,buf='',cut=false;const t=setTimeout(()=>process.exit(3),60000);process.stdin.on('error',()=>{});process.stdin.on('end',()=>{if(!go)process.exit(2)});process.stdin.on('data',(d)=>{if(go)return;buf+=d;const n=buf.indexOf('\\n');if(n<0)return;go=true;clearTimeout(t);const line=buf.slice(0,n);if(!line.startsWith('go '))process.exit(2);let env;try{env=JSON.parse(line.slice(3))}catch{process.exit(2)}const p=spawn(b,JSON.parse(a),{cwd:c,env,stdio:'ignore',windowsHide:true});p.on('error',()=>process.exit(4));p.on('exit',(code)=>process.exit(cut?124:code??1));setTimeout(()=>{cut=true;if(process.platform==='win32'){const tk=(process.env.SystemRoot||'C:\\\\Windows')+'\\\\System32\\\\taskkill.exe';const k=spawn(tk,['/PID',String(p.pid),'/T','/F'],{stdio:'ignore',windowsHide:true});k.on('exit',()=>process.exit(124));k.on('error',()=>process.exit(124))}else{try{p.kill('SIGKILL')}catch{}process.exit(124)}},Number(l)*1000).unref()});";
 
 /** Variables a long run never carries: what ties a process to its worker for the sweep and the caps' kills. */
 export const DROPPED_ENV = ['FF_SESSION_ID', 'FF_FOR_PERSON', 'FF_TIMED_RUN', 'FF_UNITY_MCP'];
 export const RUN_ENV = 'FF_LONG_RUN';
+/** The env file's name, directly in the caller's sandbox. */
+export const ENV_FILE = /^long-run-env-\d{1,12}\.json$/;
 const MAX_ARGS = 20;
 const MAX_ARG = 1024;
 const MAX_ENV_FILE = 256 * 1024;
-const MAX_PROBE_S = 6 * 3600;
+/** The longest a run lives (a night's budget is under 12 h; the keeper ends it at 20). */
+export const MAX_RUN_S = 20 * 3600;
 /** Live runs a sandbox may have at once. */
 const MAX_LIVE = 2;
 const NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+/** What the keeper itself starts with, from the daemon's own environment. */
+const BASICS = ['SystemRoot', 'SYSTEMROOT', 'windir', 'ComSpec', 'PATHEXT', 'Path', 'PATH'];
 
 export interface LongRun {
   id: string;
@@ -91,7 +100,17 @@ export interface LongRunPlan {
   exe: string;
   argv: string[];
   cwd: string;
+  /** The run's environment (sent with "go"). */
   env: Record<string, string>;
+  /** The keeper's own environment (the daemon's basics). */
+  keeperEnv: Record<string, string>;
+  limitS: number;
+}
+
+export interface Keeper {
+  pid: number;
+  go: (env: Record<string, string>) => void;
+  kill: () => void;
 }
 
 export interface LongRunsDeps {
@@ -101,7 +120,7 @@ export interface LongRunsDeps {
   /** Where the runs' records go (`<appDir>/long-runs`). */
   dir: string;
   mode: () => LongRunsSetting;
-  /** The worker caps' mode (daemon.json workerCaps): the run's job takes it. */
+  /** The worker caps' mode (daemon.json workerCaps): the run's job takes it (enforce, else warn). */
   capsMode: () => CapsMode;
   sandboxPath: (id: string) => string | undefined;
   /** Whether the portal marks this session exempt "nightly" (benchMarks). */
@@ -112,17 +131,20 @@ export interface LongRunsDeps {
   bash: () => string | undefined;
   /** The job helper exe (workerCaps.ts jobHelper), or undefined. */
   jobHelper: () => string | undefined;
-  /** The daemon's own environment, for the probe's few basics. */
+  /** The daemon's own environment, for the keeper's basics. */
   base?: NodeJS.ProcessEnv;
   alive?: (pid: number) => boolean;
-  /** Tests: start the keeper; answer its pid and a way to send it "go". */
-  startKeeper?: (node: string, plan: LongRunPlan) => Promise<{ pid: number; go: () => void; kill: () => void }>;
+  /** Tests: start the keeper. */
+  startKeeper?: (node: string, plan: LongRunPlan) => Promise<Keeper>;
   /** Tests: put a pid in a job of its own; resolves true once it is in. */
   joinJob?: (helper: string, pid: number, mode: CapsMode) => Promise<boolean>;
+  /** Tests: end a pid's whole tree. */
+  endTree?: (pid: number) => Promise<void>;
   log: (line: string) => void;
 }
 
 const refuse = (status: number, message: string) => new RpcRefused(message, status);
+const same = (a: string, b: string) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
 const inside = (dir: string, p: string) => {
   const rel = path.relative(dir, p);
   return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
@@ -137,39 +159,56 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-/** A regular file at `p` whose real path lies inside `dir` (no link out of it). */
-function fileInside(dir: string, p: string, what: string): string {
-  let real: string;
-  let realDir: string;
+/** The sandbox's sanctioned script as a plain file of the sandbox (no link out); one answer for every refusal. */
+function scriptOf(sandbox: string): string {
+  const p = path.join(sandbox, SANCTIONED.nightly.script);
+  const no = () => refuse(403, `nightly: ${SANCTIONED.nightly.script} must be a plain file of your sandbox`);
   try {
-    real = fs.realpathSync(p);
-    realDir = fs.realpathSync(dir);
-  } catch {
-    throw refuse(404, `${what}: ${p} is not there`);
+    const real = fs.realpathSync(p);
+    if (!inside(fs.realpathSync(sandbox), real) || !fs.lstatSync(real).isFile()) throw no();
+    return real;
+  } catch (e) {
+    if (e instanceof RpcRefused) throw e;
+    throw no();
   }
-  if (!inside(realDir, real)) throw refuse(403, `${what}: ${p} lies outside ${dir}`);
-  if (!fs.lstatSync(real).isFile()) throw refuse(403, `${what}: ${p} is not a plain file`);
-  return real;
 }
 
-/** The env file the nightly worker wrote: a JSON object of strings, read and then removed (it may hold its tokens). */
-export function readEnvFile(root: string, file: unknown): Record<string, string> {
-  if (typeof file !== 'string' || !path.isAbsolute(file)) throw refuse(400, 'nightly: envFile is the absolute path of a JSON file of the run\'s environment');
-  const real = fileInside(root, file, 'nightly: envFile');
+/**
+ * The env file the nightly worker wrote: `long-run-env-<digits>.json` directly in the caller's own sandbox folder, a plain
+ * file with one link, read through its handle and then removed by that name (never a path a link resolves to). A JSON
+ * object of strings. Every refusal says the same thing, so the route tells nobody whether a file is there.
+ */
+export function readEnvFile(sandbox: string, file: unknown): Record<string, string> {
+  const no = () => refuse(403, 'nightly: envFile must be a plain long-run-env-<digits>.json file directly in your sandbox, holding a JSON object of strings');
+  if (typeof file !== 'string' || !path.isAbsolute(file)) throw no();
+  const given = path.resolve(file);
+  if (!ENV_FILE.test(path.basename(given)) || !same(path.dirname(given), path.resolve(sandbox))) throw no();
   let raw: string;
+  let fd: number | undefined;
   try {
-    if (fs.statSync(real).size > MAX_ENV_FILE) throw refuse(413, `nightly: envFile is over ${MAX_ENV_FILE} bytes`);
-    raw = fs.readFileSync(real, 'utf8');
-  } finally {
-    fs.rmSync(real, { force: true });
+    // The sandbox folder is itself (no link or junction standing for it).
+    if (!same(fs.realpathSync(sandbox), path.resolve(sandbox))) throw no();
+    const st = fs.lstatSync(given);
+    if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1 || st.size > MAX_ENV_FILE) throw no();
+    fd = fs.openSync(given, 'r');
+    const ft = fs.fstatSync(fd);
+    if (!ft.isFile() || ft.nlink !== 1 || ft.ino !== st.ino || ft.dev !== st.dev) throw no();
+    raw = fs.readFileSync(fd, 'utf8');
+  } catch (e) {
+    if (fd !== undefined) fs.closeSync(fd);
+    if (e instanceof RpcRefused) throw e;
+    throw no();
   }
+  fs.closeSync(fd);
+  // Only now, and only this name in the sandbox folder (an unlink of a name: a link there is removed, never its target).
+  fs.rmSync(given, { force: true });
   let o: unknown;
   try {
     o = JSON.parse(raw);
   } catch {
-    throw refuse(400, 'nightly: envFile is not JSON');
+    throw no();
   }
-  if (!o || typeof o !== 'object' || Array.isArray(o)) throw refuse(400, 'nightly: envFile is not a JSON object');
+  if (!o || typeof o !== 'object' || Array.isArray(o)) throw no();
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(o)) if (NAME.test(k) && typeof v === 'string' && !v.includes('\0')) env[k] = v;
   return env;
@@ -183,40 +222,22 @@ export function runEnv(given: Record<string, string>, id: string): Record<string
   return env;
 }
 
-const BASICS = ['PATH', 'Path', 'SystemRoot', 'SYSTEMROOT', 'windir', 'ComSpec', 'PATHEXT', 'USERPROFILE', 'HOME', 'USERNAME'];
-
-/** What a call asks for, checked: the plan, or a refusal. Nothing runs here. */
+/** What a call asks for, checked: the plan, or a refusal. Nothing runs here; nothing is read or removed before the gate. */
 export function planOf(d: LongRunsDeps, c: Caller, b: Record<string, unknown>, id: string): LongRunPlan {
   const name = b.name;
   if (typeof name !== 'string' || !Object.hasOwn(SANCTIONED, name)) throw refuse(400, `runs/start: name is one of ${Object.keys(SANCTIONED).join(', ')}`);
   if (!c.sandbox) throw refuse(403, 'runs/start: only a sandbox worker starts a long run');
   const sandbox = d.sandboxPath(c.sandbox);
   if (!sandbox) throw refuse(404, `runs/start: no sandbox ${c.sandbox} on this machine`);
-  const bash = d.bash();
-  if (name === 'nightly') {
-    if (!d.isNightly(c.session)) throw refuse(403, 'runs/start nightly: this session works no nightly-run request (the portal marks none exempt "nightly")');
-    const script = fileInside(sandbox, path.join(sandbox, SANCTIONED.nightly.script), 'nightly');
-    const args = b.args ?? [];
-    if (!Array.isArray(args) || args.length > MAX_ARGS || !args.every((a) => typeof a === 'string' && a.length <= MAX_ARG && !a.includes('\0'))) throw refuse(400, `runs/start: args is a list of at most ${MAX_ARGS} strings`);
-    const env = runEnv(readEnvFile(d.root, b.envFile), id);
-    return { name, exe: bash ?? 'bash.exe', argv: [script, ...(args as string[])], cwd: sandbox, env };
-  }
-  const seconds = Number(b.seconds);
-  if (!Number.isInteger(seconds) || seconds < 1 || seconds > MAX_PROBE_S) throw refuse(400, `runs/start probe: seconds is a whole number from 1 to ${MAX_PROBE_S}`);
-  const out = b.out;
-  if (typeof out !== 'string' || !path.isAbsolute(out)) throw refuse(400, 'runs/start probe: out is the absolute path of the file it writes');
-  const tmp = path.join(d.root, 'tmp');
-  if (!(inside(tmp, path.resolve(out)) || inside(sandbox, path.resolve(out)))) throw refuse(403, `runs/start probe: out lies outside ${tmp} and the sandbox`);
+  if (!d.isNightly(c.session)) throw refuse(403, 'runs/start nightly: this session works no nightly-run request (the portal marks none exempt "nightly")');
+  const args = b.args ?? [];
+  if (!Array.isArray(args) || args.length > MAX_ARGS || !args.every((a) => typeof a === 'string' && a.length <= MAX_ARG && !a.includes('\0'))) throw refuse(400, `runs/start: args is a list of at most ${MAX_ARGS} strings`);
+  const script = scriptOf(sandbox);
+  const env = runEnv(readEnvFile(sandbox, b.envFile), id);
   const base = d.base ?? process.env;
-  const env: Record<string, string> = {};
-  for (const k of BASICS) if (typeof base[k] === 'string') env[k] = base[k] as string;
-  // Git Bash's own tools (date, sleep) first.
-  if (bash) {
-    const usr = path.join(path.dirname(path.dirname(bash)), 'usr', 'bin');
-    const key = env.Path !== undefined ? 'Path' : 'PATH';
-    env[key] = [usr, env[key]].filter(Boolean).join(path.delimiter);
-  }
-  return { name: 'probe', exe: bash ?? 'bash.exe', argv: ['-c', PROBE_SCRIPT, 'probe', path.resolve(out), String(seconds)], cwd: sandbox, env: runEnv(env, id) };
+  const keeperEnv: Record<string, string> = {};
+  for (const k of BASICS) if (typeof base[k] === 'string') keeperEnv[k] = base[k] as string;
+  return { name: 'nightly', exe: d.bash() ?? 'bash.exe', argv: [script, ...(args as string[])], cwd: sandbox, env, keeperEnv, limitS: MAX_RUN_S };
 }
 
 /** What stands in the way of starting it now, or undefined. */
@@ -226,16 +247,15 @@ function blocker(d: LongRunsDeps, platform: NodeJS.Platform): { node?: string; h
   if (!node) return { why: "no Low node copy: a worker's run is never started at the daemon's Medium integrity" };
   const bash = d.bash();
   if (!bash || !fs.existsSync(bash)) return { why: `no Git Bash for agents (${bash ?? 'none'})` };
-  if (d.capsMode() === 'off') return { node };
   const helper = d.jobHelper();
-  if (!helper) return { why: 'no job helper to give the run a job of its own (machine/winJob.cs)' };
+  if (!helper) return { why: 'no job helper to give the run a job of its own (machine/winJob.cs); a long run never runs without one' };
   return { node, helper };
 }
 
 /** The keeper, started by the daemon detached (no process of a worker's host), its stdin kept for "go". */
-function startKeeperReal(node: string, plan: LongRunPlan): Promise<{ pid: number; go: () => void; kill: () => void }> {
+function startKeeperReal(node: string, plan: LongRunPlan): Promise<Keeper> {
   return new Promise((resolve, reject) => {
-    const c = spawn(node, ['-e', KEEPER_SCRIPT, plan.exe, plan.cwd, JSON.stringify(plan.argv)], { cwd: plan.cwd, env: plan.env, detached: true, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
+    const c = spawn(node, ['-e', KEEPER_SCRIPT, plan.exe, plan.cwd, JSON.stringify(plan.argv), String(plan.limitS)], { cwd: plan.cwd, env: plan.keeperEnv, detached: true, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
     c.once('error', reject);
     c.stdin!.on('error', () => undefined);
     c.once('spawn', () => {
@@ -243,8 +263,8 @@ function startKeeperReal(node: string, plan: LongRunPlan): Promise<{ pid: number
       if (!c.pid) return reject(new Error('no pid'));
       resolve({
         pid: c.pid,
-        go: () => {
-          c.stdin!.end('go\n');
+        go: (env) => {
+          c.stdin!.end(`go ${JSON.stringify(env)}\n`);
         },
         kill: () => {
           try {
@@ -298,6 +318,16 @@ function joinJobReal(helper: string, pid: number, mode: CapsMode): Promise<boole
   });
 }
 
+/** taskkill /T /F of a keeper: it and the run it started. */
+function endTreeReal(pid: number): Promise<void> {
+  const taskkill = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
+  return new Promise((resolve) => {
+    const k = spawn(taskkill, ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    k.once('error', () => resolve());
+    k.once('exit', () => resolve());
+  });
+}
+
 /** The runs this daemon started that are still alive, from their records. */
 export function liveRuns(d: Pick<LongRunsDeps, 'dir' | 'alive'>): LongRun[] {
   const alive = d.alive ?? pidAlive;
@@ -320,9 +350,9 @@ export function liveRuns(d: Pick<LongRunsDeps, 'dir' | 'alive'>): LongRun[] {
   return out;
 }
 
-const said = (p: LongRunPlan) => `${p.exe} ${p.name === 'probe' ? `-c <probe> ${p.argv.slice(2).join(' ')}` : p.argv.map((a) => JSON.stringify(a)).join(' ')} in ${p.cwd}, ${Object.keys(p.env).length} environment variables (no FF_SESSION_ID)`;
+const said = (p: LongRunPlan) => `${p.exe} ${p.argv.map((a) => JSON.stringify(a)).join(' ')} in ${p.cwd} (no FF_SESSION_ID; ended after ${p.limitS / 3600} h)`;
 
-/** The routes: `runs/start` {name, ...} and `runs/status`. */
+/** The routes: `runs/start` {name, args, envFile}, `runs/stop` {id} and `runs/status`. */
 export function longRunsRpcHandlers(d: LongRunsDeps): Record<string, RpcHandler> {
   const platform = d.platform ?? process.platform;
   return {
@@ -334,25 +364,33 @@ export function longRunsRpcHandlers(d: LongRunsDeps): Record<string, RpcHandler>
       const live = liveRuns(d).filter((r) => r.sandbox === c.sandbox);
       const k = blocker(d, platform);
       const caps = d.capsMode();
-      const how = `at Low integrity, ${caps === 'off' ? 'with no job (workerCaps off)' : `in a job of its own (caps ${caps})`}`;
+      const how = `at Low integrity, in a job of its own (caps ${caps === 'enforce' ? 'enforce' : 'warn'})`;
       if (mode === 'warn') {
         const why = k.why ?? (live.length >= MAX_LIVE ? `${live.length} long runs of this sandbox are live` : undefined);
         d.log(`long runs (warn): would start ${plan.name} for ${c.session} in ${c.sandbox}: ${said(plan)}, ${how}; ${why ? `could not now: ${why}` : 'ready'}; not started, so the caller starts it itself as before (w6367)`);
-        return { mode: 'warn', started: false, ready: !why, ...(why ? { why } : {}), would: { name: plan.name, exe: plan.exe, cwd: plan.cwd, args: plan.argv.length, env: Object.keys(plan.env).length } };
+        return { mode: 'warn', started: false, ready: !why, ...(why ? { why } : {}) };
       }
       if (k.why) throw refuse(503, `runs/start: ${k.why}`);
       if (live.length >= MAX_LIVE) throw refuse(409, `runs/start: ${live.length} long runs of ${c.sandbox} are live (${live.map((r) => r.id).join(', ')})`);
       const keeper = await (d.startKeeper ?? startKeeperReal)(k.node!, plan);
-      if (k.helper && !(await (d.joinJob ?? joinJobReal)(k.helper, keeper.pid, caps))) {
+      if (!(await (d.joinJob ?? joinJobReal)(k.helper!, keeper.pid, caps === 'enforce' ? 'enforce' : 'warn'))) {
         keeper.kill();
         throw refuse(503, `runs/start: could not put the run in a job of its own (pid ${keeper.pid}); not started`);
       }
-      keeper.go();
-      const rec: LongRun = { id, name: plan.name, session: c.session, sandbox: c.sandbox!, pid: keeper.pid, startedAt: new Date().toISOString(), job: !!k.helper };
+      keeper.go(plan.env);
+      const rec: LongRun = { id, name: plan.name, session: c.session, sandbox: c.sandbox!, pid: keeper.pid, startedAt: new Date().toISOString(), job: true };
       fs.mkdirSync(d.dir, { recursive: true });
       fs.writeFileSync(path.join(d.dir, `${id}.json`), JSON.stringify(rec));
       d.log(`long runs: started ${id} (${plan.name}) for ${c.session} in ${c.sandbox}: keeper pid ${keeper.pid}, ${said(plan)}, ${how} (w6367)`);
-      return { mode: 'on', started: true, id, pid: keeper.pid, job: rec.job };
+      return { mode: 'on', started: true, id, pid: keeper.pid, job: true };
+    },
+    'runs/stop': async (c, b) => {
+      const run = liveRuns(d).find((r) => r.id === b.id && r.sandbox === c.sandbox);
+      if (!run) throw refuse(404, `runs/stop: no live long run ${String(b.id)} of your sandbox`);
+      await (d.endTree ?? endTreeReal)(run.pid);
+      fs.rmSync(path.join(d.dir, `${run.id}.json`), { force: true });
+      d.log(`long runs: stopped ${run.id} (${run.name}) for ${c.session} in ${c.sandbox}: keeper pid ${run.pid} and its tree ended (w6367)`);
+      return { stopped: run.id };
     },
     'runs/status': (c) => ({ mode: d.mode(), runs: liveRuns(d).filter((r) => r.sandbox === c.sandbox) }),
   };

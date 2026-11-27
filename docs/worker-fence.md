@@ -118,25 +118,33 @@ The worker job (winJob.cs) has no kill-on-close, so the job itself does not kill
 So the night ended with claude, whatever ended claude: a host swap, a usage limit, a stop to move the worker, or a
 paused machine's deadline. That is why holding the swap back (option c of w6367) would not have been enough.
 
-The route (`machine/longRuns.ts`, RPC `runs/start` and `runs/status`) leaves that fence closed. The **daemon** starts the run,
-so the run is not a process of the worker's host, its claude or their jobs. It is still fenced like its worker:
+The route (`machine/longRuns.ts`, RPC `runs/start`, `runs/stop` and `runs/status`) leaves that fence closed. The **daemon**
+starts the run, so the run is not a process of the worker's host, its claude or their jobs. It is still fenced like its
+worker:
 
 - **Low integrity**, through the Low node copy, as the players broker's players are. With no Low copy the call is refused;
   the run is never started at the daemon's Medium integrity.
-- **A job of its own**, with the worker caps' mode and limits: no breakaway, and under `enforce` the commit and process
-  limits. A keeper node joins that job (ffjob.exe says ready) before it gets "go" and starts the run as its child, so
-  everything the run starts lands in the job. If no job can be made, there is no run: the keeper is killed before "go".
+- **Always a job of its own**: no breakaway, and under workerCaps `enforce` the commit and process limits (a `warn` job
+  otherwise, `off` included). A keeper node joins that job (ffjob.exe says ready) before it gets "go" and starts the run
+  as its child, so everything the run starts lands in the job. With no job helper, or a job that cannot be made, there is
+  no run: the keeper is killed before "go".
+- **A bare keeper**: the keeper starts with only the daemon's basics (SystemRoot, Path and the like), never a variable the
+  worker chose, such as NODE_OPTIONS. The run's own environment reaches the keeper over stdin with "go".
 - **No FF_SESSION_ID or FF_FOR_PERSON**, so the leftovers sweep and the worker's own `ff-leftovers end` leave it alone.
   `FF_LONG_RUN=<id>` names it instead. The record of each run is in `<appDir>/long-runs/<id>.json`, and the daemon log has
-  "long runs: started <id> ...".
-- **Only fixed routes**, a sandbox worker's only, at most 2 live per sandbox:
-  - `nightly` runs the game repo's `scripts/nightly/nightly_run.sh` in the caller's own sandbox, as a plain file there (no
-    link out). It is allowed only for a session the portal marks exempt "nightly", meaning it works an open nightly-run
-    request. Its environment comes from an env file the worker writes under the worker root; the daemon reads that file,
-    removes it, and drops the variables above from it.
-  - `probe` is the daemon's own few lines: an exit trap and an "alive" line every minute, for at most 6 hours, written
-    under `<root>/tmp` or the sandbox. It runs with a bare environment. It exists to prove the route on a machine.
-  - Nothing else a worker names is run.
+  "long runs: started <id> ...". No sweep ends a run by `FF_LONG_RUN` yet.
+- **Bounded**: the keeper ends the run's whole tree (taskkill /T /F) after 20 hours and exits 124. `runs/stop {id}` ends a
+  live run of the caller's own sandbox sooner.
+- **Only one route**, a sandbox worker's only, at most 2 live per sandbox: `nightly` runs the game repo's
+  `scripts/nightly/nightly_run.sh` in the caller's own sandbox, as a plain file there (no link out). It is allowed only for
+  a session the portal marks exempt "nightly", meaning it works an open nightly-run request. Nothing else a worker names is
+  run. (A `probe` route open to any sandbox worker was dropped in review w6376; the proof on a machine belongs to the
+  change that turns the route on.)
+- **The env file** carries the worker's daemon token, so it must be `long-run-env-<digits>.json` directly in the caller's
+  own sandbox folder: a plain file with one link (no symbolic or hard link), opened and checked through its handle. Only
+  then does the daemon read it and remove that name, and drop the variables above from it. Any other path is refused with
+  the same answer, whether or not it exists, and is never read or removed (review w6376 found the first version deleting
+  `secrets/daemon-rpc.key`). Neither the answer nor the log says what the file held or how much.
 
 daemon.json `longRuns` (`ops_worker machine_update long_runs off|warn|on`):
 
