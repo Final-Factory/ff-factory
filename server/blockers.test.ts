@@ -1,7 +1,7 @@
 // w643: what a Blocked request waits on, and when each kind of blocker clears, stays open, gets stuck or needs a person.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BLOCKER_STUCK_MS, CI_NO_RUN_MS, CI_UNREADABLE_MS, conflictText, ownsPr, cycleBreak, waitCycles, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, isWith, latestWorker, newestFirst, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { BLOCKER_STUCK_MS, CI_NO_RUN_MS, CI_UNREADABLE_MS, conflictText, ownsPr, cycleBreak, reviewsPr, waitCycles, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, isWith, latestWorker, newestFirst, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import type { WorkBlocker, WorkItem } from '../shared/types.ts';
 import { requestWaitOf } from '../shared/workState.ts';
 import { checksState, ghChecks, ghPr, ghPrHealth, prHealthOf, queuedRunsState, runsState } from './blockerWatch.ts';
@@ -471,6 +471,50 @@ test('w2357: the side of a cycle that resumes: the one whose next reported since
   assert.equal(cycleBreak(['w1', 'w2'], facts([item('w1'), item('w2')])), undefined, 'no side Blocked: nothing to clear');
 });
 
+// w6446: the blocker watch set w6102 (the review of ff-factory #1368) to wait for #1368 to merge (w5845) while #1368's
+// author w6085 waited on w6102's report, and w6090 (the re-review of #1366) likewise while #1366's author w6077 waited on
+// w6105, which was merged into w6090. Neither pair moved for a day.
+test('w6446: a w5845 merge wait is a wait on the request it was handed to: the #1368 deadlock is a cycle, and its merge wait is what goes', () => {
+  // Set before the holder was kept: the holder is read from its words.
+  const handed = (holder?: string) => block({ kind: 'pr', ref: 'Final-Factory/ff-factory#1368', what: 'Final-Factory/ff-factory#1368 merging (w6085 works on it, w5845)', by: 'blocker watch', at: ago(24), ...(holder ? { holder } : {}) });
+  const review = item('w6102', { status: 'blocked', blocked: handed() });
+  const author = item('w6085', { status: 'blocked', blocked: block({ kind: 'request', ref: 'w6102', on: 'report', at: ago(23), what: "w6102's report" }) });
+  assert.deepEqual(waitCycles([review, author]), [['w6085', 'w6102']]);
+  assert.deepEqual(waitCycles([{ ...review, blocked: handed('w6085') }, author]), [['w6085', 'w6102']], 'with its holder kept');
+  const r = cycleBreak(['w6085', 'w6102'], facts([review, author], { reportedSince: () => false }))!;
+  assert.equal(r.id, 'w6102');
+  assert.equal(r.gate.kind, 'pr');
+  assert.match(r.why, /^a wait cycle \(w6085 -> w6102 -> w6085\): w6102 was set to wait for Final-Factory\/ff-factory#1368 to merge because w6085 works on it \(w5845\), but that request waits on w6102 in turn, so the merge wait is dropped and w6102 goes on \(w6446\)$/);
+  // A worker's own wait for a PR to merge names nobody: no cycle through it (the PR is not another request).
+  const own = item('w6102', { status: 'blocked', blocked: block({ kind: 'pr', ref: 'Final-Factory/ff-factory#1368', what: '#1368 merging', by: 'worker abc', at: ago(24) }) });
+  assert.deepEqual(waitCycles([own, author]), []);
+  // A merge wait handed to a request that does not wait back is no cycle: it waits for the merge as before.
+  assert.deepEqual(waitCycles([review, item('w6085', { status: 'active' })]), []);
+});
+
+test('w6446: through a merged request: w6077 waits on w6105, merged into w6090, which waits for #1366 to merge because w6077 works on it', () => {
+  const author = item('w6077', { status: 'blocked', blocked: block({ kind: 'request', ref: 'w6105', on: 'report', at: ago(20), what: "w6105's report" }) });
+  const merged = item('w6105', { status: 'merged', mergedInto: 'w6090' });
+  const review = item('w6090', { status: 'blocked', blocked: block({ kind: 'pr', ref: 'Final-Factory/ff-factory#1366', what: 'Final-Factory/ff-factory#1366 merging (w6077 works on it, w5845)', holder: 'w6077', by: 'blocker watch', at: ago(24) }) });
+  assert.deepEqual(waitCycles([author, merged, review]), [['w6077', 'w6090']]);
+  const r = cycleBreak(['w6077', 'w6090'], facts([author, merged, review], { reportedSince: () => false }))!;
+  assert.deepEqual([r.id, r.gate.kind, r.gate.ref], ['w6090', 'pr', 'Final-Factory/ff-factory#1366']);
+});
+
+test('w6446: reviewsPr: a review, re-review or independent check of that PR, or a review related to its author; not its author, a fix of a review, or another PR', () => {
+  const ref = 'Final-Factory/ff-factory#1368';
+  const author = item('w6085');
+  assert.ok(reviewsPr(item('w6102', { title: 'w6085: independent review of ff-factory PR #1368 (Low copies, the w5838 review leftovers, warn only)' }), ref, author));
+  assert.ok(reviewsPr(item('w6090', { title: "w6077 re-review: check the fixes to ff-factory PR #1366 (daemon spawn thread) before it merges" }), 'Final-Factory/ff-factory#1366'));
+  assert.ok(reviewsPr(item('w1', { title: 'a second look', brief: 'Review ff-factory PR #1368 (https://github.com/Final-Factory/ff-factory/pull/1368) for w6085.' }), ref));
+  assert.ok(reviewsPr(item('w3', { title: 'Independent check of the Low copies', relatedIds: ['w6085'] }), ref, author), 'related to the author as its reviewer');
+  assert.equal(reviewsPr(item('w3', { title: 'Independent check of the Low copies', relatedIds: ['w6085'] }), ref), false, 'no owner known: the PR is not named');
+  assert.equal(reviewsPr(item('w4', { title: 'Address the review findings on ff-factory PR #1368' }), ref, author), false, 'fixes a review: an author');
+  assert.equal(reviewsPr(item('w5', { title: 'FFU planner', brief: 'Build the turrets; PR #1368 is one step.' }), ref, author), false, 'no review');
+  assert.equal(reviewsPr(item('w6', { title: 'Independent review of ff-factory PR #1366' }), ref, author), false, 'another PR');
+  assert.equal(reviewsPr(item('w6', { title: 'Independent review of ff-factory PR #13680' }), ref, author), false, 'another number');
+});
+
 test("w2464: a pair leg's lobby name is no wait back, and its progress line is no news for the cycle break", () => {
   const line = 'w2463: still open: waiting for leg 1 (BEAST) to host "w2450-same-beast", then step B, ff-leftovers and DONE';
   const parent = item('w2450', { status: 'blocked', blocked: block({ kind: 'request', ref: 'w2463', on: 'report', at: ago(1) }) });
@@ -616,4 +660,55 @@ test('w5845: a pr gate the planner (named by Part of:) set on a row PR that name
   const linked = [item('w2895', { prs: [{ repo: 'Final-Factory/ffu', number: 1140, state: 'open', via: 'line', partOf: true }] })];
   assert.equal(ownsPr(linked[0], ref, { requests: ['w5476'], partOf: ['w2895'] }), false);
   assert.equal(ownsPr(linked[0], ref, { partOf: ['w2895'] }), true);
+});
+
+test('w6158: a queued pull_request run the head_sha filter misses is found in the unfiltered list or the check suites, and its wait stays blocked', async () => {
+  // Measured 2026-11-26 on Final-Factory/ffu#1203: run 45871131161 (pull_request, w6079-disc-glow, head b3d2850, created
+  // 17:50:46Z, "queued" while its jobs ran) was in `actions/runs?per_page=100` and the commit's check suites, never in
+  // `actions/runs?head_sha=...` (nor branch=, status=, event=, created=, check_suite_id=).
+  const ref = 'Final-Factory/ffu#1203';
+  const head = 'b3d285047a13b9c337bcb2ee540768a804548df9';
+  const run = { id: 45871131161, name: 'ci', event: 'pull_request', head_branch: 'w6079-disc-glow', head_sha: head, status: 'queued', conclusion: null, created_at: '2026-11-26T17:50:46Z' };
+  const other = { id: 45870313400, name: 'ci', head_sha: 'a246ddfd23f0e0fbb6d16b1b6a1bc65e40729e20', status: 'queued', conclusion: null };
+  const filtered = { match: new RegExp(`^gh api repos/Final-Factory/ffu/actions/runs\\?head_sha=${head}&per_page=100$`), out: { total_count: 0, workflow_runs: [] } };
+  const unfiltered = (runs: unknown[]) => ({ match: /^gh api repos\/Final-Factory\/ffu\/actions\/runs\?per_page=100$/, out: { workflow_runs: runs } });
+  const suites = { match: new RegExp(`^gh api repos/Final-Factory/ffu/commits/${head}/check-suites\\?per_page=100$`), out: { check_suites: [
+    { id: 124105450513, app: { slug: 'ffgithubrunners' }, status: 'queued', conclusion: null, head_sha: head, latest_check_runs_count: 0 },
+    { id: 124105471667, app: { slug: 'github-actions' }, status: 'queued', conclusion: null, head_sha: head, latest_check_runs_count: 10 },
+  ] } };
+  const pushedAt = NOW - 25 * 60_000;
+  const stillBlocked = (s: Awaited<ReturnType<typeof ghChecks>>) => {
+    assert.equal(s.none, undefined, s.text);
+    assert.equal(s.done, false);
+    const ci = block({ kind: 'ci', ref, what: 'CI on #1203', at: new Date(pushedAt).toISOString() });
+    assert.equal(blockerVerdict(ci, facts([], { ci: () => s, prHealth: () => ({ state: 'open', head, headSeenAt: pushedAt }) })).state, 'open', 'queued 25 min: still blocked');
+  };
+  // The rollup refused (the portal's fine-grained token): the PR's head, then its runs. The filtered list is empty; the unfiltered one has it.
+  const refused = (more: { match: RegExp; out?: unknown; err?: string }[]) =>
+    fakeGh([
+      { match: /actions\/runners/, err: 'refused' },
+      { match: /statusCheckRollup/, err: REFUSED },
+      { match: /--json state,headRefOid$/, out: { state: 'OPEN', headRefOid: head } },
+      filtered,
+      ...more,
+    ]);
+  const viaList = await ghChecks(ref, refused([unfiltered([other, run])]).run);
+  assert.equal(viaList.text, `1 of 1 workflow runs on ${ref} still running (ci)`);
+  stillBlocked(viaList);
+  // Past the newest 100 (or the list unreadable): the commit's GitHub Actions check suite says it runs.
+  const viaSuites = await ghChecks(ref, refused([unfiltered([other]), suites]).run);
+  assert.equal(viaSuites.text, `1 of 1 workflow runs on ${ref} still running (GitHub Actions check suite 124105471667)`);
+  stillBlocked(viaSuites);
+  // An empty rollup (no check runs yet) with the same filtered miss.
+  const empty = fakeGh([
+    { match: /actions\/runners/, err: 'refused' },
+    { match: /--json state,statusCheckRollup,headRefOid$/, out: { state: 'OPEN', statusCheckRollup: [], headRefOid: head } },
+    filtered,
+    unfiltered([run]),
+  ]);
+  stillBlocked(await ghChecks(ref, empty.run));
+  // Truly no run anywhere (no list entry, no Actions suite with check runs): still "no workflow runs yet", so the grace clear can fire.
+  const none = await ghChecks(ref, refused([unfiltered([other]), { ...suites, out: { check_suites: [suites.out.check_suites[0]] } }]).run);
+  assert.equal(none.none, true);
+  assert.match(none.text, /has no workflow runs yet/);
 });

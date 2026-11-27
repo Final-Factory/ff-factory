@@ -16,7 +16,7 @@ import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
+import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyToolsDiskLock, toolsDiskLockFlag, applyWinCiFirst, winCiFirstFlag, applyRunnerPriority, runnerPriorityFlag, applyHostRestage, hostRestageFlag, applyLongRuns, longRunsFlag, applyLiveRunGuard, liveRunGuardFlag, applyEditorGitPackages, editorGitPackagesFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applySharedLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, sharedLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -779,6 +779,31 @@ test('w5614: --store-lock takes off, warn or on and refuses anything else, befor
   await assert.rejects(main(['update', '--root', none, '--store-lock']), /--store-lock is off, warn or on/);
 });
 
+test('w5615: worker update --shared-lock writes the mode to daemon.json as sharedLock on every OS; unset carries it', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-shlock-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { sharedLock?: 'off' | 'warn' | 'on' }, platform: NodeJS.Platform = 'linux') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('sharedLock' in written(BEAST_CONFIG, {}), false, 'no key unless asked');
+  for (const p of ['linux', 'darwin', 'win32'] as const) for (const m of ['off', 'warn', 'on'] as const) assert.equal(written(BEAST_CONFIG, { sharedLock: m }, p).sharedLock, m, `${p} ${m}`);
+  const had = { ...BEAST_CONFIG, sharedLock: 'on' };
+  assert.equal(written(had, {}).sharedLock, 'on', 'unset carries it');
+  assert.equal(written(had, { sharedLock: 'off' }).sharedLock, 'off', 'the switch replaces it');
+  assert.deepEqual(written(had, { sharedLock: 'warn' }).protectedPaths, BEAST_CONFIG.protectedPaths, 'the other settings are carried');
+  const cfg = { a: 1 };
+  assert.equal(applySharedLock(cfg, undefined), cfg, 'unset: the very config');
+  assert.deepEqual(applySharedLock(cfg, 'warn'), { a: 1, sharedLock: 'warn' });
+});
+
+test('w5615: --shared-lock takes off, warn or on and refuses anything else, before the update touches anything', async () => {
+  assert.deepEqual(parseArgs(['update', '--root', '/r', '--shared-lock', 'warn']).opts, { root: '/r', 'shared-lock': 'warn' });
+  assert.equal(sharedLockFlag(undefined), undefined);
+  for (const m of ['off', 'warn', 'on'] as const) assert.equal(sharedLockFlag(m), m);
+  for (const bad of ['ON', 'true', 'enforce', '']) assert.throws(() => sharedLockFlag(bad), /--shared-lock is off, warn or on/);
+  const none = path.join(os.tmpdir(), `ffw-shlock-none-${process.pid}`);
+  await assert.rejects(main(['update', '--root', none, '--shared-lock', 'maybe']), /--shared-lock is off, warn or on, not "maybe"/);
+  await assert.rejects(main(['update', '--root', none, '--shared-lock']), /--shared-lock is off, warn or on/);
+});
+
 test('w5862: worker update --medium-agent-folders writes the mode to daemon.json as mediumAgentFolders on every OS; unset carries it', () => {
   const root = path.join(os.tmpdir(), `ffw-update-mfold-${process.pid}`);
   const l = layoutOf(root);
@@ -833,12 +858,12 @@ test('w5833: --editor-tmpdir takes on or off and refuses anything else, before t
   assert.equal(fs.existsSync(none), false);
 });
 
-test('w5863: worker update --path-fence writes off or warn to daemon.json as pathFence on macOS and Linux; unset carries it', () => {
+test('w5863: worker update --path-fence writes on, warn or off to daemon.json as pathFence on macOS and Linux; unset carries it', () => {
   const root = path.join(os.tmpdir(), `ffw-update-pfence-${process.pid}`);
   const l = layoutOf(root);
-  const written = (config: Record<string, unknown>, f: { pathFence?: 'off' | 'warn' }, platform: NodeJS.Platform = 'linux') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  const written = (config: Record<string, unknown>, f: { pathFence?: 'off' | 'warn' | 'on' }, platform: NodeJS.Platform = 'linux') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
   assert.equal('pathFence' in written(BEAST_CONFIG, {}), false, 'no key unless asked');
-  for (const p of ['linux', 'darwin'] as const) for (const m of ['off', 'warn'] as const) assert.equal(written(BEAST_CONFIG, { pathFence: m }, p).pathFence, m, `${p} ${m}`);
+  for (const p of ['linux', 'darwin'] as const) for (const m of ['off', 'warn', 'on'] as const) assert.equal(written(BEAST_CONFIG, { pathFence: m }, p).pathFence, m, `${p} ${m}`);
   const had = { ...BEAST_CONFIG, pathFence: 'off' };
   assert.equal(written(had, {}).pathFence, 'off', 'unset carries it');
   assert.equal(written(had, { pathFence: 'warn' }).pathFence, 'warn', 'the switch replaces it');
@@ -851,14 +876,14 @@ test('w5863: worker update --path-fence writes off or warn to daemon.json as pat
   assert.throws(() => written(BEAST_CONFIG, { pathFence: 'off' }, 'win32'), /macOS and Linux only/);
 });
 
-test('w5863: --path-fence takes off or warn and refuses anything else, before the update touches anything', async () => {
+test('w5863: --path-fence takes on, warn or off and refuses anything else, before the update touches anything', async () => {
   assert.deepEqual(parseArgs(['update', '--root', '/r', '--path-fence', 'warn']).opts, { root: '/r', 'path-fence': 'warn' });
   assert.equal(pathFenceFlag(undefined), undefined);
-  for (const m of ['off', 'warn'] as const) assert.equal(pathFenceFlag(m), m);
-  for (const bad of ['on', 'OFF', 'enforce', '']) assert.throws(() => pathFenceFlag(bad), /--path-fence is off or warn/);
+  for (const m of ['off', 'warn', 'on'] as const) assert.equal(pathFenceFlag(m), m);
+  for (const bad of ['OFF', 'enforce', '']) assert.throws(() => pathFenceFlag(bad), /--path-fence is on, warn or off/);
   const none = path.join(os.tmpdir(), `ffw-pfence-none-${process.pid}`);
-  await assert.rejects(main(['update', '--root', none, '--path-fence', 'maybe']), /--path-fence is off or warn, not "maybe"/);
-  await assert.rejects(main(['update', '--root', none, '--path-fence']), /--path-fence is off or warn/);
+  await assert.rejects(main(['update', '--root', none, '--path-fence', 'maybe']), /--path-fence is on, warn or off, not "maybe"/);
+  await assert.rejects(main(['update', '--root', none, '--path-fence']), /--path-fence is on, warn or off/);
   assert.equal(fs.existsSync(none), false);
 });
 
@@ -993,6 +1018,129 @@ test("an update drops an older install's home mailbox note from root.json, keepi
   assert.deepEqual(dropStaleSlotsNote(outside, root), [task]);
   assert.deepEqual(dropStaleSlotsNote(outside, root, named), [task, { kind: 'file', name: named }]);
   assert.deepEqual(dropStaleSlotsNote([{ kind: 'file', name: path.join(root, 'unity-slots') }], root).length, 1);
+});
+
+test('w5959: worker update --tools-disk-lock writes toolsDiskLock to daemon.json on Windows only; unset carries it; anything but warn or on is refused', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-tdl-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { toolsDiskLock?: 'warn' | 'on' }, platform: NodeJS.Platform = 'win32') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('toolsDiskLock' in written(BEAST_CONFIG, {}), false, 'no key unless asked (absent: warn)');
+  for (const m of ['warn', 'on'] as const) assert.equal(written(BEAST_CONFIG, { toolsDiskLock: m }).toolsDiskLock, m, m);
+  const had = { ...BEAST_CONFIG, toolsDiskLock: 'on' };
+  assert.equal(written(had, {}).toolsDiskLock, 'on', 'unset carries it');
+  assert.equal(written(had, { toolsDiskLock: 'warn' }).toolsDiskLock, 'warn', 'the way back replaces it');
+  for (const p of ['linux', 'darwin'] as const) assert.throws(() => written(BEAST_CONFIG, { toolsDiskLock: 'on' }, p), /--tools-disk-lock: Windows only/);
+  const cfg = { a: 1 };
+  assert.equal(applyToolsDiskLock(cfg, undefined, 'linux'), cfg, 'unset: the very config, any OS');
+  assert.deepEqual(applyToolsDiskLock(cfg, 'on', 'win32'), { a: 1, toolsDiskLock: 'on' });
+  assert.equal(toolsDiskLockFlag(undefined), undefined);
+  assert.equal(toolsDiskLockFlag('warn'), 'warn');
+  for (const bad of ['off', 'ON', '']) assert.throws(() => toolsDiskLockFlag(bad), /--tools-disk-lock is warn or on/);
+});
+
+test('w6110: worker update --win-ci-first writes winCiFirst to daemon.json on Windows only; unset carries it; anything but off, warn or enforce is refused', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-wcf-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { winCiFirst?: 'off' | 'warn' | 'enforce' }, platform: NodeJS.Platform = 'win32') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('winCiFirst' in written(BEAST_CONFIG, {}), false, 'no key unless asked (absent: warn)');
+  for (const m of ['off', 'warn', 'enforce'] as const) assert.equal(written(BEAST_CONFIG, { winCiFirst: m }).winCiFirst, m, m);
+  const had = { ...BEAST_CONFIG, winCiFirst: 'enforce' };
+  assert.equal(written(had, {}).winCiFirst, 'enforce', 'unset carries it');
+  assert.equal(written(had, { winCiFirst: 'warn' }).winCiFirst, 'warn', 'the way back replaces it');
+  for (const p of ['linux', 'darwin'] as const) assert.throws(() => written(BEAST_CONFIG, { winCiFirst: 'enforce' }, p), /--win-ci-first: Windows only/);
+  const cfg = { a: 1 };
+  assert.equal(applyWinCiFirst(cfg, undefined, 'linux'), cfg, 'unset: the very config, any OS');
+  assert.deepEqual(applyWinCiFirst(cfg, 'enforce', 'win32'), { a: 1, winCiFirst: 'enforce' });
+  assert.equal(winCiFirstFlag(undefined), undefined);
+  for (const m of ['off', 'warn', 'enforce']) assert.equal(winCiFirstFlag(m), m);
+  for (const bad of ['on', 'ENFORCE', '']) assert.throws(() => winCiFirstFlag(bad), /--win-ci-first is off, warn or enforce/);
+});
+
+test('w6163: worker update --runner-priority writes runnerPriority to daemon.json on Windows only; unset carries it; anything but off, warn or enforce is refused', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-rp-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { runnerPriority?: 'off' | 'warn' | 'enforce' }, platform: NodeJS.Platform = 'win32') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('runnerPriority' in written(BEAST_CONFIG, {}), false, 'no key unless asked');
+  for (const m of ['off', 'warn', 'enforce'] as const) assert.equal(written(BEAST_CONFIG, { runnerPriority: m }).runnerPriority, m, m);
+  const had = { ...BEAST_CONFIG, runnerPriority: 'enforce' };
+  assert.equal(written(had, {}).runnerPriority, 'enforce', 'unset carries it');
+  assert.equal(written(had, { runnerPriority: 'warn' }).runnerPriority, 'warn', 'the way back replaces it');
+  for (const p of ['linux', 'darwin'] as const) assert.throws(() => written(BEAST_CONFIG, { runnerPriority: 'enforce' }, p), /--runner-priority: Windows only/);
+  const cfg = { a: 1 };
+  assert.equal(applyRunnerPriority(cfg, undefined, 'linux'), cfg, 'unset: the very config, any OS');
+  assert.deepEqual(applyRunnerPriority(cfg, 'enforce', 'win32'), { a: 1, runnerPriority: 'enforce' });
+  assert.equal(runnerPriorityFlag(undefined), undefined);
+  for (const m of ['off', 'warn', 'enforce']) assert.equal(runnerPriorityFlag(m), m);
+  for (const bad of ['on', 'ENFORCE', '']) assert.throws(() => runnerPriorityFlag(bad), /--runner-priority is off, warn or enforce/);
+});
+
+test('w6305: worker update --host-restage writes hostRestage to daemon.json on every OS; unset carries it; anything but warn or on is refused', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-hr-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { hostRestage?: 'warn' | 'on' }, platform: NodeJS.Platform = 'win32') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('hostRestage' in written(BEAST_CONFIG, {}), false, 'no key unless asked');
+  for (const p of ['win32', 'linux', 'darwin'] as const) for (const m of ['warn', 'on'] as const) assert.equal(written(BEAST_CONFIG, { hostRestage: m }, p).hostRestage, m, `${p} ${m}`);
+  const had = { ...BEAST_CONFIG, hostRestage: 'on' };
+  assert.equal(written(had, {}).hostRestage, 'on', 'unset carries it');
+  assert.equal(written(had, { hostRestage: 'warn' }).hostRestage, 'warn', 'the way back replaces it');
+  const cfg = { a: 1 };
+  assert.equal(applyHostRestage(cfg, undefined), cfg, 'unset: the very config');
+  assert.deepEqual(applyHostRestage(cfg, 'on'), { a: 1, hostRestage: 'on' });
+  assert.equal(hostRestageFlag(undefined), undefined);
+  for (const m of ['warn', 'on']) assert.equal(hostRestageFlag(m), m);
+  for (const bad of ['off', 'ON', 'enforce', '']) assert.throws(() => hostRestageFlag(bad), /--host-restage is warn or on/);
+});
+
+test('w6367: worker update --long-runs writes longRuns to daemon.json on every OS; unset carries it; anything but off, warn or on is refused', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-lr-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { longRuns?: 'off' | 'warn' | 'on' }, platform: NodeJS.Platform = 'win32') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('longRuns' in written(BEAST_CONFIG, {}), false, 'no key unless asked');
+  for (const p of ['win32', 'linux', 'darwin'] as const) for (const m of ['off', 'warn', 'on'] as const) assert.equal(written(BEAST_CONFIG, { longRuns: m }, p).longRuns, m, `${p} ${m}`);
+  const had = { ...BEAST_CONFIG, longRuns: 'on' };
+  assert.equal(written(had, {}).longRuns, 'on', 'unset carries it');
+  assert.equal(written(had, { longRuns: 'warn' }).longRuns, 'warn', 'the way back replaces it');
+  assert.equal(written(had, { longRuns: 'off' }).longRuns, 'off', 'off replaces it too');
+  const cfg = { a: 1 };
+  assert.equal(applyLongRuns(cfg, undefined), cfg, 'unset: the very config');
+  assert.deepEqual(applyLongRuns(cfg, 'on'), { a: 1, longRuns: 'on' });
+  assert.equal(longRunsFlag(undefined), undefined);
+  for (const m of ['off', 'warn', 'on']) assert.equal(longRunsFlag(m), m);
+  for (const bad of ['enforce', 'ON', '']) assert.throws(() => longRunsFlag(bad), /--long-runs is off, warn or on/);
+});
+
+test('w6378: worker update --live-run-guard writes liveRunGuard to daemon.json on every OS; unset carries it; anything but off or warn is refused', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-lrg-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { liveRunGuard?: 'off' | 'warn' }, platform: NodeJS.Platform = 'win32') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('liveRunGuard' in written(BEAST_CONFIG, {}), false, 'no key unless asked (absent: warn)');
+  for (const p of ['win32', 'linux', 'darwin'] as const) for (const m of ['off', 'warn'] as const) assert.equal(written(BEAST_CONFIG, { liveRunGuard: m }, p).liveRunGuard, m, `${p} ${m}`);
+  const had = { ...BEAST_CONFIG, liveRunGuard: 'off' };
+  assert.equal(written(had, {}).liveRunGuard, 'off', 'unset carries it');
+  assert.equal(written(had, { liveRunGuard: 'warn' }).liveRunGuard, 'warn', 'the way back replaces it');
+  const cfg = { a: 1 };
+  assert.equal(applyLiveRunGuard(cfg, undefined), cfg, 'unset: the very config');
+  assert.deepEqual(applyLiveRunGuard(cfg, 'off'), { a: 1, liveRunGuard: 'off' });
+  assert.equal(liveRunGuardFlag(undefined), undefined);
+  for (const m of ['off', 'warn']) assert.equal(liveRunGuardFlag(m), m);
+  for (const bad of ['on', 'OFF', 'enforce', '']) assert.throws(() => liveRunGuardFlag(bad), /--live-run-guard is off or warn/);
+});
+
+test('w6412: worker update --editor-git-packages writes editorGitPackages to daemon.json on every OS; unset carries it; anything but off, warn or on is refused', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-egp-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { editorGitPackages?: 'off' | 'warn' | 'on' }, platform: NodeJS.Platform = 'win32') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('editorGitPackages' in written(BEAST_CONFIG, {}), false, 'no key unless asked (absent: warn)');
+  for (const p of ['win32', 'linux', 'darwin'] as const) for (const m of ['off', 'warn', 'on'] as const) assert.equal(written(BEAST_CONFIG, { editorGitPackages: m }, p).editorGitPackages, m, `${p} ${m}`);
+  const had = { ...BEAST_CONFIG, editorGitPackages: 'off' };
+  assert.equal(written(had, {}).editorGitPackages, 'off', 'unset carries it');
+  assert.equal(written(had, { editorGitPackages: 'warn' }).editorGitPackages, 'warn', 'the way back replaces it');
+  const cfg = { a: 1 };
+  assert.equal(applyEditorGitPackages(cfg, undefined), cfg, 'unset: the very config');
+  assert.deepEqual(applyEditorGitPackages(cfg, 'off'), { a: 1, editorGitPackages: 'off' });
+  assert.equal(editorGitPackagesFlag(undefined), undefined);
+  for (const m of ['off', 'warn', 'on']) assert.equal(editorGitPackagesFlag(m), m);
+  for (const bad of ['yes', 'OFF', 'enforce', '']) assert.throws(() => editorGitPackagesFlag(bad), /--editor-git-packages is off, warn or on/);
 });
 
 test('w6000: worker update --daemon-tmpdir writes daemonTmpdir to daemon.json on every OS; unset carries it; anything but on or off is refused', () => {

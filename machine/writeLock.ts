@@ -13,6 +13,7 @@ import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from '../server/claudeHome
 import type { SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { openChildren } from './lowIntegrity.ts';
+import { sharedLockParents } from './sharedLockPaths.ts';
 import { STORE_CHILD } from './storeLock.ts';
 import { sessionIdOf } from '../server/workerFence.ts';
 import { TRANSCRIPTS, finishNewTranscripts, linkTranscripts, ownTranscriptArgs } from './transcriptLock.ts';
@@ -48,8 +49,14 @@ export interface WriteLockPaths {
   home?: string;
   /** The system temp folder Unity writes whatever TMPDIR says (default /tmp): create-only, its .dotnet writable. */
   tmp?: string;
-  /** More writable folders, each with its reason in daemon.json (`writeLockExtra`). */
+  /**
+   * More writable folders, each with its reason in daemon.json (`writeLockExtra`). One that holds a folder kept read-only
+   * (the root, one of the locked children such as tools-medium, or a folder in one, the shims among them) is left out, told through `dropped`:
+   * Landlock grants add up and cannot be denied back (w5899, w5872's review).
+   */
   extra?: string[];
+  /** Told of each `extra` or `extraRoots` folder left out, and why. */
+  dropped?: (folder: string, why: string) => void;
   /** The configured temp and sandboxes folders: one in the root opens its root child too (w5569). */
   workFolders?: (string | undefined)[];
   /**
@@ -59,6 +66,13 @@ export interface WriteLockPaths {
   transcriptLock?: boolean;
   /** w5614: the store lock holds (machine/storeLock.ts): the main clone (`repo`) stays read-only. */
   lockStore?: boolean;
+  /**
+   * w5615: the shared lock is on (machine/sharedLockPaths.ts): players and seed stay closed, and cache and tools are opened
+   * child by child (ff-landlock.py --rw-children), less the locked seeds and tools children, so a worker can neither write
+   * them nor rename them out of their folder. Their children are listed when each locked worker starts; one made later is
+   * not writable (the daemon makes the workers' own beforehand, makeSharedLockDirs).
+   */
+  sharedLock?: boolean;
 }
 
 /**
@@ -81,16 +95,32 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
   const except = new Set<string>(LOCKED_CHILDREN);
   if (path.dirname(app) === root) except.add(path.basename(app));
   if (p.lockStore) except.add(STORE_CHILD);
+  const parents = p.sharedLock ? sharedLockParents() : new Map<string, Set<string>>();
+  if (p.sharedLock) for (const c of ['players', 'seed', ...[...parents.keys()].filter((k) => !k.includes('/'))]) except.add(c);
   // /dev: null, tty, shm, the GPU. /proc: a process's own oom_score_adj (Unity sets it); file modes still decide the rest.
   const args = ['--rw', '/dev', '--rw', '/proc'];
   // Only the root's folders workers write (w5569, as Windows since w5539): a portal, an instances folder or any new root
   // folder stays read-only until listed. A listed folder missing at start is skipped by ff-landlock.py (read-only), so
   // the daemon makes the missing ones before each locked worker starts (makeOpenRootChildren, w5676).
   for (const c of openChildren(root, p.workFolders ?? [], except)) args.push('--rw', path.join(root, c));
+  // w5615: a folder on the way to a locked one opens its other children only; one on the way below it (cache/nuget) the same.
+  for (const [dir, locked] of parents) {
+    if (!dir.includes('/') && !openChildren(root, p.workFolders ?? [], LOCKED_CHILDREN).includes(dir)) continue;
+    args.push('--rw-children', path.join(root, ...dir.split('/')));
+    for (const n of [...locked].sort()) args.push('--except', n);
+  }
   // w5702: off, the transcripts folder is open whole, and made ahead (makeOpenRootChildren) even before any `on`, so a
   // claude locked before the switch keeps its own transcript once the switch moves them there (w5718's review).
   if (!p.transcriptLock) args.push('--rw', path.join(root, TRANSCRIPTS));
-  for (const r of p.extraRoots ?? []) args.push('--rw', r);
+  // w5899: a grant over a locked folder would open it (tools-medium/shims is first on every agent's PATH).
+  const locked = [...except].map((c) => path.join(root, c));
+  const opens = (e: string) => locked.find((l) => l === path.resolve(e) || l.startsWith(path.resolve(e) + path.sep) || path.resolve(e).startsWith(l + path.sep));
+  const keep = (e: string) => {
+    const l = opens(e);
+    if (l) p.dropped?.(e, `it holds or is inside ${l}, which workers must not write`);
+    return !l;
+  };
+  for (const r of (p.extraRoots ?? []).filter(keep)) args.push('--rw', r);
   if (p.unitySlots) args.push('--rw', p.unitySlots);
   if (p.runtimeDir) args.push('--sock', path.join(p.runtimeDir, 'cc-socks'));
   // w5562: the user bus and the systemd user manager's own sockets, through which `systemd-run --user` starts a job
@@ -109,7 +139,7 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
     const tmp = p.tmp ?? '/tmp';
     args.push('--create', tmp, '--rw', path.join(tmp, DOTNET_DIR));
   }
-  for (const e of p.extra ?? []) args.push('--rw', e);
+  for (const e of (p.extra ?? []).filter(keep)) args.push('--rw', e);
   return args;
 }
 
@@ -200,11 +230,39 @@ export function makeOpenRootChildren(root: string, args: string[], appDir?: stri
   return made;
 }
 
-/** /tmp/.dotnet and its shm, world-writable and sticky like the .NET runtime makes them (pal/src/sharedmemory). */
+/**
+ * /tmp/.dotnet and its shm, world-writable and sticky like the .NET runtime makes them (pal/src/sharedmemory). Workers
+ * write both, and the daemon makes them unfenced, as the person, so nothing here follows a link (w6358's review of
+ * w5631: a worker that swapped the new folder for a link to ~/.ssh between the mkdir and a path chmod got that folder
+ * chmod 1777, 1 in 70,000 starts on m5). Each folder is opened O_NOFOLLOW|O_DIRECTORY and chmodded through that handle;
+ * shm is made through the handle of the folder above it (/proc/self/fd), so a swap of /tmp/.dotnet cannot move it.
+ */
 export function makeDotnetShm(dir: string): void {
-  for (const d of [dir, path.join(dir, 'shm')]) {
-    if (fs.existsSync(d)) continue;
-    fs.mkdirSync(d);
-    fs.chmodSync(d, 0o1777);
+  const top = stickyDir(dir);
+  if (top === undefined) return;
+  try {
+    const shm = stickyDir(`/proc/self/fd/${top}/shm`);
+    if (shm !== undefined) fs.closeSync(shm);
+  } finally {
+    fs.closeSync(top);
   }
+}
+
+/** Makes `p` (one level), opens it without following a link, and makes it 1777 through the handle if this call made it; undefined when `p` is a link or not a folder. */
+function stickyDir(p: string): number | undefined {
+  let made = false;
+  try {
+    fs.mkdirSync(p);
+    made = true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+  }
+  let fd: number;
+  try {
+    fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  } catch {
+    return undefined; // a link (ELOOP) or a file (ENOTDIR) a worker put there: left alone
+  }
+  if (made) fs.fchmodSync(fd, 0o1777);
+  return fd;
 }

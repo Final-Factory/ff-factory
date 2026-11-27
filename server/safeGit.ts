@@ -12,7 +12,7 @@
  * and `-c` options come after and still win):
  * - FIXED: keys whose name is known, forced every call, with no race against the worker: no fsmonitor, hooks read from
  *   FF Factory's own folder (server/gitHooks: git-lfs's four hooks and nothing else, so a push still uploads LFS objects;
- *   not `/dev/null`, which would be `\dev\null` on a Windows drive a worker can write), the `cat` pager, `:` editors, no signing or signature checks (a gpg program never runs), and remote
+ *   not `/dev/null`, which would be `\dev\null` on a Windows drive a worker can write), the `cat` pager, `:` editors, no `core.alternateRefsCommand` (w6082), no signing or signature checks (a gpg program never runs), and remote
  *   transports limited to https, http, ssh and file (`ext::` and named remote helpers are refused). Same list as w5514's
  *   standing agents (server/launch.ts STANDING_GIT_CONFIG) except `safe.bareRepository=explicit`: the machines' main
  *   clones are bare and the daemon runs `git -C <bare clone>`, which `explicit` refuses.
@@ -46,6 +46,8 @@ import {
   type SpawnSyncOptions,
 } from 'node:child_process';
 import path from 'node:path';
+import { runOffThread } from './hostProbe.ts';
+import type { RunResult } from './proc.ts';
 import { fileURLToPath } from 'node:url';
 
 type Env = NodeJS.ProcessEnv;
@@ -59,6 +61,9 @@ export const FIXED_GIT_CONFIG: [string, string][] = [
   ['core.hooksPath', HOOKS],
   ['core.pager', 'cat'],
   ['core.editor', ':'],
+  // Run by a fetch or a receive in a repository whose objects/info/alternates names another (w6082). Empty starts nothing:
+  // git tries to run '', reads no alternate refs, and the fetch still works (measured, git 2.56.1, GIT_TRACE).
+  ['core.alternateRefsCommand', ''],
   ['sequence.editor', ':'],
   ['log.showSignature', 'false'],
   ['commit.gpgSign', 'false'],
@@ -314,6 +319,22 @@ export function gitFence(args: string[], opts: { cwd?: string; env?: Env } = {})
       (_e, out) => resolve(fenced(args, env, String(out ?? ''))),
     );
   });
+}
+
+/**
+ * w6237: a git call whose two spawns (the fence's scan and git itself) both run on the probe thread (server/hostProbe.ts),
+ * never on the caller's event loop: the guard runs inside the portal on every shell command. `bin` is the git to run (the
+ * guard's trusted git), `pre` the settings that go before the fenced arguments (TRUSTED_GIT).
+ */
+export async function gitOffThread(args: string[], opts: { cwd?: string; env?: Env; timeoutMs?: number; bin?: string; pre?: string[] } = {}): Promise<RunResult> {
+  const env = opts.env ?? process.env;
+  let f: { args: string[]; env: Env };
+  if (!needsScan(args)) f = unscanned(args, env);
+  else {
+    const scan = await runOffThread('git', scanArgs(splitGlobal(args).location), 15_000, { cwd: opts.cwd, env: scanEnv(env), maxBuffer: 4 * 1024 * 1024 });
+    f = fenced(args, env, scan.stdout);
+  }
+  return runOffThread(opts.bin ?? 'git', [...(opts.pre ?? []), ...f.args], opts.timeoutMs ?? 15_000, { cwd: opts.cwd, env: f.env });
 }
 
 const cwdOf = (o?: { cwd?: string | URL }) => (o?.cwd === undefined ? undefined : String(o.cwd instanceof URL ? fileURLToPath(o.cwd) : o.cwd));

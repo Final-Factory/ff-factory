@@ -11,7 +11,8 @@
  * A failed `unity-slot run` names that cause instead of a bare compile failure.
  */
 import fs from 'node:fs';
-import { execFile, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
+import { execFileOffThread } from '../server/spawnThread.ts';
 
 /** A Unity log's CS2012 under Library/Bee: the path it could not write, or undefined. */
 export function beeAccessDenied(log: string): string | undefined {
@@ -92,7 +93,8 @@ export function compilerServers(platform: NodeJS.Platform = process.platform): C
 export function compilerServersAsync(platform: NodeJS.Platform = process.platform): Promise<CompilerServer[]> {
   if (platform !== 'win32') return Promise.resolve([]);
   return new Promise((resolve) =>
-    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(LIST_SERVERS, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 30_000, windowsHide: true }, (err, stdout) =>
+    // w6077: started from the daemon's spawn thread: the PowerShell start itself held BEAST's loop up to 35.5 s.
+    execFileOffThread('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(LIST_SERVERS, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 30_000, windowsHide: true }, (err, stdout) =>
       resolve(err ? [] : parseCompilerServers(stdout)),
     ),
   );

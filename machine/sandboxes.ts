@@ -2,6 +2,7 @@
 // clone, each on its own branch in the configured sandbox root, with its own Library (seeded warm) and at most one
 // Unity editor. The portal keeps the labels and agents; this keeps the folders, git and the editors, and reports every
 // change as a snapshot. State survives daemon restarts in <app_dir>/sandboxes.json.
+import { slotCacheEnv, type SharedLockSetting } from './slotCaches.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { branchProblem, pickEditorLog, pruneEditorLogs, slugify, withBaseRepoLock } from '../server/sandboxes.ts';
@@ -21,13 +22,15 @@ import { checkArray, readJsonDurable, writeJsonDurable } from '../server/durable
 import { armScriptReimport } from './scriptReimport.ts';
 import { daemonGit } from './storeLock.ts';
 import { borrowsFrom, convertToSlotRepo, finishConversion, guardStorePrune, isSlotRepo, isWorktree, keepSlotBranches, makeSlotRepo, storeGitDir, takeStoreBranch } from './slotRepo.ts';
-import { MacUnity, MacUnityWatch, realDeps, type EditorFence, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
+import { isLowFence, MacUnity, MacUnityWatch, realDeps, type EditorFence, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
+import { GitPackages, type GitPackagesMode } from './gitPackages.ts';
 import type { DaemonSandbox } from '../server/machineProtocol.ts';
 import type { BenchTicket } from './benchQueue.ts';
 import type { IdleCloseResult } from './liveIdle.ts';
 import { isPersonTicket } from './personPlay.ts';
 import type { DiskLevel, GitStatus, MachineSandboxIdleClosed, MachineSandboxUnity, SandboxPoolSettings, SandboxStatus } from '../shared/types.ts';
 import { describeCounted, type CensusAgent } from '../server/agentCensus.ts';
+import { liveRunWarning, type LiveRunAction } from './liveRunGuard.ts';
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const GB = 1024 ** 3;
@@ -89,6 +92,8 @@ export interface SandboxEditor {
 
 export interface PoolDeps {
   git(args: string[], opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<RunResult>;
+  /** w6412: after a switch, what to say about git packages the cache lacks (and, editorGitPackages on, their mirrors begun). */
+  gitPackagesAfterSwitch?(dir: string): string | undefined;
   copyTree(src: string, dst: string, signal?: AbortSignal, mode?: 'robocopy' | 'clone', exclude?: string[]): Promise<void>;
   /**
    * Bytes a Library copy writes up front: the source's size when it is a full copy (robocopy on Windows), undefined
@@ -151,6 +156,12 @@ export interface PoolOptions {
    * is live there and no editor or build has the project open.
    */
   releaseSweep?(sandboxPath: string): Promise<{ files: number; bytes: number }>;
+  /**
+   * w6378: the runs of a sandbox's worker that still live there though no agent does (a night it started, a unity-slot
+   * run, a batchmode Unity), each in words; empty when none. With it, a trim, a release or a delete of a sandbox with such
+   * a run logs a WARNING and goes ahead as before (liveRunGuard warn, machine/liveRunGuard.ts). Unset or failing: no line.
+   */
+  liveRun?(id: string, sandboxPath: string): Promise<string[]>;
   /** A line for the daemon's log. */
   log?(line: string): void;
   /** Why a sandbox editor may not start now (the machine's host guard, w466: the drive is gone, disk space is low), or undefined. */
@@ -313,10 +324,11 @@ export async function treeBytes(dir: string): Promise<number | undefined> {
  * (daemon.json `editorTmpdir` "on"), its own TMPDIR inside the root on macOS and Linux (sharedCaches.ts editorTmpdirEnv).
  * No root: none.
  */
-export function sandboxEditorEnv(env: NodeJS.ProcessEnv, sandbox: string, root: string | undefined, tmpdir = false, platform: NodeJS.Platform = process.platform): Record<string, string> {
+export function sandboxEditorEnv(env: NodeJS.ProcessEnv, sandbox: string, root: string | undefined, tmpdir = false, platform: NodeJS.Platform = process.platform, sharedLock: SharedLockSetting = 'off'): Record<string, string> {
   // w6000: without its own TMPDIR the editor gets the system temp folder back, not the daemon's (<root>/tmp-daemon).
   const own = editorTmpdirEnv(root, sandbox, tmpdir, platform);
-  return { ...sandboxGameDataEnv(env, sandbox), ...sandboxUvEnv(env, root), ...(own.TMPDIR ? own : editorSystemTempEnv(env, platform)) };
+  // w5615: with the shared lock, the sandbox's own clones of the tool caches and its own determinism-audit folder.
+  return { ...sandboxGameDataEnv(env, sandbox), ...sandboxUvEnv(env, root), ...slotCacheEnv(root, sandbox, sharedLock, platform), ...(own.TMPDIR ? own : editorSystemTempEnv(env, platform)) };
 }
 
 /**
@@ -339,7 +351,16 @@ export function editorLaunchEnv(env: Record<string, string>, f: { mkdirSync: typ
 }
 
 /** The real machine: git in the main clone, robocopy/cp for the Library, the daemon's Unity code. */
-export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined, fence?: () => EditorFence | undefined, root?: string, editorTmpdir = false): PoolDeps {
+export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined, fence?: () => EditorFence | undefined, root?: string, editorTmpdir = false, sharedLock: () => SharedLockSetting = () => 'off', gitPackagesMode: () => GitPackagesMode = () => 'warn'): PoolDeps {
+  // w6412: one mirror set for every sandbox, fetched with the daemon's own git and credential (outside the worker fence).
+  const gitPackages = new GitPackages({
+    mode: gitPackagesMode,
+    root,
+    platform,
+    log,
+    git: (args, opts = {}) => daemonGit(run('git', args, { timeoutMs: opts.timeoutMs ?? 120_000, env: ENV })),
+  });
+  const lowFenced = () => platform === 'win32' && isLowFence(fence?.());
   // One process listing serves every sandbox's watch in a look (a CIM query costs seconds on Windows).
   const base = realDeps(platform, log);
   let cached: { at: number; p: Promise<Proc[]> } | undefined;
@@ -351,6 +372,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
   return {
     // w5614: daemonGit marks the daemon's own git calls, which the store lock's warning leaves out (machine/storeLock.ts).
     git: (args, opts = {}) => daemonGit(run('git', ['-C', repoPath, ...args], { timeoutMs: opts.timeoutMs ?? 120_000, signal: opts.signal, env: ENV })),
+    gitPackagesAfterSwitch: (dir) => gitPackages.afterSwitch(dir, lowFenced()),
     copyTree: (src, dst, signal, mode, exclude) => copyTree(src, dst, { signal, mode, exclude }),
     libraryCopyBytes: async (src, mode) => (platform === 'win32' && mode !== 'clone' ? treeBytes(src) : undefined),
     removeTree,
@@ -364,9 +386,9 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
     },
     procs,
     editor: (sb, logFile, report) => {
-      const env = sandboxEditorEnv(process.env, sb.id, root, editorTmpdir, platform);
+      const env = sandboxEditorEnv(process.env, sb.id, root, editorTmpdir, platform, sharedLock());
       if (editorTmpdir && platform !== 'win32' && !editorTmpdirEnv(root, sb.id, true, platform).TMPDIR) log(`sandbox ${sb.id}: editorTmpdir is on but ${root ?? 'no root'} is too long for it (or unset): the editor keeps the system temp folder`);
-      const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence, env: () => editorLaunchEnv(env, fs, (line) => log(`sandbox ${sb.id}: ${line}`)) });
+      const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence, env: () => editorLaunchEnv(env, fs, (line) => log(`sandbox ${sb.id}: ${line}`)), gitPackages });
       return { unity, watch: new MacUnityWatch(unity, report, { log }) };
     },
     bridgeUp: (project, since) => bridgeUpSince(project, since),
@@ -375,6 +397,11 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
     lowerPriority,
   };
 }
+
+/** How long an aborted slot-repo conversion gets to end its git call before the pool tidies up (w5614). */
+const CONVERT_SETTLE_MS = 10_000;
+/** After a conversion at a placement fails, placements in that sandbox skip it this long; convertIdle still tries (w5614). */
+const CONVERT_BACKOFF_MS = 6 * 60 * 60_000;
 
 export class SandboxPool {
   private readonly o: PoolOptions;
@@ -400,6 +427,8 @@ export class SandboxPool {
   private readonly remade = new Set<string>();
   /** Sandboxes whose Library caches are being trimmed now (w898). */
   private readonly trimming = new Map<string, Promise<TrimResult>>();
+  /** w6378: the last live-run look of each sandbox (tests wait on it); it never holds up what it looks for. */
+  readonly liveRunLooks = new Map<string, Promise<string | undefined>>();
   /** Per sandbox: whether it had a live agent at the last look, so the moment the last one goes is seen. */
   private readonly occupied = new Map<string, boolean>();
   /** w1615: editor starts queued in the bench queue; w1860: the tickets of editors booting or running (held while they run). */
@@ -427,6 +456,16 @@ export class SandboxPool {
   private reseeding = false;
   private lastConvertLookAt = 0;
   private converting = false;
+  /** convertIdle's last reason to pass each worktree sandbox by (w5614): logged when it changes, not every look. */
+  private readonly convertSkip = new Map<string, string>();
+  /**
+   * The longest a conversion at a placement (switch) may wait for the main clone's lock, and then take once it holds it,
+   * before the switch goes on with the worktree (w5614). 90 s each: the portal gives a whole switch 10 min
+   * (server/machines.ts) and switchBranch's own locked fetch 5 min of it (w6086's review, finding 2).
+   */
+  private convertAtPlacementMs = 90_000;
+  /** When a conversion at a placement last failed or timed out, per sandbox: placements skip it for CONVERT_BACKOFF_MS (w6086, finding 1). */
+  private readonly convertFailedAt = new Map<string, number>();
   private ticking = false;
 
   constructor(o: PoolOptions, d: PoolDeps) {
@@ -907,6 +946,7 @@ export class SandboxPool {
       this.changed(r, { status: 'error', statusDetail: `delete refused: ${r.path} is not a sandbox folder under ${s.root}` });
       throw new Error(`refusing to delete ${r.path}`);
     }
+    this.warnLiveRun(id, r.path, 'delete');
     const prov = this.provisioning.get(id);
     this.changed(r, { status: 'deleting', statusDetail: prov ? 'cancelling creation' : 'stopping' });
     if (prov) {
@@ -1017,6 +1057,7 @@ export class SandboxPool {
   release(id: string): string {
     const r = this.require(id);
     if (this.busy.has(id) || r.status === 'creating' || r.status === 'deleting') throw new Error(`sandbox ${id} is ${r.status}; wait until it is done`);
+    this.warnLiveRun(id, r.path, 'release');
     this.recs.delete(id);
     this.editors.delete(id);
     this.unityState.delete(id);
@@ -1045,6 +1086,7 @@ export class SandboxPool {
     if (this.editorUp(id)) return none('its editor is up');
     if (projectOpen(r.path)) return none('an editor or build has the project open');
     const policy = { ...TRIM_DEFAULTS, ...(this.o.trim || {}) };
+    this.warnLiveRun(id, r.path, `Library cache trim (${why})`);
     this.changed(r, { status: 'cleanup', statusDetail: `trimming the Library caches (${why})` });
     const ac = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1094,6 +1136,37 @@ export class SandboxPool {
   }
 
   /**
+   * w6378, warn only: say in the log when `action` hits a sandbox where a run of its worker still lives (liveRun). Not
+   * awaited and never thrown: the trim, release or delete goes ahead exactly as before, whatever the look answers or how
+   * long it takes (at most 30 s, then it gives up and says so).
+   */
+  private warnLiveRun(id: string, sandboxPath: string, action: LiveRunAction): void {
+    const look = this.o.liveRun;
+    if (!look) return;
+    const said = (async (): Promise<string | undefined> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const holders = await Promise.race([
+          look(id, sandboxPath),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('no answer in 30 s')), 30_000);
+            timer.unref?.();
+          }),
+        ]);
+        const line = liveRunWarning(id, action, holders);
+        if (line) this.o.log?.(line);
+        return line;
+      } catch (e) {
+        this.o.log?.(`sandbox ${id}: the live-run look before its ${action} failed (${(e as Error).message}); it goes ahead as before (w6378)`);
+        return undefined;
+      } finally {
+        clearTimeout(timer);
+      }
+    })();
+    this.liveRunLooks.set(id, said);
+  }
+
+  /**
    * The sandbox other than `id` that holds `branch` where git would no longer refuse it (w5614): a slot repo does not
    * share refs with the clone, so git's "already checked out" never comes. Only when one of the two is a slot repo (or
    * `slotNew`, a sandbox about to be made as one); between worktrees git still refuses, in its own words.
@@ -1121,32 +1194,111 @@ export class SandboxPool {
     if (s?.slotRepos !== 'all' || this.converting || now - this.lastConvertLookAt < 2 * 60_000) return;
     this.lastConvertLookAt = now;
     for (const r of this.recs.values()) {
-      if (r.status !== 'ready' || this.busy.has(r.id) || this.trimming.has(r.id) || this.editorUp(r.id) || projectOpen(r.path)) continue;
-      if (!isWorktree(r.path) || (this.o.liveAgents?.(r.id) ?? 0) > 0 || this.o.activity(r.id).busy) continue;
-      this.converting = true;
-      this.busy.add(r.id);
-      this.changed(r, { status: 'cleanup', statusDetail: 'becoming a slot repo (its own git folder; files untouched)' });
-      try {
-        const line = await withBaseRepoLock(async () => {
-          const note = await guardStorePrune(this.d.git);
-          return `${await convertToSlotRepo(this.d.git, r.path)}${note ? `; ${note}` : ''}`;
-        });
-        this.o.log?.(`sandbox ${r.id}: ${line}`);
-        this.git.set(r.id, await this.d.gitStatus(r.path).catch(() => undefined));
-      } catch (e) {
-        // A worktree it never swapped is still a whole worktree; one it did is a whole slot repo (finishConversion).
-        try {
-          finishConversion(r.path);
-        } catch {
-          // reported below
-        }
-        this.o.onEvent({ text: `sandbox ${r.id}: could not become a slot repo: ${(e as Error).message}` });
-      } finally {
-        this.busy.delete(r.id);
-        this.converting = false;
-        this.changed(r, { status: 'ready', statusDetail: undefined });
+      if (!isWorktree(r.path)) {
+        this.convertSkip.delete(r.id);
+        continue;
       }
+      const why = this.convertBlocker(r) ?? ((this.o.liveAgents?.(r.id) ?? 0) > 0 ? 'an agent is live there' : this.o.activity(r.id).busy ? 'an agent is mid-turn there' : undefined);
+      if (why) {
+        // Why a worktree is passed by (w5614: BEAST's slot3 never converted and its log never said why).
+        if (this.convertSkip.get(r.id) !== why) this.o.log?.(`sandbox ${r.id}: not becoming a slot repo yet: ${why}; it converts when it is free, or when a worker is placed there`);
+        this.convertSkip.set(r.id, why);
+        continue;
+      }
+      this.convertSkip.delete(r.id);
+      await this.convert(r);
       return;
+    }
+  }
+
+  /** What stops a conversion of this sandbox now, whoever asks, live agents aside; undefined: nothing. */
+  private convertBlocker(r: Rec): string | undefined {
+    if (r.status !== 'ready') return `it is ${r.status}`;
+    if (this.busy.has(r.id)) return 'the pool is working on it';
+    if (this.trimming.has(r.id)) return 'its Library caches are being trimmed';
+    if (this.editorUp(r.id)) return 'its editor runs';
+    if (projectOpen(r.path)) return 'an editor or build has the project open (Temp/UnityLockfile)';
+    return undefined;
+  }
+
+  /**
+   * Turn one worktree sandbox into a slot repo (w5614). Never throws: a failure leaves a whole worktree and is reported.
+   * With timeoutMs (the conversion at a placement): past it the conversion is aborted (its git calls take the signal, and
+   * one still waiting for the main clone's lock does nothing once it gets it), the sandbox is left a whole worktree or a
+   * whole slot repo (finishConversion), and the caller goes on.
+   */
+  private async convert(r: Rec, timeoutMs?: number): Promise<boolean> {
+    this.converting = true;
+    this.busy.add(r.id);
+    this.changed(r, { status: 'cleanup', statusDetail: 'becoming a slot repo (its own git folder; files untouched)' });
+    const ac = new AbortController();
+    const signal = ac.signal;
+    const gone = () => {
+      if (signal.aborted) throw new Error('aborted: it took too long');
+    };
+    let held: () => void = () => undefined;
+    const lockHeld = new Promise<void>((res) => (held = res));
+    let tookLock = false;
+    const work = withBaseRepoLock(async () => {
+      gone();
+      tookLock = true;
+      held();
+      const note = await guardStorePrune(this.d.git, signal);
+      gone();
+      return `${await convertToSlotRepo(this.d.git, r.path, signal)}${note ? `; ${note}` : ''}`;
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // The time limit counts from when the conversion holds the main clone's lock; a wait for the lock past the same limit
+      // gives up before anything is done (w6086, finding 2: another sandbox's locked fetch could use up the limit).
+      const line = timeoutMs
+        ? await Promise.race([
+            work,
+            new Promise<never>((_, reject) => {
+              const cut = (why: string) => {
+                ac.abort();
+                reject(new Error(why));
+              };
+              timer = setTimeout(() => cut(`the main clone stayed busy for ${Math.round(timeoutMs / 1000)} s; it stays a worktree for now`), timeoutMs);
+              void lockHeld.then(() => {
+                if (signal.aborted) return;
+                clearTimeout(timer);
+                timer = setTimeout(() => cut(`timed out after ${Math.round(timeoutMs / 1000)} s; it stays a worktree for now`), timeoutMs);
+              });
+            }),
+          ])
+        : await work;
+      this.o.log?.(`sandbox ${r.id}: ${line}`);
+      this.convertFailedAt.delete(r.id);
+      if (!timeoutMs) this.git.set(r.id, await this.d.gitStatus(r.path).catch(() => undefined));
+      return true;
+    } catch (e) {
+      work.catch(() => undefined);
+      if (signal.aborted && tookLock) {
+        // Let an aborted git call end (its process is killed on the signal), at most a few seconds: the swap itself has
+        // no await in it, so the work is then either before the swap or past it. A call still waiting for the lock does
+        // nothing when it runs (gone()), so a cut before the lock waits for nothing.
+        await Promise.race([work.catch(() => undefined), new Promise((res) => setTimeout(res, CONVERT_SETTLE_MS))]);
+      }
+      // A worktree it never swapped is still a whole worktree; one it did is a whole slot repo (finishConversion).
+      try {
+        finishConversion(r.path);
+      } catch {
+        // reported below
+      }
+      // The abort can land after the swap (a git call past it was cut): then it did become one (w6086, finding 3).
+      if (isSlotRepo(r.path)) {
+        this.o.log?.(`sandbox ${r.id}: became a slot repo (a step after the swap was cut: ${(e as Error).message.replace(/; it stays a worktree for now$/, '')})`);
+        return true;
+      }
+      if (timeoutMs && tookLock) this.convertFailedAt.set(r.id, Date.now());
+      this.o.onEvent({ text: `sandbox ${r.id}: could not become a slot repo: ${(e as Error).message}${timeoutMs && tookLock ? `; placements skip the conversion for ${CONVERT_BACKOFF_MS / 3_600_000} h, and the idle look still tries` : ''}` });
+      return false;
+    } finally {
+      if (timer) clearTimeout(timer);
+      this.busy.delete(r.id);
+      this.converting = false;
+      this.changed(r, { status: 'ready', statusDetail: undefined });
     }
   }
 
@@ -1448,6 +1600,13 @@ export class SandboxPool {
     const holder = this.slotBranchHolder(id, branch);
     if (holder) throw new Error(`branch ${branch} is checked out in sandbox ${holder}: one sandbox holds a branch at a time`);
     if (this.editorUp(id)) throw new Error(`the editor of sandbox ${id} is running: stop it first (unity stop), switch, then start it again. A switch under a running editor stops Unity on "The open scene(s) have been modified externally".`);
+    // Slot repos 'all' (w5614): a worktree becomes a slot repo as a worker is placed in it. On a busy machine a sandbox is
+    // free only between a release and the next placement, so convertIdle alone may never see it free (BEAST's slot3,
+    // 2026-11-26). The agent placed waits on this switch; a failure leaves the worktree whole and the switch goes on.
+    // A hang is cut at convertAtPlacementMs and anything thrown is caught: a placement never fails on the conversion.
+    // After a failed one, placements there skip it for CONVERT_BACKOFF_MS, so a worker is not held up at every placement.
+    const failedAt = this.convertFailedAt.get(r.id);
+    if (this.settings?.slotRepos === 'all' && isWorktree(r.path) && !this.converting && !this.convertBlocker(r) && !(failedAt !== undefined && Date.now() - failedAt < CONVERT_BACKOFF_MS)) await this.convert(r, this.convertAtPlacementMs).catch(() => false);
     const slot = isSlotRepo(r.path);
     const took = slot ? await withBaseRepoLock(() => takeStoreBranch(this.d.git, r.path, branch)) : undefined;
     const res = await switchBranch({
@@ -1465,6 +1624,8 @@ export class SandboxPool {
       if (foreign.length) res.notes.push(`${foreign.length} untracked file(s) were already here from before, not yours, and a save of ${res.to} leaves them uncommitted (w2988): ${someFiles(foreign)}`);
     }
     if (took) res.notes.unshift(took);
+    const gp = this.d.gitPackagesAfterSwitch?.(r.path);
+    if (gp) res.notes.push(gp);
     if (slot && res.from && res.from !== res.to) await this.keepInStore(r, res.from);
     this.git.set(id, await this.d.gitStatus(r.path));
     this.changed(r, { branch: res.to });

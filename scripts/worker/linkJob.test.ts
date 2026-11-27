@@ -109,6 +109,27 @@ test('w5554: the worker caps mode goes through to the installer update as named;
   for (const m of ['off', 'warn', 'enforce'] as const) assert.deepEqual(updateFlagsOf('/src', { workerCaps: m }), { source: '/src', workerCaps: m });
   assert.deepEqual(updateFlagsOf('/src', { workerCaps: 'off', workerFence: 'on' }), { source: '/src', workerFence: 'on', workerCaps: 'off' });
   assert.deepEqual(updateFlagsOf('/src', {}), { source: '/src' }, 'unset: carried');
+  // w5959: the tools disk lock, warn or on from the wire; anything else is dropped, never guessed at.
+  for (const m of ['warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { toolsDiskLock: m }), { source: '/src', toolsDiskLock: m });
+  assert.deepEqual(updateFlagsOf('/src', { toolsDiskLock: 'off' as never }), { source: '/src' });
+  // w6110: win ci first, off, warn or enforce from the wire; anything else is dropped.
+  for (const m of ['off', 'warn', 'enforce'] as const) assert.deepEqual(updateFlagsOf('/src', { winCiFirst: m }), { source: '/src', winCiFirst: m });
+  assert.deepEqual(updateFlagsOf('/src', { winCiFirst: 'on' as never }), { source: '/src' });
+  // w6163: runner priority, off, warn or enforce from the wire; anything else is dropped.
+  for (const m of ['off', 'warn', 'enforce'] as const) assert.deepEqual(updateFlagsOf('/src', { runnerPriority: m }), { source: '/src', runnerPriority: m });
+  assert.deepEqual(updateFlagsOf('/src', { runnerPriority: 'on' as never }), { source: '/src' });
+  // w6305: host restage, warn or on from the wire; anything else is dropped.
+  for (const m of ['warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { hostRestage: m }), { source: '/src', hostRestage: m });
+  assert.deepEqual(updateFlagsOf('/src', { hostRestage: 'off' as never }), { source: '/src' });
+  // w6367: long runs, off, warn or on from the wire; anything else is dropped.
+  for (const m of ['off', 'warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { longRuns: m }), { source: '/src', longRuns: m });
+  assert.deepEqual(updateFlagsOf('/src', { longRuns: 'enforce' as never }), { source: '/src' });
+  // w6378: live-run guard, off or warn from the wire; anything else is dropped.
+  for (const m of ['off', 'warn'] as const) assert.deepEqual(updateFlagsOf('/src', { liveRunGuard: m }), { source: '/src', liveRunGuard: m });
+  assert.deepEqual(updateFlagsOf('/src', { liveRunGuard: 'on' as never }), { source: '/src' });
+  // w6412: editor git packages, off, warn or on from the wire; anything else is dropped.
+  for (const m of ['off', 'warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { editorGitPackages: m }), { source: '/src', editorGitPackages: m });
+  assert.deepEqual(updateFlagsOf('/src', { editorGitPackages: 'enforce' as never }), { source: '/src' });
   assert.deepEqual(updateFlagsOf('/src', { workerCaps: 'on' as never }), { source: '/src' });
 });
 
@@ -126,6 +147,13 @@ test('w5614: the store lock goes through to the installer update as named; an un
   assert.deepEqual(updateFlagsOf('/src', { storeLock: 'enforce' as never }), { source: '/src' });
 });
 
+test('w5615: the shared-cache lock goes through to the installer update as named; an unnamed one and a value off the wire are not passed', () => {
+  for (const m of ['off', 'warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { sharedLock: m }), { source: '/src', sharedLock: m });
+  assert.deepEqual(updateFlagsOf('/src', { workerFence: 'on', sharedLock: 'warn' }), { source: '/src', workerFence: 'on', sharedLock: 'warn' });
+  assert.deepEqual(updateFlagsOf('/src', {}), { source: '/src' }, 'unset: carried');
+  assert.deepEqual(updateFlagsOf('/src', { sharedLock: 'enforce' as never }), { source: '/src' });
+});
+
 test('w5862: the Medium agents folder mode goes through to the installer update as named; an unnamed one and a value off the wire are not passed', () => {
   for (const m of ['warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { mediumAgentFolders: m }), { source: '/src', mediumAgentFolders: m });
   assert.deepEqual(updateFlagsOf('/src', { workerFence: 'on', mediumAgentFolders: 'on' }), { source: '/src', workerFence: 'on', mediumAgentFolders: 'on' });
@@ -141,10 +169,10 @@ test('w5833: the editor temp folder goes through to the installer update as name
 });
 
 test('w5863: the path fence goes through to the installer update as named; an unnamed one and a value off the wire are not passed', () => {
-  for (const m of ['off', 'warn'] as const) assert.deepEqual(updateFlagsOf('/src', { pathFence: m }), { source: '/src', pathFence: m });
+  for (const m of ['off', 'warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { pathFence: m }), { source: '/src', pathFence: m });
   assert.deepEqual(updateFlagsOf('/src', { workerFence: 'on', pathFence: 'off' }), { source: '/src', workerFence: 'on', pathFence: 'off' });
   assert.deepEqual(updateFlagsOf('/src', {}), { source: '/src' }, 'unset: carried');
-  assert.deepEqual(updateFlagsOf('/src', { pathFence: 'on' as never }), { source: '/src' });
+  assert.deepEqual(updateFlagsOf('/src', { pathFence: 'enforce' as never }), { source: '/src' });
   assert.deepEqual(updateFlagsOf('/src', { pathFence: '' as never }), { source: '/src' });
 });
 

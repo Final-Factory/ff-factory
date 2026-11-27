@@ -26,19 +26,19 @@ import { groupIntake } from '../shared/intake.ts';
 import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
 import { idleClosedPart } from './liveIdle.ts';
-import { topPriority, type Pressure } from './priorityReclaim.ts';
+import { FAILED_START_MS, failedStartPressure, rankOf, topPriority, type Pressure } from './priorityReclaim.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, keepWhy, moveBranchOf, occupies, releasedOn, workerBranch, type PairWant } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { GAME_REPO, otherComputerOf, pairStepLine, pairWaitLine, pairWaitNotice } from './pairRuns.ts';
 import { applyPairRaises, type PairState } from './pairRaise.ts';
-import { WORK_LIVE_LABEL, queuedNeeds, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, orchestratorAskIn, restartWait, personWaitIn, reportWaitKey, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+import { WORK_LIVE_LABEL, queuedNeeds, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, orchestratorAskIn, restartWait, personWaitIn, reportWaitKey, holdsIndex, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { prsIn, reportTail, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { addedLines, asksLookOk, decidedRefusal, notesSettle, personNotes, quoteCovered, quotedPhrases, relatedRequests, settledRefusal } from './priorDecisions.ts';
 import { statusLinesIn, stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, MEDIA_FILE, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
 import { ciPushHold } from './savePushHold.ts';
-import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
+import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, offSince, onRequest, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
 import { isSamePerson, personForWork, poolOwnerOf, tokenPersonForWork, vaultContext, withPool } from './vault.ts';
 import { ghRunner, githubFromVault, githubPersonOf, githubTokens } from './githubTokens.ts';
 import { clashLine, expectedFiles, type FfuClash, ffuStartClashes, FfuPrReads, peerFilesNote, sharedFilesNote } from './ffuOverlap.ts';
@@ -68,6 +68,7 @@ import { inMergeOnGreenPilot } from './mergeOnGreen.ts';
 import { inReadChainPilot, withReadChainMark } from './readChain.ts';
 import { tempSizeLedgerLine } from './tempSizeHook.ts';
 import { capLedgerLine } from '../machine/workerCaps.ts';
+import { junctionRmSignalLine } from './junctionRmWarn.ts';
 import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
@@ -96,7 +97,7 @@ import { REPORT_KINDS, questionFor, type ReportSummary } from '../shared/types.t
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, playerAttachmentOf, publishedAttachmentText } from '../shared/attachments.ts';
 import { MACHINE_ACCOUNT, SECRET_KEYS, dispatcherOwnAccount, dispatcherPoolPerson, machineRunEnv, maskSecret, pinnedDispatcherEnv, poolRunEnv, redactSecrets } from './secrets.ts';
 import { Identity, forLine } from './identity.ts';
-import { crossOwnerLine, DECISION_WORDS_HOURS, DECISION_WORDS_MIN, INVESTIGATE_AT, loopGuards, moveBeforeOf, type MoveBefore, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
+import { crossOwnerLine, DECISION_WORDS_HOURS, DECISION_WORDS_MIN, INVESTIGATE_AT, loopGuards, moveBeforeOf, type MoveBefore, Orchestrators, personsResume, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
 import { beltFor, DESTRUCTIVE_TOOLS, type BeltRole } from './belts.ts';
 import { TurnModels } from './turnModel.ts';
 import { deferredToolsLine, sdkExtras, toolsOf } from './toolManifest.ts';
@@ -120,8 +121,8 @@ import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, LABEL_CHARS, LABEL_INPUT_
 import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shared/waitSummary.ts';
 import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
-import { DECISIONS, attachmentsNote, describeItem, doneOf, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, replacedLeg, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { cachedPlayerNote, fetchPlayerNote, legacyUnfitWhy, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsUi, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, LEG_HOLD_MS, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
+import { DECISIONS, logLine, attachmentsNote, describeItem, doneOf, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, replacedLeg, requestAsFiled, requestLineRule, startProblem } from './work.ts';
+import { cachedPlayerNote, fetchPlayerNote, legacyUnfitWhy, macRefusedScenario, mentionsLegacyPlayer, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsUi, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, LEG_HOLD_MS, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { SymbolOwners } from './symbolOwners.ts';
 import { SteamJobs, branchOf, describeJob, parseAsk, readClaim, refuseUpload } from './steamUpload.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
@@ -129,7 +130,8 @@ import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
 import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
 import { steamLabel, steamLacks } from '../shared/steam.ts';
-import { desktopLabel, desktopLacks, needsWindow, pairDrivesMenus, screenUnlockAskProblem, windowLacks } from '../shared/desktop.ts';
+import { desktopLabel, desktopLacks, linuxLockWarn, needsWindow, pairDrivesMenus, saysNone, screenUnlockAskProblem, windowLacks } from '../shared/desktop.ts';
+import { dataDirClearedText, gameCommitAt, otherPlayerInWords, pairAskWords, gameDataDirAt, type CommitVerdict, type DataDirVerdict } from './gameDataDir.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
 import { TITLE_HELP, TITLE_MAX, jobTitle } from './jobTitle.ts';
@@ -323,7 +325,7 @@ export const noTimedWaitNotice = (id: string, line: string, machine: string, why
 /** w5929: the worker's machine_cleanup (Agents.workerCleanup). */
 export const WORKER_CLEANUP_TOOL = "Only on a disk clean-up request of this machine (one filed with disk_cleanup): ask this machine's daemon for one clean-up pass now, the pass the dispatcher's machine_cleanup runs. It counts as a low-disk pass, so the daemon's rules take FF Factory's own leftovers that wait 15 min untouched, not a day or two weeks: above all an FFU runner's job folder (ffu-runners/<runner>/_work/<entry>) that ff-leftovers remove cannot delete on Windows (the runners' Medium integrity label, w5499), which the hourly pass keeps 14 days on a disk that is not low (w5929). Every rule keeps its own checks (a runner running a job keeps its folders) and on a worker install it removes only inside the install folder. It runs in the background (minutes) and its result, what it removed and kept and why, comes to you as a [clean-up] message. dry_run: list what it would remove, removing nothing. Refused on any other request.";
 
-const HAND_UP_TOOL = `Hand up follow-up requests you wrote (w2969): you cannot file a request (only a person's orchestrator has request_work), so a design whose approval says to build it in stages, a follow-up a person asked for, or work you found that needs its own request goes here, one item per request with its title and its whole brief. Your requester's orchestrator is sent them and files each (related to your request), or asks its person first. Your DONE is kept and your request closes by itself once they are filed or its person closes it. Never write "I couldn't file" or "someone needs to file" in a report instead: call this.`;
+const HAND_UP_TOOL = `Hand up follow-up requests you wrote (w2969): you cannot file a request (only a person's orchestrator has request_work), so a design whose approval says to build it in stages, a follow-up a person asked for, or work you found that needs its own request goes here, one item per request with its title and its whole brief. Your requester's orchestrator is sent them and files each (related to your request), or asks its person first. Your DONE is kept and your request closes by itself once they are filed or its person closes it. To wait on one, end your turn "<id>: still open: blocked on the follow-up I handed up": once filed it is your request's blocker, and its close resumes you with its id (w6397). Never write "I couldn't file" or "someone needs to file" in a report instead: call this.`;
 const REQUEST_PAIR_TOOL = `Ask for a check that needs several computers at once (w1945): a two-machine multiplayer or determinism check, a host and its clients. It files ONE pair request whose legs the dispatcher starts together, a new worker on each computer, as soon as that many computers have room at once (never one leg at a time), and Blocks your request on its report, as blocked_on with reports does: commit and push, then end your turn with a "wNNN: still open: blocked on <the pair request>" line. Your sandbox is released at once for other work while you wait, and the host leg's result (a line "For wNNN:") resumes you. what: one line; brief: what the legs run (the branch or commit, the scenario, what passes, where the result goes), since each leg is a new worker; an ffnightly.py run of a pull request's player passes --scenarios-from <its commit>, so a scenario renamed with the content is the one played, and a Linux relay client takes a lab whose relay peer says "headless": true (lab.pair-m5-relay-linux.json; w4286); legs: 1 by default, one computer running the host and client side by side (an ffnightly.py MP scenario on the default lab, lab.win.json or lab.linux.json: a second leg would only repeat it), and 2 by default when the request names a reason to need computers at once: cross_os, steam, timed, split, or a pair lab (lab.pair-...) or pair_relay in what or brief (w4618); pass two or more only for such a check (a count you pass stands, and a Queued run with no reason and no count passed is cut to one leg); on Windows or Linux with the head's player built, run such a check in your own sandbox instead of filing it (w4596); cross_os only for the reasons it names (w1692; a Mac only ever hosts, leg 1, and takes no leg at all when every leg runs an MP scenario's host and client on its own computer, as ffnightly.py does unless the brief names a pair lab (lab.pair-...) or pair_relay: the game's player_slots.py refuses a multiplayer client on a Mac, w3697); timed when a leg takes timing measurements (never on the m5); steam (w2459) when the legs need Steam (a lobby, a Steam host or join): its legs then go only on computers whose Steam client is signed in, a different Steam account on each, and while too few computers are, it is Blocked on Steam with each computer and what it lacks named (words such as "lobby" or "Steam join" in what or brief set it too; steam "none" says they do not). One open pair run per request: asked again, you wait on the one there is, unless it is spent (w2041): a leg already reported, a leg's computer is offline or its worker errored, or you pass retry: true. Then that run is cancelled and a fresh one is filed, with new legs on other computers than the failed ones (avoid adds computers you saw fail, such as one whose Tailscale is stuck), and only the fresh run's report resumes you. pr and commit (w2057): the pull request and the head commit the legs run (default: the pull request named in what or brief, else your request's one open pull request). A pull request with an open pair run (yours or one an orchestrator filed) is never run twice: you wait on that one. One whose pair run finished on that commit is answered with its result and nothing is filed (retry: true runs it again). When the run finishes, its result comes with your resume. Never ask an orchestrator in your report for a pair run: nobody reads that as a filing.`;
 
 export const TIMED_PLACE_TOOL = `Ask where a timed leg runs BEFORE you take an exclusive bench ticket for it (w1969, lothsahn: "every time a worker needs an exclusive lock it should ask the dispatcher"): an exclusive turn idles every other slot of its computer, so a leg goes to a computer of the timing classes, small or medium, by agent slots: small 1 agent slot, medium 2-3, large 4-6, xlarge 7+ (server/placement.ts sizeClass, w2055); never one that takes no timed runs or runs no game players (w1861, w4621). The Capacity line (list_sandboxes, system_status) shows each computer's class. On a large or xlarge computer the harness refuses bench_queue.py timed, --timed, bench_lock --timing, unity-slot --bench exclusive and the bench scripts (probe_ab_win.sh, cpu_budget_run.sh, ...) until you asked; a small or medium one needs no ask (server/timedAsk.ts timedAskMark, w4627). It answers "here" (take your ticket as before; it holds 12 h) or "elsewhere". Elsewhere for a Windows player A/B (w1996: a save played by two builds, probe_ab_win.sh's legs) names a computer for timed_run: build both players here under shared tickets, call timed_run, and that computer's daemon times them under its own exclusive ticket, with no new worker and no rebuild there. Elsewhere for anything else timed (via "leg": a snippet timed in the editor, a Performance test, a profiler capture, a Mac player): FF Factory files the leg as its own request, Queued for the small computers (a large or xlarge one only when none of them can take it: offline past a wait that grows with the fleet's load, held, or without a game sandbox; w2048), whose new worker builds and times BOTH sides there and reports to you, and Blocks your request on that report (as request_pair does): commit and push, then end your turn. Each worker gets its own leg, and each different brief, platform or machine another (w2900: parallel rows of one request each ask for theirs); only your own repeat of the same ask waits on the leg you already have. what: the leg in one line; brief: what it runs, as a new worker needs it (the branch and the commit of each side, the save, the script and its settings, what to report); platform: windows or mac when the leg needs one (default any); machine (w2521): the one computer the leg must run on for a hardware reason (its display, its GPU, its OS; "lothlaptop" for the G-SYNC/VRR screen): it runs there or waits Queued there, never on an idle or bigger computer ("must run on X" in the request's constraints, or in what, brief or same_machine, pins it the same way); same_machine: only when its numbers must come from THIS computer (a side of the A/B already ran here), and why; via: timed_run for a Windows player A/B, leg for anything else (unset: timed_run when a computer takes one, and the answer says when to ask again with leg). cancel (w2442): a timed run id ("tr_..."), of your request or of one it names, to stop it instead of asking: its player ends, its bench ticket goes back and its worker is told why (what: the reason). status (w3405): a timed run id, to read where it stands instead of asking: the run it waits behind on its daemon, which plays one at a time (its state stays sent meanwhile), what that one waits for and since when, and a free computer to move to once that wait passes one turn.`;
@@ -464,11 +466,17 @@ export const FFBOX_BRIEF = [
  */
 /** Disk space's Windows sentences (w1755): a Mac or Linux worker's brief leaves them out (w2002). */
 const DISK_WINDOWS = ` On a Windows computer, disk work (a clean-up, a low-disk check, a leftover scan, a disk measurement) reads, measures and deletes only on the install folder's drive (V: on LothDesktop, F: on BEAST): never read, measure or touch C: (no du, dir /s, Get-ChildItem -Recurse, find or ff-leftovers check there), and the harness refuses such a scan. The one exception on C: is the game's data folders under AppData (AppData\\LocalLow\\Never Games, and a Never Games folder in AppData\\Local or AppData\\Roaming): you may read and measure them, never delete, move or write anything there (the harness refuses that too); every other folder on C:, the rest of AppData included, stays off limits.`;
+/**
+ * Windows only (w6264, lothsahn: "Windows workers: rm -rf follows a mklink /J junction; clean temp folders with rd /s /q"):
+ * Git Bash's rm -rf deleted a junction's target whole and then failed on the junction; rd, Remove-Item and Node's fs.rm
+ * removed the junction and kept the target (measured on BEAST in w6252 and on LothDesktop in w6264).
+ */
+const DISK_RD_WINDOWS = ` On Windows a folder goes with \`cmd //c "rd /s /q $(cygpath -w "$TMPDIR/<name>")"\` (in PowerShell \`Remove-Item -LiteralPath "$env:TEMP\\<name>" -Recurse -Force\`), never \`rm -r\`: Git Bash's \`rm -rf\` goes through a junction inside it (one \`mklink /J\` made, or a tool such as pnpm) and deletes the folder the junction points at, then fails on the junction itself; \`rd\` and Remove-Item remove the junction and keep its target (measured). \`rm -f\` of files is fine.`;
 /** Disk space's macOS and Linux sentence: a Windows worker's brief leaves it out (w2002). */
 const DISK_UNIX = ` On macOS and Linux, outside the folder you only measure and report.`;
 
 export const DISK_HYGIENE = `## Disk space
-Disk space on this computer is shared and runs out: then new agents and editors wait. Your TMP, TEMP and TMPDIR are a temp folder of your own (ffa-<session>): put everything you make there (clones of other repos, logs, builds, recordings, tour output, screenshot sets, scratch), not in your home folder, the worktree, a shared scratch folder or /tmp (Git Bash's /tmp is not your folder; $TMPDIR is). Never a full clone of the game repo there (its LFS files and a Library copy took 43 GB): a player of another commit is built in your sandbox, one commit at a time, and a scripts-only clone is \`--sparse\` with GIT_LFS_SKIP_SMUDGE=1; the harness refuses the rest. The Write tool takes its absolute path: \`echo $TMPDIR\` before your first Write there, never a probe file at a guessed path (a Write that would make a new file outside your sandbox and temp folder is refused). Delete the big things you made once you are done with them, and before DONE or a long wait: a clone, a cargo target you will not build in again, a player build, recordings, repeat or tour output, a runaway log, each with a plain \`rm -rf "$TMPDIR/<name>"\` written out (it asks nobody). Check with \`du -sh "$TMPDIR"\` and \`du -sm "$TMPDIR"/* | sort -rn | head\`; FF Factory warns you when it passes 15 GB. Small files may stay. An ffu (Rust) checkout is an ffu slot, not a clone in your temp folder: \`eval "$(ffu-slot take --branch <your branch>)"\` gives you one with a warm cargo target (FFU_DIR, CARGO_TARGET_DIR; ffu-build-test); never delete a slot's target, and \`ffu-slot release\` once your work is pushed. A second checkout of another branch takes a second slot (\`ffu-slot take --branch <that branch>\`), never your first slot's target. No slot free (exit 4): wait for one (\`ffu-slot take --wait 9 --branch <your branch>\`, or a wake_me check-in, then take again); never build ffu in your temp folder or a clone of your own, unless \`ffu-slot take\` refuses you as an agent outside the worker fences (exit 5): then build as its message says. Mid-task, never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, \`$TMPDIR/<leg>-<timestamp>\` (\`OUT="$TMPDIR/f1920-$(date +%H%M%S)"\`), and point your report at the newest. The harness removes it: your temp folder a few minutes after no request waits for you any more (it closed, or moved to another worker; a wait for CI or a person, a stop or a pause keeps it whole), your git clones six hours after that (unless one holds work nothing else has), its rebuildable caches (player builds, Library, node_modules, digested profiler captures) once you are stopped and nothing in it was written for 24 h, or for 15 minutes while the disk is low (a resumed worker rebuilds them), the build and capture output of your sandbox when it is released, player slots nobody holds, old nightly output and stopped sessions' folders. That sweep comes only after you, so it is no reason to leave GBs behind. Never \`player_slots.py prune\`; publish the proofs your report links (publish_review, specs/<NNN>/proofs) before you end or delete them, since the rest goes. To delete (done with it, or the disk short in the middle of your task), use a plain \`rm -rf "$TMPDIR/<name>"\` (or Remove-Item with a path under $env:TEMP): a delete whose every path is written out under $TMPDIR is answered by the session itself with no approval, alone or inside a longer command, and so is a path through a folder you named once at the start of the command (\`K="$TMPDIR/keep"; ...; rm -f "$K"/*.png\`); anything else (the folder itself, /tmp, .., ~, \`xargs rm\`, a variable after $TMPDIR such as \`$TMPDIR/$S\`) still asks a person, so do not send one. Delete only inside this machine's worker install folder (its root: D:/work/ffw, F:/ffw or ~/ffw; "FF_WORKER_ROOT" in your environment; your sandbox, your temp folder and the player slots are inside it), except your own save copy in the game's saves folder (\`read_rules saves\`).${DISK_WINDOWS}${DISK_UNIX} Never ask a person for a go to free disk space: if the disk is still short, say so in your report. Never delete a person's own files (documents, their own projects and saves) or another agent's work in progress. A request of yours to clear space or measure the disk: \`read_rules cleanup\` before you delete anything.`;
+Disk space on this computer is shared and runs out: then new agents and editors wait. Your TMP, TEMP and TMPDIR are a temp folder of your own (ffa-<session>): put everything you make there (clones of other repos, logs, builds, recordings, tour output, screenshot sets, scratch), not in your home folder, the worktree, a shared scratch folder or /tmp (Git Bash's /tmp is not your folder; $TMPDIR is). Never a full clone of the game repo there (its LFS files and a Library copy took 43 GB): a player of another commit is built in your sandbox, one commit at a time, and a scripts-only clone is \`--sparse\` with GIT_LFS_SKIP_SMUDGE=1; the harness refuses the rest. The Write tool takes its absolute path: \`echo $TMPDIR\` before your first Write there, never a probe file at a guessed path (a Write that would make a new file outside your sandbox and temp folder is refused). Delete the big things you made once you are done with them, and before DONE or a long wait: a clone, a cargo target you will not build in again, a player build, recordings, repeat or tour output, a runaway log, each with its path written out (it asks nobody; how to delete is below). Check with \`du -sh "$TMPDIR"\` and \`du -sm "$TMPDIR"/* | sort -rn | head\`; FF Factory warns you when it passes 15 GB. Small files may stay. An ffu (Rust) checkout is an ffu slot, not a clone in your temp folder: \`eval "$(ffu-slot take --branch <your branch>)"\` gives you one with a warm cargo target (FFU_DIR, CARGO_TARGET_DIR; ffu-build-test); never delete a slot's target, and \`ffu-slot release\` once your work is pushed. A second checkout of another branch takes a second slot (\`ffu-slot take --branch <that branch>\`), never your first slot's target. No slot free (exit 4): wait for one (\`ffu-slot take --wait 9 --branch <your branch>\`, or a wake_me check-in, then take again); never build ffu in your temp folder or a clone of your own, unless \`ffu-slot take\` refuses you as an agent outside the worker fences (exit 5): then build as its message says. Mid-task, never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, \`$TMPDIR/<leg>-<timestamp>\` (\`OUT="$TMPDIR/f1920-$(date +%H%M%S)"\`), and point your report at the newest. The harness removes it: your temp folder a few minutes after no request waits for you any more (it closed, or moved to another worker; a wait for CI or a person, a stop or a pause keeps it whole), your git clones six hours after that (unless one holds work nothing else has), its rebuildable caches (player builds, Library, node_modules, digested profiler captures) once you are stopped and nothing in it was written for 24 h, or for 15 minutes while the disk is low (a resumed worker rebuilds them), the build and capture output of your sandbox when it is released, player slots nobody holds, old nightly output and stopped sessions' folders. That sweep comes only after you, so it is no reason to leave GBs behind. Never \`player_slots.py prune\`; publish the proofs your report links (publish_review, specs/<NNN>/proofs) before you end or delete them, since the rest goes. To delete (done with it, or the disk short in the middle of your task), use a plain \`rm -rf "$TMPDIR/<name>"\` on macOS and Linux, and on Windows \`rd /s /q\` or Remove-Item with a path under $env:TEMP: a delete whose every path is written out under $TMPDIR is answered by the session itself with no approval, alone or inside a longer command, and so is a path through a folder you named once at the start of the command (\`K="$TMPDIR/keep"; ...; rm -f "$K"/*.png\`); anything else (the folder itself, /tmp, .., ~, \`xargs rm\`, a variable after $TMPDIR such as \`$TMPDIR/$S\`) still asks a person, so do not send one.${DISK_RD_WINDOWS} Delete only inside this machine's worker install folder (its root: D:/work/ffw, F:/ffw or ~/ffw; "FF_WORKER_ROOT" in your environment; your sandbox, your temp folder and the player slots are inside it), except your own save copy in the game's saves folder (\`read_rules saves\`).${DISK_WINDOWS}${DISK_UNIX} Never ask a person for a go to free disk space: if the disk is still short, say so in your report. Never delete a person's own files (documents, their own projects and saves) or another agent's work in progress. A request of yours to clear space or measure the disk: \`read_rules cleanup\` before you delete anything.`;
 
 /**
  * Disk space as a worker on `platform` reads it (w2002, lothsahn: "File the compaction pilot plus the base-context trim and
@@ -476,7 +484,7 @@ Disk space on this computer is shared and runs out: then new agents and editors 
  */
 export function diskHygiene(platform?: string): string {
   if (platform === 'win32') return DISK_HYGIENE.replace(DISK_UNIX, '');
-  return platform ? DISK_HYGIENE.replace(DISK_WINDOWS, '') : DISK_HYGIENE;
+  return platform ? DISK_HYGIENE.replace(DISK_WINDOWS, '').replace(DISK_RD_WINDOWS, '') : DISK_HYGIENE;
 }
 
 /**
@@ -698,6 +706,14 @@ type PairPlan = Map<string, { pair: WorkItem; short?: string }>;
  * w2414: a queued message's text as it goes with a room move. Its attachments (a timed run's logs among them) were copied
  * into the old sandbox's Inbox only, so the moved text names each by id for fetch_attachment on the new computer.
  */
+/**
+ * w6047: a gate resume or a check-in, the old worker's own wait (never a person's answer or note sent as one, personsResume,
+ * w2495). A move drops one whose request has no worker to wait any more; everything else it holds is delivered somewhere.
+ */
+export function ownWait(m: QueuedSend | undefined): boolean {
+  return !!m && !personsResume(m) && (!!m.resumeOf || /^\[wake_me\]/.test(m.text));
+}
+
 export function movedText(q: Pick<QueuedSend, 'text' | 'attachments'>): string {
   const a = (q.attachments ?? []).filter((x) => x.id);
   if (!a.length) return q.text;
@@ -744,6 +760,8 @@ export class Agents {
    * by index.ts.
    */
   dispatcherAccountMove?: (account: string) => { why: string; out: boolean } | undefined;
+  /** w6093: a token's vault name and last 4 ("vault-ben-3 …CAAA") for an account key, else undefined. Wired by index.ts. */
+  tokenLabel?: (account: string) => string | undefined;
   /** w5921: why the dispatcher would wait if it started now (its pin out, or no token of its pool with room), else undefined. */
   dispatcherHeldWhy?: () => string | undefined;
   /** w5921: a line to the operators' orchestrators (those that exist): the owners and everyone with a Claude pool. */
@@ -893,6 +911,7 @@ export class Agents {
     sessions.deployMove = (s, q, now) => this.deployMove(s, q, now);
     // w2043: a pilot worker whose pull request merged goes on in a fresh session at its next message (server/freshAfterMerge.ts).
     sessions.freshStart = (s, m) => this.freshStart(s, m);
+    sessions.freshStartMaybe = (s, m) => this.freshStarts.has(s.info.id) || (!this.freshRefused.has(s.info.id) && !m.images?.length && !!freshAfterMergeDue(s.info, this.store.work.values(), this.cfg));
     machines.onPause = (id, p) => {
       if (p.paused) this.pauses.onPause(id);
       else {
@@ -1023,11 +1042,13 @@ export class Agents {
       pass: (run) => {
         this.workByWorker = workByWorker(this.store.work.values());
         this.waitLivePass = {};
+        this.holdsPass = {};
         try {
           return run();
         } finally {
           this.workByWorker = undefined;
           this.waitLivePass = undefined;
+          this.holdsPass = undefined;
         }
       },
       // Uncommitted changes keep no process when its daemon saves them before the release (w656).
@@ -1054,6 +1075,7 @@ export class Agents {
       saveWork: (m, sb, branch, message, sessionId) => machines.saveWork(m, sb, branch, message, sessionId ? this.githubTokenFor(m, sessionId, `saving ${sessionId}'s work`) : undefined, this.pushHold(m, branch)),
       // w3507: game sandboxes go out by priority (server/priorityReclaim.ts).
       pressure: () => this.reclaimPressure(),
+      failedStarts: () => this.failedStartPressure(),
       pairWants: () => this.pairWants(),
       priorityOf: (info) => topPriority(this.openWorkOf(info).map((w) => w.priority)),
       reclaimHold: (info, sb) => this.reclaimHold(info, sb),
@@ -1371,6 +1393,11 @@ export class Agents {
     // w3686: a worker's temp folder is over its threshold: one line in each open request it serves (the worker was told by its own hook).
     sessions.events.on('tempSize', (s: SessionHandle, arg?: unknown) => this.onWorkerTempSize(s, arg));
     sessions.events.on('workerCap', (s: SessionHandle, arg?: unknown) => this.onWorkerCap(s, arg));
+    // w6266: a Windows worker's junction rm warning, one line in the portal's log for the warn week's count (portal_logs).
+    sessions.events.on('junctionRm', (s: SessionHandle, arg?: unknown) => {
+      const line = junctionRmSignalLine(arg);
+      if (line) console.log(`${line} machine=${s.info.machineId ?? '-'}`);
+    });
   }
 
   /**
@@ -1601,7 +1628,7 @@ export class Agents {
    */
   private otherWorkerOn(w: WorkItem, i: SessionInfo, workLeft = false): string | undefined {
     const o = w.sessionIds
-      .filter((id) => id !== i.id)
+      .filter((id) => id !== i.id && onRequest(w, id))
       .map((id) => this.store.sessions.get(id))
       .find((x) => !!x && x.kind === 'worker' && (isMidTurn(x) || !!this.sessions.sessions.get(x.id)?.live) && !(x.machineId === i.machineId && x.machineSandbox === i.machineSandbox) && (!workLeft || this.stillWorkingOn(w, x)));
     return o ? `its worker ${o.id} works on it in ${o.machineId}/${o.machineSandbox ?? '?'}` : undefined;
@@ -1679,7 +1706,12 @@ export class Agents {
 
   /** The requests that can concern worker `id`: its own during a release pass (workByWorker), else all of them. */
   private workOf(id: string): Iterable<WorkItem> {
-    return this.workByWorker ? (this.workByWorker.get(id) ?? []) : this.store.work.values();
+    if (this.workByWorker) return this.workByWorker.get(id) ?? [];
+    // w6336: within withPlacesOnce too, built again once a request is saved or dropped (Store.workRev).
+    const pass = this.placesPass;
+    if (!pass) return this.store.work.values();
+    if (pass.byWorker?.rev !== this.store.workRev) pass.byWorker = { rev: this.store.workRev, of: workByWorker(this.store.work.values()) };
+    return pass.byWorker.of.get(id) ?? [];
   }
 
   /** Why an idle worker's process should go (w384), or undefined: its requests are closed, handed to another worker, or it has been idle an hour. */
@@ -2277,8 +2309,106 @@ export class Agents {
   }
 
   /** The request_pair tool (w1945, Orchestrators.filePair): a check on several computers at once, filed as one request it waits on. */
-  private requestPair(sessionId: string, a: Record<string, unknown>): string {
+  /**
+   * w6189: does the player at a commit read FF_GAME_DATA_DIR (server/gameDataDir.ts)? Read through GitHub as the system payer,
+   * like the Steam upload's release claim; tests replace it.
+   */
+  gameDataDirAt: (commit: string) => Promise<DataDirVerdict> = (commit) => gameDataDirAt(ghRunner(undefined, 'the FF_GAME_DATA_DIR check of a pair run'), GAME_REPO, commit);
+
+  /**
+   * w6206: does the commit a pair run names exist in the game repo (server/gameDataDir.ts gameCommitAt)? undefined: not asked,
+   * which only the test runner's FF_COMMIT_CHECK=off gives (scripts/testEnv.ts); tests that check it replace this.
+   */
+  gameCommitAt: (commit: string) => Promise<CommitVerdict | undefined> = (commit) =>
+    process.env.FF_COMMIT_CHECK === 'off' ? Promise.resolve(undefined) : gameCommitAt(ghRunner(undefined, 'the commit check of a pair run'), GAME_REPO, commit);
+
+  /**
+   * w6206: refuse a pair run whose commit GitHub does not have (a mistyped sha), or answer a warning when GitHub could not be
+   * read: the run is then placed, and the warning says the commit was not checked.
+   */
+  private async pairCommitCheck(commit: string, refusal: (why: string) => string): Promise<string | undefined> {
+    const v = await this.gameCommitAt(commit).catch((e: Error): CommitVerdict => ({ known: undefined, why: `FF Factory could not check that commit ${commit} exists (${clip(e.message, 160)}; w6206)` }));
+    if (!v || v.known === true) return undefined;
+    if (v.known === false) throw new Error(refusal(v.why));
+    return `WARNING: ${v.why}; it was placed unchecked, so make sure the legs run the commit you meant.`;
+  }
+
+  /**
+   * w6189: the data-folder verdict for a request_pair call that its words or legacy_data would mark pre-w5297, or undefined
+   * when nothing would mark it (no GitHub call) or no commit is known (filePair then keeps the refusal and says so).
+   */
+  private async pairDataDir(a: Record<string, unknown>, player: PairPlayer | undefined): Promise<DataDirVerdict | undefined> {
+    const said = typeof a.legacy_data === 'string' ? a.legacy_data.trim() : '';
+    if (saysNone(said)) return undefined;
+    if (!said && !mentionsLegacyPlayer(typeof a.what === 'string' ? a.what : '', typeof a.brief === 'string' ? a.brief : '')) return undefined;
+    const commit = (typeof a.commit === 'string' ? a.commit.trim().toLowerCase() : '') || player?.key.slice(0, 40);
+    if (!commit || !/^[0-9a-f]{7,40}$/.test(commit)) return undefined;
+    try {
+      return await this.gameDataDirAt(commit);
+    } catch (e) {
+      return { reads: false, checked: false, why: `FF Factory could not check ${commit.slice(0, 10)} for the FF_GAME_DATA_DIR backport (${clip((e as Error).message, 160)}; w6189)` };
+    }
+  }
+
+  /**
+   * w6189: a pair run marked pre-w5297 whose commit reads FF_GAME_DATA_DIR is no such run: clear its mark and say why (by:
+   * start_agent, or the queue's re-check). w6235: words that name another player (a Steam 0.50 build, another sha) keep the
+   * mark, since only the commit is read, and so does a verdict for another commit. True when it cleared the mark.
+   */
+  private async clearLegacyByCommit(w: WorkItem, by: string): Promise<boolean> {
+    const commit = w.pair?.commit;
+    if (!w.pair?.legacyData || !commit) return false;
+    // w6451: the run's own what and brief too, for a run marked from them before request_pair kept their reason in the mark.
+    const own = pairAskWords(w);
+    if (otherPlayerInWords(commit, w.pair.legacyData, own.what, own.brief)) return false;
+    const v = await this.gameDataDirAt(commit).catch((): undefined => undefined);
+    if (!v?.reads || !sameCommit(v.commit, commit)) return false;
+    // The read awaited GitHub: act on the request as it is now, and only while it is still marked for that same commit.
+    const now = this.store.work.get(w.id) ?? w;
+    if (!now.pair?.legacyData || now.pair.commit !== commit) return false;
+    const cleared = dataDirClearedText(v.commit);
+    const { legacyData: was, ...rest } = now.pair;
+    now.pair = { ...rest, dataDirChecked: cleared };
+    now.log = [...now.log, logLine(new Date(), `${by}: ${cleared}; it was marked "${clip(was ?? '', 120)}"`)].slice(-40);
+    this.store.putWork(now);
+    if (now !== w) w.pair = now.pair;
+    return true;
+  }
+
+  /** w6235: when each queued marked pair run's commit was last read, so a commit that cannot be checked is not asked every minute. */
+  private legacyRechecked = new Map<string, number>();
+
+  /**
+   * w6235 (w6192's review of PR #1402, nit 3): a queued pair run marked pre-w5297 before w6189, or by hand, waited outside
+   * placement until someone called start_agent on it. BlockerWatch runs this each minute, before the queue is read: each
+   * such run's commit is read (at most once per 10 minutes per run and commit) and the mark cleared where it reads
+   * FF_GAME_DATA_DIR. Answers the ids it cleared.
+   */
+  async recheckLegacyPairs(nowMs = Date.now()): Promise<string[]> {
+    const done: string[] = [];
+    // w6451 (w6442's review): forget runs that started, closed or lost their mark, so the map does not grow forever.
+    const live = new Set<string>();
+    for (const w of this.store.work.values()) {
+      if ((w.status === 'new' || w.status === 'queued') && !w.sessionIds.length && w.pair?.legacyData && w.pair.commit) live.add(`${w.id} ${w.pair.commit.toLowerCase()}`);
+    }
+    for (const key of this.legacyRechecked.keys()) if (!live.has(key)) this.legacyRechecked.delete(key);
+    for (const w of [...this.store.work.values()]) {
+      // Not yet started: filed (new) or waiting for room (queued); a started run's legs already passed start_agent's check.
+      if ((w.status !== 'new' && w.status !== 'queued') || w.sessionIds.length || !w.pair?.legacyData || !w.pair.commit) continue;
+      const key = `${w.id} ${w.pair.commit.toLowerCase()}`;
+      if (nowMs - (this.legacyRechecked.get(key) ?? -Infinity) < 10 * 60_000) continue;
+      this.legacyRechecked.set(key, nowMs);
+      if (await this.clearLegacyByCommit(w, 'the queue re-check')) done.push(w.id);
+    }
+    return done;
+  }
+
+  private async requestPair(sessionId: string, a: Record<string, unknown>): Promise<string> {
     refuseInDryRun('request_pair');
+    const player = typeof a.player === 'string' && a.player.trim() ? this.pairPlayer(a.player) : undefined;
+    const given = typeof a.commit === 'string' ? a.commit.trim().toLowerCase() : '';
+    const commitWarning = /^[0-9a-f]{7,40}$/.test(given) ? await this.pairCommitCheck(given, (why) => `Nothing filed: ${why}`) : undefined;
+    const dataDir = await this.pairDataDir(a, player);
     const out = this.orchestrators.filePair(sessionId, {
       what: typeof a.what === 'string' ? a.what : '',
       brief: typeof a.brief === 'string' ? a.brief : '',
@@ -2294,10 +2424,11 @@ export class Agents {
       ...(Array.isArray(a.avoid) ? { avoid: a.avoid.filter((x): x is string => typeof x === 'string').slice(0, 6) } : {}),
       ...(typeof a.pr === 'string' && a.pr.trim() ? { pr: a.pr } : {}),
       ...(typeof a.commit === 'string' && a.commit.trim() ? { commit: a.commit } : {}),
-      ...(typeof a.player === 'string' && a.player.trim() ? { player: this.pairPlayer(a.player) } : {}),
+      ...(player ? { player } : {}),
+      ...(dataDir ? { data_dir: dataDir } : {}),
     });
     this.blockerWatch?.kick();
-    return out;
+    return commitWarning ? `${out} ${commitWarning}` : out;
   }
 
   /** w4613: request_pair's player, an attachment publish_attachment made from a player cache entry, as the pair keeps it. */
@@ -2408,7 +2539,7 @@ export class Agents {
    */
   spendExportFor(sessionId: string, raw: Record<string, unknown>): string {
     if (!this.spend) throw new Error('the spend record is not wired into this server');
-    const own = [...this.store.work.values()].filter((w) => w.sessionIds.includes(sessionId));
+    const own = [...this.store.work.values()].filter((w) => onRequest(w, sessionId));
     const granted = own.filter((w) => w.spendRead && (WORK_OPEN.includes(w.status) || w.status === 'stalled'));
     if (!granted.length) throw new Error(`spend_export needs a spend-read grant on one of your open requests (${own.map((w) => w.id).join(', ') || 'you are on none'}), and none has one. Its person's orchestrator grants it (update_work spend_read); say in your report what you need and why.`);
     const { args: a, warnings } = clampArgs(raw, { limit: [1, 2000], offset: [0] });
@@ -2422,7 +2553,7 @@ export class Agents {
    */
   async workTimingFor(sessionId: string, raw: Record<string, unknown>): Promise<string> {
     this.transcriptAccessOf(sessionId, 'work_timing');
-    const own = [...this.store.work.values()].filter((w) => w.sessionIds.includes(sessionId) && (WORK_OPEN.includes(w.status) || w.status === 'stalled'));
+    const own = [...this.store.work.values()].filter((w) => onRequest(w, sessionId) && (WORK_OPEN.includes(w.status) || w.status === 'stalled'));
     if (!own.some((w) => w.ledgerRead)) throw new Error(`work_timing needs a ledger-read grant on an open request of yours (${own.map((w) => w.id).join(', ') || 'you are on none'}). Its person's orchestrator grants it (update_work ledger_read); say in your report what you need and why.`);
     const { args: a, warnings } = clampArgs(raw, { last: [1, 300] });
     const sessions = this.store.sessions;
@@ -2795,6 +2926,26 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     return cutOff;
   }
 
+  /** Starts and moves this began without waiting for them (w5278's hand-over, a room move): what settled() waits for. */
+  private readonly inFlight = new Set<Promise<unknown>>();
+  private track<T>(p: Promise<T>): Promise<T> {
+    const seen = p.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.inFlight.add(seen);
+    void seen.finally(() => this.inFlight.delete(seen));
+    return p;
+  }
+
+  /**
+   * Once every start and move this began without waiting has finished, its worker linked or its failure said (w5915: a test
+   * waits for that, not for a time: on a loaded BEAST a hand-over's ~30 git processes outran a 5 s wait).
+   */
+  async settled(): Promise<void> {
+    while (this.inFlight.size) await Promise.all([...this.inFlight]);
+  }
+
   /**
    * Stop every timer this started (w3746): its ticks, the orchestrators' timers, the pending wakes (their file kept), the ops
    * worker's and the rollout's. A test calls it before it removes the data folder: a release pass that fired after the
@@ -3084,7 +3235,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       ...(m.attachments?.length ? { attachments: m.attachments.map((a) => a.id) } : {}),
     }).then(
       (said) => {
-        const to = this.store.work.get(w.id)?.sessionIds.at(-1);
+        // w6309 (the w6335 review): the new session is the newest worker on it, never one moved off it that a merge listed again.
+        const x = this.store.work.get(w.id);
+        const to = x?.sessionIds.filter((sid) => onRequest(x, sid)).at(-1);
         if (!to || to === id || !this.store.sessions.get(to)) throw new Error(`no new session: ${String(said).slice(0, 200)}`);
         this.carryOver(id, to, w.id);
         console.log(`fresh-after-merge pilot (w2043): ${w.id}: worker ${id} ended after PR ${prs} merged; fresh session ${to} goes on (pilot arm)`);
@@ -3123,7 +3276,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   private endAfterMerge(i: SessionInfo) {
     if (freshAfterMergePercent(this.cfg) <= 0 || i.kind !== 'worker') return;
     const all = [...this.store.work.values()];
-    if (all.some((w) => isOpen(w) && w.sessionIds.includes(i.id))) return;
+    if (all.some((w) => isOpen(w) && onRequest(w, i.id))) return;
     const w = mergedInSession(i, all, this.cfg);
     if (!w) return;
     console.log(`fresh-after-merge pilot (w2043): worker ${i.id} ends after ${w.id}'s PR merged and it holds nothing open: ${this.orchestrators.retireWhenFree(i.id)}`);
@@ -3553,7 +3706,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   private onWorkerTempSize(s: SessionHandle, arg: unknown) {
     const line = tempSizeLedgerLine(s.info.id, arg);
     if (!line) return;
-    const open = [...this.store.work.values()].filter((w) => isOpen(w) && w.sessionIds.includes(s.info.id));
+    const open = [...this.store.work.values()].filter((w) => isOpen(w) && onRequest(w, s.info.id));
     if (!open.length) return console.warn(`${line} (no open request)`);
     // A note (quiet): it is no activity on the request.
     for (const w of open) this.orchestrators.ledgerEdit(w.id, line, () => undefined, true);
@@ -3564,7 +3717,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const line = capLedgerLine(s.info.id, arg);
     if (!line) return;
     console.warn(line);
-    const open = [...this.store.work.values()].filter((w) => isOpen(w) && w.sessionIds.includes(s.info.id));
+    const open = [...this.store.work.values()].filter((w) => isOpen(w) && onRequest(w, s.info.id));
     // Not quiet: a person should see a runaway was stopped.
     for (const w of open) this.orchestrators.ledgerEdit(w.id, line, () => undefined);
   }
@@ -3663,7 +3816,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // w4608: an agent there on an agent seat (its open work is all not the game's, w1098) works in its own clone, never in
     // this tree, so its turn holds no switch up: w4591's timed leg waited 30 min in lothdesktop/slot2 behind w4397's FFU
     // agent, seated there beside it.
-    const seats = sb.sessionIds.filter((id) => id !== req.callerSessionId && this.onAgentSeat(id));
+    // w6381: in one holds index (withPlacesOnce > holdsIndexNow): onAgentSeat > workIdsOf scanned the whole ledger once per
+    // session the sandbox ever held (a 2.9 s block under switchBranch at 12:04Z on 2026-11-27).
+    const seats = this.withPlacesOnce(() => sb.sessionIds.filter((id) => id !== req.callerSessionId && this.onAgentSeat(id)));
     const b = busy(sb.sessionIds.filter((id) => !seats.includes(id)));
     if (b.length) throw new Error(midTurnRefusal(b, where));
     return async () => {
@@ -3717,6 +3872,10 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * w2709's report r36), though the ledger (shared/fleet.ts, by holdsOf) showed it on w2709.
    */
   private workIdsOf(info: SessionInfo, bySession?: Map<string, WorkItem[]>, byId?: ReadonlyMap<string, WorkItem>): string[] {
+    // w6336: within withPlacesOnce, every worker's requests from one index (a scan of every request per worker was 1-3 s
+    // of each blockerWatch tick and state build in the 2026-11-27 stall profiles, under workIdsOf, live and holdsOf).
+    const index = bySession ? undefined : this.holdsIndexNow();
+    if (index) ({ of: bySession, byId } = index);
     const ids = new Set(holdsOf(info.id, bySession ? (bySession.get(info.id) ?? []) : [...this.store.work.values()], byId).held);
     const named = /^(w\d+):/.exec(info.title ?? '')?.[1];
     if (named) ids.add(named);
@@ -3729,7 +3888,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    */
   workInSandbox(machineId: string, sandbox: string): { sessions: string[]; requests: string[] } {
     const here = [...this.store.sessions.values()].filter((s) => s.kind === 'worker' && s.machineId === machineId && s.machineSandbox === sandbox && !!this.sessions.sessions.get(s.id)?.live);
-    return { sessions: here.map((s) => s.id), requests: [...new Set(here.flatMap((s) => this.workIdsOf(s)))].sort() };
+    return { sessions: here.map((s) => s.id), requests: this.withPlacesOnce(() => [...new Set(here.flatMap((s) => this.workIdsOf(s)))].sort()) };
   }
 
   /** A worker session's requests, or undefined when it is not a worker session (w4922: a batch run's tags, by its FF_SESSION_ID). */
@@ -3888,6 +4047,28 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     return moved;
   }
 
+  /**
+   * w6093: what set_app_config claudeAccounts.dispatcher says happens to the dispatcher, given what applyAccountConfig moved.
+   * A mid-turn dispatcher is told it restarts only when a move is due for its current token (dispatcherAccountMove); when its
+   * token already satisfies the setting, nothing restarts, and the answer says so instead of promising a restart.
+   */
+  dispatcherConfigAnswer(moved: string[]): string {
+    if (moved.length) return 'the dispatcher was stopped between turns and its next message starts it there';
+    const id = this.orchestrators.dispatcherId;
+    const h = id ? this.sessions.sessions.get(id) : undefined;
+    const account = h?.live ? h.info.account : undefined;
+    if (!h?.live || !account) return 'the dispatcher already runs there, or starts there at its next message';
+    const move = this.dispatcherAccountMove?.(account);
+    const on = this.tokenLabel?.(account) ?? 'its current token';
+    if (!move) {
+      const pool = this.tokenOwner?.(account);
+      const out = pool ? this.orchestratorTokenOut?.(account, pool) : undefined;
+      return `the dispatcher already runs on ${on}${pool ? ` of ${pool}'s pool` : ''}${out ? `, which is out (${out}), and no other token of that pool has room: it waits for a reset there` : ', which has room'}: nothing to restart`;
+    }
+    if (isMidTurn(h.info) || h.info.backgroundTasks) return `the dispatcher is mid-turn: it restarts within 30 s of that turn ending (never mid-turn), because ${move.why}`;
+    return `the dispatcher restarts before its next turn, because ${move.why}`;
+  }
+
   /** A person's orchestrator whose process runs on another pool than their pool setting names now (w1717), else undefined. */
   private personPoolMove(s: SessionHandle): string | undefined {
     const person = this.orchestrators.ownerOf(s.info)?.userId;
@@ -3937,7 +4118,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     if (!i.machineId || isMidTurn(i)) return undefined;
     // w1863: a hold that names requests it lets through resumes their workers (lothsahn: "stop all work on LothDesktop
     // except w1785 until it's done"; at 15:15 the hold kept for w1785 queued a message to w1785's own worker).
-    const mine = [...this.store.work.values()].filter((w) => isOpen(w) && w.sessionIds.includes(i.id)).map((w) => w.id);
+    const mine = [...this.store.work.values()].filter((w) => isOpen(w) && onRequest(w, i.id)).map((w) => w.id);
     // w5895, w5937: a drain set to let only its running workers finish ("and none resume") holds the resume of any other
     // worker there that no exception lets through, until hold_machine lift, update_work hold lift or resumes 'all'.
     const why = holdReason(i.machineId, this.placement(false), mine) ?? this.builds.resumeHold(i) ?? (i.kind === 'worker' ? this.drainResumeHold(i, mine) : undefined);
@@ -3955,7 +4136,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   private drainOrphan(s: SessionHandle): string | undefined {
     const i = s.info;
     if (i.kind !== 'worker' || !i.machineId || isMidTurn(i)) return undefined;
-    if ([...this.store.work.values()].some((w) => isOpen(w) && w.sessionIds.includes(i.id))) return undefined;
+    if ([...this.store.work.values()].some((w) => isOpen(w) && onRequest(w, i.id))) return undefined;
     const why = this.machineHold(s);
     if (!why || why !== this.drainResumeHold(i, [])) return undefined;
     return `${i.machineId} is drained to let only its running workers finish, and worker ${i.id} has no open request left, so its held message is dropped (w5937)`;
@@ -4163,15 +4344,25 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   }
 
   /** w2046: resumes being moved to a computer with room: session id to the messages that go with it and where it goes. */
-  private readonly roomMoving = new Map<string, { to: string; texts: string[] }>();
+  private readonly roomMoving = new Map<string, { to: string; texts: string[]; first?: QueuedSend; sends?: QueuedSend[] }>();
   /** w5950: moved-away workers being retired now (retireMovedAway), with their new workers: retired once (the w5975 review). */
   private readonly retiring = new Map<string, string[]>();
+  /** w6047: workers a hello found running while their retire was under way, with that computer: retired again after it. */
+  private readonly retireAgain = new Map<string, string>();
   /** w2046: the last stay or wait reason journalled for a worker whose resume did not move, so each is logged once. */
   private readonly roomKept = new Map<string, string>();
   /** w5260: released urgent or frantic workers whose resume found no computer to move to: their resume may pre-empt at a safe point (PlaceAgainDeps.resumePreempt). */
   private readonly roomStuck = new Map<string, string>();
   /** w5942: each request's last move and the computers whose daemon refused a start at its cap, so a request moves at most once per wait. */
   readonly moveGuard = new MoveGuard();
+
+  /** A message that arrived while its worker's move runs goes with the move (w2046); the first is kept for its sender (w6047). */
+  private absorbMoved(moving: { texts: string[]; first?: QueuedSend; sends?: QueuedSend[] }, q: QueuedSend) {
+    moving.texts.push(movedText(q));
+    // w6047 (the w6149 review, 2): each message's own send beside its text, so a give-back routes each by its own resumeOf.
+    (moving.sends ??= []).push(q);
+    moving.first ??= q;
+  }
 
   /**
    * SessionManager.roomMove (w2046, server/resumeMove.ts): a message that waits only for room on its worker's own computer.
@@ -4188,7 +4379,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     if (away) {
       const moving = this.roomMoving.get(info.id);
       if (moving) {
-        moving.texts.push(movedText(q));
+        this.absorbMoved(moving, q);
         return true;
       }
       if (isMidTurn(info) || info.pendingPermissions.length) return undefined;
@@ -4196,7 +4387,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     }
     const moving = this.roomMoving.get(info.id);
     if (moving) {
-      moving.texts.push(movedText(q));
+      this.absorbMoved(moving, q);
       return true;
     }
     if (now - (Date.parse(q.at) || now) < MOVE_AFTER_MS || info.pendingPermissions.length || isMidTurn(info)) return undefined;
@@ -4260,11 +4451,12 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     }
     this.roomKept.delete(info.id);
     this.roomStuck.delete(info.id);
-    const entry = { to: d.move.to, texts: [movedText(q)] };
+    const entry = { to: d.move.to, texts: [movedText(q)], sends: [q] };
     this.roomMoving.set(info.id, entry);
     const waited = Math.round((now - (Date.parse(q.at) || now)) / 1000);
+    this.warnOutranked('room move', info, reqs, d.move.to);
     console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) moves to ${d.move.to} ${waited} s after its message was queued: ${hold}; ${d.move.why}`);
-    this.unmemoized(() => void this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id)));
+    this.unmemoized(() => void this.track(this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id))));
     return true;
   }
 
@@ -4284,7 +4476,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     if (on.machines.includes(here)) return undefined;
     const moving = this.roomMoving.get(info.id);
     if (moving) {
-      moving.texts.push(movedText(q));
+      this.absorbMoved(moving, q);
       return true;
     }
     const forget = () => {
@@ -4307,6 +4499,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       const entry = {
         to: d.move.to,
         texts: [movedText(q)],
+        sends: [q],
         lead: deployLead({ id: w.id, worker: info.id, from, machines: on.machines, to: d.move.to, why: on.why }),
         how: `moved by FF Factory: it waited for ${on.machines.join(' or ')}'s update, and its check runs there (w5328)`,
         reason: `${on.why}, and the check after it runs on ${d.move.to} (w5328)`,
@@ -4314,7 +4507,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       this.roomMoving.set(info.id, entry);
       const hold = `its check after ${on.machines.join(' or ')}'s update runs on ${d.move.to}`;
       console.log(`deploy move: worker ${info.id} on ${from} (${w.id}) moves to ${d.move.to}: ${on.why} (w5328); ${d.move.why}`);
-      this.unmemoized(() => void this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id)));
+      this.unmemoized(() => void this.track(this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id))));
       return true;
     }
     if ('none' in d) {
@@ -4399,8 +4592,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       lost: info.placeReleased ? `its sandbox was released before ${m} went away, and its work saved and pushed then` : unpushedText(sb?.git && (!branch || sb.git.branch === branch) ? sb.git : undefined),
       timedLeg: reqs.some((w) => !!w.timedLeg),
     });
-    const entry = { to, texts: q ? [movedText(q)] : [], how: `moved by FF Factory: ${a.line} (w2544)`, lead, reason: `${a.line}, and ${to} has room (w2544)`, away: a.line };
+    const entry = { to, texts: q ? [movedText(q)] : [], sends: q ? [q] : [], how: `moved by FF Factory: ${a.line} (w2544)`, lead, reason: `${a.line}, and ${to} has room (w2544)`, away: a.line };
     this.roomMoving.set(info.id, entry);
+    this.warnOutranked('away move', info, reqs, to);
     console.log(`away move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${ids}) moves to ${to}: ${a.line}; ${d.move.why}`);
     this.unmemoized(() => {
       for (const w of reqs) this.orchestrators.dropAwayGates(w, m, a.line);
@@ -4471,7 +4665,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   private movableWorkOf(info: SessionInfo): { reqs: WorkItem[]; owned: WorkItem[]; gone: WorkItem[] } {
     const out = { reqs: [] as WorkItem[], owned: [] as WorkItem[], gone: [] as WorkItem[] };
     for (const w of this.openWorkOf(info)) {
-      if (!w.sessionIds.includes(info.id) && w.movedOff?.[info.id]) out.gone.push(w);
+      if (offSince(w, info.id)) out.gone.push(w);
       else if (!w.pair?.started?.legs.some((l) => l.session === info.id) && this.otherWorkerOn(w, info, true)) out.owned.push(w);
       else out.reqs.push(w);
     }
@@ -4500,7 +4694,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * worker it went to after it moved off `info`.
    */
   private heirOf(w: WorkItem, info: SessionInfo): SessionInfo | undefined {
-    const at = w.sessionIds.filter((id) => id !== info.id).map((id) => this.store.sessions.get(id)).filter((x): x is SessionInfo => !!x && x.kind === 'worker');
+    const at = w.sessionIds.filter((id) => id !== info.id && onRequest(w, id)).map((id) => this.store.sessions.get(id)).filter((x): x is SessionInfo => !!x && x.kind === 'worker');
     const working = at.find((x) => (isMidTurn(x) || !!this.sessions.sessions.get(x.id)?.live) && !(x.machineId === info.machineId && x.machineSandbox === info.machineSandbox) && this.stillWorkingOn(w, x));
     return working ?? at.at(-1);
   }
@@ -4513,7 +4707,8 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * it went to.
    */
   private forwardToHeirs(info: SessionInfo, ws: WorkItem[], q: QueuedSend, pick?: (w: WorkItem) => SessionInfo | undefined): string[] {
-    if (q.resumeOf || /^\[wake_me\]/.test(q.text)) return [];
+    // w6047 (the w6172 review): a person's answer or note that came as a resume always goes (w2495, personsResume).
+    if ((q.resumeOf || /^\[wake_me\]/.test(q.text)) && !personsResume(q)) return [];
     const at = `${info.machineId}/${info.machineSandbox}`;
     const heirs = new Map<string, { s: SessionInfo; ids: string[] }>();
     for (const w of ws) {
@@ -4549,11 +4744,11 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       const w = this.store.work.get(id);
       return !!w && isOpen(w);
     });
-    const moved = items.filter((w) => isOpen(w) && !!w.movedOff?.[info.id] && !w.sessionIds.includes(info.id));
+    const moved = items.filter((w) => isOpen(w) && offSince(w, info.id));
     const heirs = (w: WorkItem): HeirFacts[] =>
       w.sessionIds.flatMap((id) => {
         const x = this.store.sessions.get(id);
-        if (!x || x.kind !== 'worker' || id === info.id) return [];
+        if (!x || x.kind !== 'worker' || id === info.id || !onRequest(w, id)) return [];
         return [{ id, live: !!this.sessions.sessions.get(id)?.live, turns: x.turns ?? 0, midTurn: isMidTurn(x), status: x.status, ...(x.stoppedOnPurpose ? { stoppedOnPurpose: true } : {}), sameSandbox: x.machineId === info.machineId && x.machineSandbox === info.machineSandbox }];
       });
     return { facts: { stillHolds, moving: this.roomMoving.has(info.id) || this.timedMoving.has(info.id), moved: moved.map((w) => ({ id: w.id, heirs: heirs(w) })) }, moved };
@@ -4575,13 +4770,30 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       const m = info?.movedAway;
       if (!info || !m) continue;
       const going = this.retiring.get(sid);
-      if (going) {
-        busy.set(sid, going);
-        continue;
-      }
       const { facts, moved } = this.movedAwayFacts(info);
       const v = movedAwayVerdict(facts);
       const name = `${sid} (its work moved to ${m.to} at ${m.at.slice(11, 19)}Z)`;
+      // w6047 (the w5995 review of #1330): a worker being retired now, or retired already, is never saved or its new workers
+      // told again. A hello that finds it running still (a "not resumed" retire under way, or a process that outlived the
+      // retire) stops it, but only while the verdict still says every request of it has a started new worker; else the
+      // running copy is kept, as any kept worker is.
+      const liveNow = how === 'live' && !!this.sessions.sessions.get(sid)?.live;
+      if (going) {
+        // w6047 (the w6056 review, 1): a hello that finds it running while its retire is under way retires it again, whole
+        // (stopped, saved, told), once this one ends: what it did meanwhile is saved too, never left uncommitted.
+        if (liveNow) {
+          this.retireAgain.set(sid, machineId);
+          kept.push(`${name}: running while its retire ends; retired again once that ends`);
+        }
+        busy.set(sid, going);
+        continue;
+      }
+      // w6047: retired already (stopped, its work saved or found clean, its new workers told) and not running: never saved or
+      // told again. One that runs again is retired again, whole, since it may have written more.
+      if (m.retired && v.act === 'enforce' && !liveNow) {
+        busy.set(sid, [...new Set(v.heirs.map((x) => x.heir))]);
+        continue;
+      }
       if (v.act === 'undo') {
         // (a): the w3425 check first: a move that never happened leaves this worker the only one on its requests.
         const undone = this.awayMoveUndone(info, machineId, how === 'live' ? `its daemon reports it running on ${machineId}` : `a resume on ${machineId} found it holding them`);
@@ -4596,7 +4808,12 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       const to = [...new Set(v.heirs.map((x) => x.heir))];
       taken.set(sid, to);
       this.retiring.set(sid, to);
-      void this.retireMovedAway(info, machineId, how, moved, byReq).finally(() => this.retiring.delete(sid));
+      void this.retireMovedAway(info, machineId, how, moved, byReq).finally(() => {
+        this.retiring.delete(sid);
+        const again = this.retireAgain.get(sid);
+        this.retireAgain.delete(sid);
+        if (again) this.enforceMovedAway(again, [sid], 'live');
+      });
     }
     if (kept.length) {
       console.warn(`machines: ${machineId}: moved-away worker(s) kept (w5950): ${kept.join('; ')}`);
@@ -4607,10 +4824,11 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       console.log(`machines: ${machineId}: moved-away worker(s) ${how === 'live' ? 'stopped' : 'not resumed'} (w5950): ${line}`);
       this.machines.report?.(`[machines] ${machineId}: ${taken.size} worker(s) whose work moved elsewhere ${how === 'live' ? 'were still running and are stopped' : 'are not resumed'}: ${line}. Their sandboxes' work goes to a side branch and their new workers are told (w5950).`);
     }
-    // The w5975 review's finding 1: a second hello or resume while one is being retired neither stops nor saves it again.
+    // The w5975 review's finding 1: a second hello or resume while one is being retired neither saves nor tells it again.
     for (const [sid, to] of busy) taken.set(sid, to);
     return taken;
   }
+
 
   /**
    * w5950: takes moved-away worker `info` off `machineId` once movedAwayVerdict said every request of it has a started new
@@ -4624,7 +4842,8 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const to = info.movedAway?.to ?? 'another computer';
     this.waker.cancel(info.id);
     const h = this.sessions.sessions.get(info.id);
-    if (how === 'live' && h?.live) {
+    // w6047: a "not resumed" retire that finds the process live after all stops it too, as a hello would.
+    if (h?.live) {
       this.store.append(info.id, { kind: 'system', text: `Stopped by FF Factory: its work moved to ${to} and is with ${heirs} now, but ${machineId}'s daemon came back still running it (w5950).` });
       h.stop(true);
       for (let n = 0; n < 40 && this.sessions.sessions.get(info.id)?.live; n++) await new Promise((r) => setTimeout(r, 250));
@@ -4632,11 +4851,15 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       this.store.append(info.id, { kind: 'system', text: `Not resumed by FF Factory: its work moved to ${to} and is with ${heirs} now (w5950).` });
     }
     let saved: string;
+    let clean = false;
     const branch = info.placeReleased?.branch ?? this.branchNow(info);
     const sb = info.machineSandbox ? this.store.machines.get(machineId)?.sandboxes?.find((x) => x.id === info.machineSandbox) : undefined;
     const others = sb ? this.sessionsOf(sb.sessionIds).filter((s) => s.id !== info.id && occupies(s, !!this.sessions.sessions.get(s.id)?.live)) : [];
     if (this.sessions.sessions.get(info.id)?.live) saved = `its process on ${at} did not end within 10 s, so nothing was saved; what it wrote stays uncommitted there`;
-    else if (!info.machineSandbox) saved = 'it had no sandbox, so nothing was saved';
+    else if (!info.machineSandbox) {
+      saved = 'it had no sandbox, so nothing was saved';
+      clean = true;
+    }
     else if (!branch) saved = `its branch is unknown, so its sandbox ${at} was not saved`;
     else if (others.length) saved = `its sandbox ${at} was not saved: agent ${others.map((s) => s.id).join(', ')} works there too, so its uncommitted files may not be this worker's`;
     else if (!this.machines.canSaveWork(machineId)) saved = `its sandbox ${at} could not be saved (${machineId}'s daemon cannot save work now)`;
@@ -4645,6 +4868,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
         const hold = `its requests moved to ${heirs}, which carries ${branch} now (w5950)`;
         const msg = `FF Factory: WIP saved from ${info.id}, which ran on after its work moved to ${to} (w5950)\n\n${moved.map((w) => w.id).join(', ')} are with ${heirs}. This commit is pushed only to a side branch.`;
         const r = await this.machines.saveWork(machineId, info.machineSandbox, branch, msg, this.githubTokenFor(machineId, info.id, `saving ${info.id}'s work after its move`), hold);
+        clean = !!r.sha || !r.files;
         saved = r.sha ? `its sandbox's uncommitted work (${r.files} file(s)) was saved as WIP commit ${r.sha.slice(0, 10)}${r.sideRef ? ` on the side branch ${r.sideRef}` : ''}${r.pushed ? '' : `, not pushed (${r.notes.join('; ')})`}` : `its sandbox ${at} had no uncommitted work on ${branch}`;
       } catch (e) {
         saved = `its sandbox ${at} could not be saved (${(e as Error).message})`;
@@ -4658,10 +4882,52 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       return id ? this.store.sessions.get(id) : undefined;
     });
     this.store.append(info.id, { kind: 'system', text: `Its requests ${moved.map((w) => w.id).join(', ')} are with ${heirs}: ${saved}; ${told.length ? `told ${told.join(', ')}` : 'its new workers could not be told'} (w5950).` });
+    // w6047: retired once, but only when its work was saved or there was none (the w6056 review, 1): a retire that could not
+    // save leaves it unmarked, so the next check retires it again, whole, as before.
+    const now = this.store.sessions.get(info.id);
+    if (clean && !this.retireAgain.has(info.id) && !this.sessions.sessions.get(info.id)?.live && now?.movedAway) {
+      now.movedAway = { ...now.movedAway, retired: new Date().toISOString() };
+      this.store.putSession(now);
+    }
     this.orchestrators.retireWhenFree(info.id);
   }
 
   /** What moveDecision reads of a worker whose resume waits for room (w2046). */
+  /** w6432: requests whose start_agent failed after the sandbox was prepared (w5278), by id: the computer and when. */
+  private readonly failedStarts = new Map<string, { machine: string; at: number }>();
+
+  /**
+   * w6432: each recent failed start (FAILED_START_MS) as pressure on its computer, until its request is started, Queued
+   * (reclaimPressure has it then), or closed. Read by placeAgain.outranking.
+   */
+  private failedStartPressure(): Pressure[] {
+    const out: Pressure[] = [];
+    const now = Date.now();
+    for (const [id, f] of this.failedStarts) {
+      const w = this.store.work.get(id);
+      if (!w || now - f.at > FAILED_START_MS || ['queued', 'merged', 'done', 'rejected', 'cancelled'].includes(w.status) || needsOf(w) !== 'game') {
+        this.failedStarts.delete(id);
+        continue;
+      }
+      out.push(failedStartPressure(w.id, w.title, w.priority, f.machine));
+    }
+    return out;
+  }
+
+  /**
+   * w6432 (warn-only): a room or away move that takes a game sandbox on `to` while higher-priority work is queued for one
+   * there (or its start just failed there) says so. On 2026-11-27 moves off offline m5 and BEAST put w6235 into
+   * lothdesktop/slot1 (15:04Z) and w5479 into slot5 (15:15Z), both normal, while w6431 (frantic) waited for a sandbox there.
+   */
+  private warnOutranked(what: string, info: SessionInfo, reqs: WorkItem[], to: string): void {
+    if (!reqs.some((w) => needsOf(w) === 'game')) return;
+    const mine = topPriority(reqs.map((w) => w.priority));
+    const ahead = this.placeAgain.outranking(rankOf(mine), to);
+    if (!ahead) return;
+    const ids = reqs.map((w) => w.id).join(', ');
+    this.placeAgain.warnOnce(`${what}:${info.id}:${to}:${ahead.work}`, `${what} (w6432, warn-only): worker ${info.id} (${ids}, ${mine ?? 'no open request'}) takes a game sandbox on ${to} while ${ahead.work} (${ahead.priority}) is queued for one there; once enforced it waits`);
+  }
+
   private moveFacts(info: SessionInfo, reqs: WorkItem[]): MoveFacts {
     const m = this.store.machines.get(info.machineId!);
     const r = info.placeReleased;
@@ -4720,8 +4986,11 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * work) or on an agent seat (work in its own clone), with a hand-off carrying its last report, its brief and the waiting
    * message. Its other open requests, and the request itself when the start fails, go back to the dispatcher Queued for `to`.
    */
-  private async moveForRoom(info: SessionInfo, reqs: WorkItem[], to: string, why: string, hold: string, entry: { texts: string[]; how?: string; lead?: string; reason?: string; away?: string }, q?: QueuedSend) {
+  private async moveForRoom(info: SessionInfo, reqs: WorkItem[], to: string, why: string, hold: string, entry: { texts: string[]; first?: QueuedSend; sends?: QueuedSend[]; how?: string; lead?: string; reason?: string; away?: string }, q?: QueuedSend): Promise<'moved' | 'given back' | 'handed back' | 'nothing'> {
     const from = `${info.machineId}/${info.machineSandbox}`;
+    // w6047 (the w6118 review, 2): each request's hand-back as the move began, before the stop and the sandbox save below
+    // wait; a hand-back made during those waits is then not this move's (moveUndone keeps it, MoveBefore.handedBack).
+    const began = new Map(reqs.map((w) => [w.id, w.handedBack]));
     const reason = entry.reason ?? `${hold}, and ${to} has room (w2046)`;
     const how = entry.how ?? 'moved by FF Factory: its computer was full (w2046)';
     const h = this.sessions.sessions.get(info.id);
@@ -4750,38 +5019,278 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // Its own check-in would wake a session its requests have left: the new one sets its own.
     this.waker.cancel(info.id);
     this.store.append(info.id, { kind: 'system', text: `Its work moved to ${to}: ${reason}. Its sandbox ${from} is released${saved ? ` (${saved})` : ''}; FF Factory ends what it left running there, and its temp folder goes by itself. Its requests go on in a fresh session on ${to}.` });
-    const message = entry.texts.join('\n\n---\n\n');
-    const primary = reqs.find((w) => w.id === q?.resumeOf?.work) ?? reqs.find((w) => w.status !== 'queued') ?? reqs[0];
+    const primary =reqs.find((w) => w.id === q?.resumeOf?.work) ?? reqs.find((w) => w.status !== 'queued') ?? reqs[0];
     const stage = view ? `Its Live view ran on ${from} (materials ${JSON.stringify(view.materials)}, fps ${view.fps}, width ${view.width}): stage it again in your sandbox's editor and tell the person it streams again from ${to}. ` : '';
     const back = (w: WorkItem, note: string, msg?: string) => this.orchestrators?.handBack(w, info, { machine: info.machineId!, sandbox: info.machineSandbox!, ...(branch ? { branch } : {}), why: reason, note, how, ...(saved ? { saved } : {}), ...(msg ? { message: msg } : {}), to });
     // w5976, config movedAwayWorkers "on": the other requests are handed back only once the fresh session started, and a start
     // that fails gives every request back to this worker (giveBack below). Otherwise they go at once, as before.
     const undo = movedAwayMode(this.cfg.movedAwayWorkers) === 'on';
-    const before = new Map(reqs.map((w) => [w.id, moveBeforeOf(w, info.id)]));
+    const before = new Map(reqs.map((w) => [w.id, { ...moveBeforeOf(w, info.id), handedBack: began.get(w.id) }]));
+    // w6047 (the w6124 review): a request handed back during the stop, Live view and save waits above (a pause, a stop_agent
+    // move_to) keeps that hand-back: the move hands it back no second time and never starts it, since the start would write
+    // the move's own hand-back over it, and a failed one would then give the request back to this worker.
+    const meanwhile = new Set(reqs.filter((w) => w.handedBack !== began.get(w.id)).map((w) => w.id));
     const others = () => {
-      for (const w of reqs) if (w !== primary) back(w, `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`);
+      for (const w of reqs) if (w !== primary && !meanwhile.has(w.id)) back(w, `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`);
     };
-    if (!undo) others();
+    // w6047 (the w6159 review, 1): a message that resumes another of its requests than the one the move starts goes with that
+    // request's hand-back (deliverHeld, once it is handed back), never with the move's own request; every other message goes
+    // with the move's request as before. Each message is routed by its own send (the entry's sends, one per text).
+    const split = (from: number) => {
+      const sends = entry.sends?.length === entry.texts.length ? entry.sends : undefined;
+      const rest: string[] = [];
+      const restSends: QueuedSend[] = [];
+      const groups = new Map<WorkItem, { texts: string[]; sends: QueuedSend[] }>();
+      for (let i = from; i < entry.texts.length; i++) {
+        const m = sends?.[i];
+        // w6047 (the w6190 review, F1): a closed request's hand-off is read by nobody, so a message for one goes the move's
+        // own request's way (its hand-off before the start, forwardLate after it), as on main.
+        const g = m?.resumeOf?.work ? reqs.find((x) => x.id === m.resumeOf!.work && x !== primary && isOpen(x)) : undefined;
+        if (g && m) {
+          const e = groups.get(g) ?? { texts: [], sends: [] };
+          e.texts.push(entry.texts[i]!);
+          e.sends.push(m);
+          groups.set(g, e);
+        } else {
+          rest.push(entry.texts[i]!);
+          if (m) restSends.push(m);
+        }
+      }
+      return { rest, restSends: restSends.length === rest.length ? restSends : undefined, groups };
+    };
+    // w6047 (the w6190 review, F1): a sibling closed since its messages were split off (while the start ran) takes none
+    // into its hand-off; they go to the move's request's new worker (`orElse`), but for the old worker's own waits.
+    // A message nothing took goes back to this worker (deliverHeld answers true), which is then not retired.
+    let kept = false;
+    const toSiblings = (groups: Map<WorkItem, { texts: string[]; sends: QueuedSend[] }>, orElse?: (texts: string[], sends: QueuedSend[]) => void) => {
+      for (const [g, e] of groups) {
+        const toOrElse = () => {
+          const go = e.sends.map((m, i) => (ownWait(m) ? -1 : i)).filter((i) => i >= 0);
+          if (go.length) orElse!(go.map((i) => e.texts[i]!), go.map((i) => e.sends[i]!));
+        };
+        if (!isOpen(g) && orElse) {
+          toOrElse();
+          continue;
+        }
+        // w6047 (the w6193 review, R3, and the w6214 review, F2): a sibling another worker took meanwhile (before the start or
+        // while it ran) is that worker's: a message for it goes into the hand-back it made or to its next worker (deliverHeld
+        // with anyHandBack), else to the worker that holds it now, never back to this one, which may be moving.
+        if (isOpen(g) && g.handedBack?.session !== info.id) {
+          if (g.handedBack) {
+            this.deliverHeld(info, [g], e.sends[0], e.texts, g.id, e.sends, true);
+            continue;
+          }
+          if (this.heirOf(g, info)) {
+            this.forwardLate(info, g, e.texts, e.sends[0], e.sends);
+            continue;
+          }
+          if (orElse) {
+            toOrElse();
+            continue;
+          }
+        }
+        if (this.deliverHeld(info, [g], e.sends[0], e.texts, g.id, e.sends)) kept = true;
+      }
+    };
+    const retire = () => {
+      if (!kept) this.orchestrators?.retireWhenFree(info.id);
+    };
+    const held = split(0);
+    // w6047 (the w6214 review, F2): before the start, a message no sibling takes goes with the move's own request's hand-off.
+    const extra: string[] = [];
+    const toHandOff = (texts: string[]) => {
+      extra.push(...texts);
+    };
+    // w6047: messages that come while the fresh session starts (absorbed into entry.texts after `message` was taken) go too.
+    const taken = entry.texts.length;
+    if (primary && meanwhile.has(primary.id)) {
+      const err = `${primary.id} was handed back during its move (${primary.handedBack?.how ?? 'no hand-back'})`;
+      console.warn(`room move: ${err}; not started on ${to} (w6047)`);
+      if (undo) {
+        this.giveBack(info, reqs, before, to, err, q ?? entry.first, entry.texts, { how, to }, false, entry.sends);
+        return 'given back';
+      }
+      others();
+      const all = split(0);
+      toSiblings(all.groups);
+      const mq = all.restSends ? all.restSends[0] : (q ?? entry.first);
+      if (this.deliverHeld(info, reqs, mq?.resumeOf?.work && mq.resumeOf.work !== primary.id ? undefined : mq, all.rest, primary.id, all.restSends)) kept = true;
+      this.store.append(info.id, { kind: 'system', text: `Its move to ${to} did not start: ${err}, and that stands (w6047).` });
+      retire();
+      return 'handed back';
+    }
+    if (!undo) {
+      others();
+      toSiblings(held.groups, primary ? toHandOff : undefined);
+    }
+    const message = [...held.rest, ...extra].join('\n\n---\n\n');
     if (primary) {
       const note = `${stage}${primary.outcome ? `Its last report: ${primary.outcome}` : 'No report yet.'}`;
+      let started: string;
       try {
-        const started = await this.startMoved(info, primary, to, why, hold, branch, entry.lead, { machine: info.machineId!, sandbox: info.machineSandbox!, ...(branch ? { branch } : {}), why: reason, note, how, ...(saved ? { saved } : {}), ...(message ? { message } : {}), to });
-        console.log(`room move: ${primary.id} moved from worker ${info.id} on ${from} to ${started} (${why})`);
-        // w5942: only a move whose fresh session started holds the request where it went; a failed start goes back to the
-        // dispatcher unheld (the w5949 review, M2: "starting w5449 on beast failed" at 06:56:37Z on 2026-11-25).
-        this.moveGuard.noteMove([primary.id], to, Date.now());
-        // w2544: "moved from lothlaptop (offline 6 min) to lothdesktop/slot2", on its log and its live state.
-        if (entry.away) this.orchestrators.awayMoved(primary.id, `moved from ${entry.away} to ${started.split(' as ')[0]}`);
-        this.machines.report?.(`[machines] ${primary.id} moved from ${from} to ${started}: ${hold} (w2046).`);
-        if (undo) others();
+        started = await this.startMoved(info, primary, to, why, hold, branch, entry.lead, { machine: info.machineId!, sandbox: info.machineSandbox!, ...(branch ? { branch } : {}), why: reason, note, how, ...(saved ? { saved } : {}), ...(message ? { message } : {}), to });
       } catch (e) {
         const err = (e as Error).message;
-        if (undo) return this.giveBack(info, reqs, before, to, err, q, entry.texts);
+        if (undo) {
+          this.giveBack(info, reqs, before, to, err, q ?? entry.first, entry.texts, { how, to }, true, entry.sends);
+          return 'given back';
+        }
         console.warn(`room move: starting ${primary.id} on ${to} failed (${err}); handed back to the dispatcher, Queued for ${to}`);
-        back(primary, `FF Factory could not start its new session on ${to} itself (${err}). ${note}`, message);
+        // A message split off for a sibling that closed meanwhile goes with the move's request (split checks again now).
+        const late = split(taken);
+        toSiblings(late.groups);
+        back(primary, `FF Factory could not start its new session on ${to} itself (${err}). ${note}`, [...held.rest, ...extra, ...late.rest].join('\n\n---\n\n') || undefined);
+        retire();
+        return 'handed back';
       }
+      // w6047 (the w6190 review, F2): only the start can fail the move. A fault in a step after it never gives the request
+      // back (its messages went into the fresh session's hand-off already); each step is guarded on its own.
+      const step = (what: string, f: () => void) => {
+        try {
+          f();
+        } catch (e) {
+          console.warn(`room move: ${primary.id} moved to ${started}, but ${what} failed (${(e as Error).message}) (w6047)`);
+        }
+      };
+      console.log(`room move: ${primary.id} moved from worker ${info.id} on ${from} to ${started} (${why})`);
+      // w5942: only a move whose fresh session started holds the request where it went; a failed start goes back to the
+      // dispatcher unheld (the w5949 review, M2: "starting w5449 on beast failed" at 06:56:37Z on 2026-11-25).
+      step('noting the move', () => this.moveGuard.noteMove([primary.id], to, Date.now()));
+      // w2544: "moved from lothlaptop (offline 6 min) to lothdesktop/slot2", on its log and its live state.
+      if (entry.away) step('marking it moved', () => this.orchestrators.awayMoved(primary.id, `moved from ${entry.away} to ${started.split(' as ')[0]}`));
+      step('reporting the move', () => this.machines.report?.(`[machines] ${primary.id} moved from ${from} to ${started}: ${hold} (w2046).`));
+      const late = split(taken);
+      const toPrimary = (texts: string[], sends: QueuedSend[]) => this.forwardLate(info, primary, texts, sends[0], sends);
+      if (undo) {
+        step('handing back its other requests', others);
+        step('delivering their messages', () => toSiblings(held.groups, toPrimary));
+      }
+      step('delivering the late messages', () => toSiblings(late.groups, toPrimary));
+      // w6047 (the w6177 review, F2): each late message goes on its own with its own send, so one old worker's own
+      // [wake_me] at the front drops only itself in forwardToHeirs, never a person's message joined behind it.
+      if (late.rest.length) step('forwarding the late messages', () => this.forwardLate(info, primary, late.rest, q ?? entry.first, late.restSends));
     } else if (undo) others();
-    this.orchestrators?.retireWhenFree(info.id);
+    retire();
+    return primary ? 'moved' : 'nothing';
+  }
+
+  /**
+   * w6047 (the w5995 review): messages for a moved worker that came while its fresh session started, after the hand-off's
+   * message was taken. They were absorbed into the move (roomMove answered true), so they go to the request's new worker now
+   * (forwardToHeirs, as a later message to the old worker would), never dropped.
+   */
+  private forwardLate(info: SessionInfo, primary: WorkItem, late: string[], q: QueuedSend | undefined, sends?: QueuedSend[]) {
+    if (late.length > 1 && sends?.length === late.length) {
+      late.forEach((t, i) => this.forwardLate(info, primary, [t], sends[i], [sends[i]!]));
+      return;
+    }
+    // w6047 (the w6177 review, F3): one message with its own send keeps its own sender and images; its uuid is its own too.
+    const own = late.length === 1 && sends?.length === 1 ? sends[0] : undefined;
+    const by = own ?? q;
+    const lq: QueuedSend = { uuid: `w6047-late-${info.id}-${own?.uuid ?? Date.now()}`, id: info.id, text: late.join('\n\n---\n\n'), from: by?.from ?? 'system', ...(by?.requestedBy ? { requestedBy: by.requestedBy } : {}), ...(own?.images?.length ? { images: own.images } : {}), at: new Date().toISOString(), why: 'came during its move (w6047)' };
+    const to = this.forwardToHeirs(info, [primary], lq);
+    if (!to.length) console.warn(`room move: ${late.length} message(s) that came for worker ${info.id} during its move reached no new worker of ${primary.id} (w6047)`);
+  }
+
+  /**
+   * w6047: the message a move held, when every request it had was handed back meanwhile and that stands (giveBack's
+   * hand-backs made during the move): to a next worker placed meanwhile, else into a standing hand-off, never to this worker.
+   */
+  private deliverHeld(info: SessionInfo, reqs: WorkItem[], q: QueuedSend | undefined, texts: string[], first?: string, sends?: QueuedSend[], anyHandBack = false): boolean {
+    // w6047 (the w6159 review, 2): a gate resume or a check-in is the old worker's own wait. A next worker placed on its request
+    // read its hand-off already and sets its own (forwardToHeirs never forwards one, the w5949 review), so a resume goes only
+    // into the hand-off of the request it resumes while that has no next worker yet, never into one already read; the other
+    // messages, each by its own send, go on as below. The w6172 review: a person's answer or note sent as a resume
+    // (personsResume, the w2495 rule) is no such wait; it goes like any other message, forwarded to that next worker.
+    const resume = ownWait;
+    const own = sends && sends.length === texts.length && texts.length ? sends : undefined;
+    if (own && own.some(resume) && !own.every(resume)) {
+      const plain = own.map((m, i) => (resume(m) ? -1 : i)).filter((i) => i >= 0);
+      const res = own.map((m, i) => (resume(m) ? i : -1)).filter((i) => i >= 0);
+      let kept = this.deliverHeld(info, reqs, own[plain[0]!], plain.map((i) => texts[i]!), first, plain.map((i) => own[i]!), anyHandBack);
+      for (const i of res) if (this.deliverHeld(info, reqs, own[i], [texts[i]!], first, [own[i]!], anyHandBack)) kept = true;
+      return kept;
+    }
+    if (own && own.length > 1 && own.every(resume)) {
+      let kept = false;
+      for (let i = 0; i < own.length; i++) if (this.deliverHeld(info, reqs, own[i], [texts[i]!], first, [own[i]!], anyHandBack)) kept = true;
+      return kept;
+    }
+    // w6047 (the w6056 review, 2): every request was handed back meanwhile (a pause, a stop_agent move_to), and that stands:
+    // the message the move held goes in that hand-off, for the request's next worker, never to this worker, which holds none.
+    const text = texts.length ? texts.join('\n\n---\n\n') : q ? movedText(q) : '';
+    // The w6088 review: a request the dispatcher placed on a next worker while the start ran read its hand-off already, so
+    // that worker gets the message as a forwarded one (as forwardLate does); only a request with no next worker yet carries
+    // it in its hand-off, which its next worker reads when it starts.
+    // The w6104 review: an older worker still listed (heirOf's fallback) is not a next worker, and the message never goes
+    // to it. The w6118 review: a next worker is one linked at or after the hand-back that stands (linkWorker stamps the
+    // link on every send), so one already on the request and sent it again counts, and so does one placed before the
+    // move took its MoveBefore; the newest such link wins.
+    // w6047 (the w6182 review, B): a closed request's hand-off is read by nobody, so it never carries the message.
+    // w6047 (the w6214 review, F2): `anyHandBack` (a sibling another worker took and handed back during the move) takes
+    // that worker's hand-back too, so the message goes to its next worker or into that hand-off, never back to this one.
+    const back = reqs.filter((x) => isOpen(x) && (x.handedBack?.session === info.id || (anyHandBack && !!x.handedBack)));
+    const nextOf = (x: WorkItem): SessionInfo | undefined => {
+      const since = x.handedBack?.at;
+      if (!since) return undefined;
+      const id = x.sessionIds
+        .filter((sid) => sid !== info.id && onRequest(x, sid) && (x.links?.[sid]?.at ?? '') >= since)
+        .sort((p, r) => (x.links![p]!.at < x.links![r]!.at ? -1 : x.links![p]!.at > x.links![r]!.at ? 1 : 0))
+        .at(-1);
+      const n = id ? this.store.sessions.get(id) : undefined;
+      return n?.kind === 'worker' ? n : undefined;
+    };
+    const placed = back.filter((x) => !!nextOf(x));
+    let told: string[] = [];
+    if (text && placed.length) {
+      const lq: QueuedSend = { uuid: `w6047-back-${info.id}-${Date.now()}`, id: info.id, text, from: q?.from ?? 'system', ...(q?.requestedBy ? { requestedBy: q.requestedBy } : {}), ...(q?.resumeOf ? { resumeOf: q.resumeOf } : {}), at: new Date().toISOString(), why: 'held by its move, whose requests were handed back meanwhile (w6047)' };
+      told = this.forwardToHeirs(info, placed, lq, nextOf);
+    }
+    // w6047 (the w6136 review, 1): the hand-off that carries it is the one of the request it resumes, else the move's own
+    // request, before any other handed back with it.
+    const want = [q?.resumeOf?.work, first].filter((id): id is string => !!id);
+    const open = back.filter((x) => !placed.includes(x));
+    // The w6159 review, 2: a resume (one message, known by its own send) goes only to its own request's hand-off, and only
+    // while no next worker read it; once one did, it is that worker's wait no more, and it goes nowhere, as forwardToHeirs does.
+    const isResume = resume(q) && (!!own || texts.length <= 1);
+    const its = isResume ? (q!.resumeOf?.work ?? first) : undefined;
+    const w = !text ? undefined : isResume ? (its ? open.find((x) => x.id === its) : open[0]) : (want.map((id) => open.find((x) => x.id === id)).find((x) => !!x) ?? open[0] ?? (told.length ? undefined : back[0]));
+    if (w) this.orchestrators.carryInHandBack(w, info.id, text, anyHandBack);
+    else if (text && isResume) console.log(`room move: a resume held by worker ${info.id}'s move${its ? ` (${its})` : ''} went to no hand-off: its request's next worker read its hand-off already and sets its own wait (w6047, w5949)`);
+    else if (text && !told.length) {
+      // w6047 (the w6190 review, F1): no open request takes it (each closed meanwhile), so it goes back to this worker as it
+      // came, which then keeps its session (no move mark, not retired) and reads it when it resumes, as giveBack does (w5976).
+      const why = `its move's requests were handed back or closed meanwhile, so it stays with worker ${info.id} (w6047)`;
+      if (own) {
+        for (const m of [...own].reverse()) if (!resume(m)) this.sessions.putBack(this.asPutBack(info, m), why);
+      } else if (q) {
+        const one = texts.length === 1 && texts[0] === movedText(q);
+        const back: QueuedSend = one || !texts.length ? q : { ...q, text };
+        if (back !== q) {
+          delete back.attachments;
+          delete back.resumeOf;
+        }
+        this.sessions.putBack(back, why);
+      } else {
+        console.warn(`room move: the message held by worker ${info.id}'s move went to no hand-off (w6047)`);
+        return false;
+      }
+      console.warn(`room move: the message held by worker ${info.id}'s move went to no hand-off; it goes back to that worker, which is kept (w6047)`);
+      delete info.movedAway;
+      this.store.putSession(info);
+      this.store.append(info.id, { kind: 'system', text: `A message held by its move reached no request (${why}); it waits for it here.` });
+      return true;
+    }
+    return false;
+  }
+
+  /** w6193: a person's answer or note put back to the old worker loses a resume the drain's staleResume would drop (closed, moved off). */
+  private asPutBack(info: SessionInfo, m: QueuedSend): QueuedSend {
+    if (!m.resumeOf || !personsResume(m)) return m;
+    const w = this.store.work.get(m.resumeOf.work.toLowerCase());
+    if (w && isOpen(w) && !(w.movedOff?.[info.id] && !w.sessionIds.includes(info.id))) return m;
+    const { resumeOf: _r, ...rest } = m;
+    return rest;
   }
 
   /**
@@ -4791,19 +5300,62 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * computer, with the message the move took (SessionManager.putBack); `to` is no move target for REFUSED_FOR_MS, so the next
    * drain does not try the same start again, and the worker is not retired.
    */
-  private giveBack(info: SessionInfo, reqs: WorkItem[], before: Map<string, MoveBefore>, to: string, err: string, q: QueuedSend | undefined, texts: string[]) {
+  private giveBack(info: SessionInfo, reqs: WorkItem[], before: Map<string, MoveBefore>, to: string, err: string, q: QueuedSend | undefined, texts: string[], move: { how: string; to: string }, refuse = true, sends?: QueuedSend[]) {
     const why = `its new session on ${to} did not start (${err})`;
     console.warn(`room move: starting ${reqs.map((w) => w.id).join(', ')} on ${to} failed (${err}); given back to worker ${info.id} on ${info.machineId}/${info.machineSandbox} (w5976)`);
-    this.moveGuard.noteRefusal(to, err, Date.now(), `a moved session did not start there`);
-    for (const w of reqs) this.orchestrators.moveUndone(w, info, before.get(w.id)!, why);
+    // w6047 (the w6124 review): a move stopped by a hand-back made during its waits is no fault of `to`, which stays a target.
+    if (refuse) this.moveGuard.noteRefusal(to, err, Date.now(), `a moved session did not start there`);
+    for (const w of reqs) this.orchestrators.moveUndone(w, info, before.get(w.id)!, why, move);
+    // With this worker after it: given back, or never taken off (a start that failed before the move took it).
+    // w6047 (the w6182 review, B): a request closed while the start ran is neither given back nor handed back meanwhile; its
+    // hand-off is read by nobody. With no open request left, the messages go back to this worker as before (w5976).
+    const open = reqs.filter((w) => isOpen(w));
+    const given = open.filter((w) => w.sessionIds.includes(info.id) && !w.movedOff?.[info.id] && w.handedBack?.session !== info.id);
     delete info.movedAway;
     this.store.putSession(info);
+    if (!given.length && open.length) {
+      const kept = this.deliverHeld(info, open, q, texts, undefined, sends);
+      console.warn(`room move: starting ${reqs.map((x) => x.id).join(', ')} on ${to} failed (${err}); handed back meanwhile, so not given back to worker ${info.id} (w6047)`);
+      this.store.append(info.id, { kind: 'system', text: `Its move did not start (${why}), but its requests were handed back meanwhile, and that stands (w6047).` });
+      if (!kept) this.orchestrators.retireWhenFree(info.id);
+      return;
+    }
     this.store.append(info.id, { kind: 'system', text: `Its work stays with it: ${why}. Its sandbox stays released; it resumes when one frees on ${info.machineId} (w5976).` });
-    if (q) {
+    // w6047 (the w6136 review, 2): a message that resumes a request this worker no longer holds (handed back meanwhile, and
+    // that stands) goes with that request's hand-back, never back to this worker, which would resume work it gave up.
+    // The w6149 review: only that message goes there; every other one (a person's, a resume of a request it still holds)
+    // goes back to this worker as before. Each message is routed by its own send (the move entry's sends, one per text).
+    const goneOf = (m: QueuedSend | undefined) => (m?.resumeOf?.work ? open.find((w) => w.id === m.resumeOf!.work && !given.includes(w) && w.handedBack?.session === info.id) : undefined);
+    const all = sends?.length === texts.length && texts.length ? sends : undefined;
+    let keep = texts.map((_, i) => i);
+    if (all) {
+      const byGone = new Map<WorkItem, number[]>();
+      keep = [];
+      all.forEach((m, i) => {
+        const g = goneOf(m);
+        if (g) byGone.set(g, [...(byGone.get(g) ?? []), i]);
+        else keep.push(i);
+      });
+      for (const [g, is] of byGone) this.deliverHeld(info, [g], all[is[0]!], is.map((i) => texts[i]!), g.id, is.map((i) => all[i]!));
+      // Each kept message goes back as it was, on its own, with its own sender, attachments, images and resume (w5995).
+      // w6047 (the w6182 review, A): joined under the first one's resume, a person's words went with it when the drain's
+      // staleResume dropped that resume (w1128). putBack puts each before the worker's queued ones, so the last goes first.
+      for (const i of [...keep].reverse()) this.sessions.putBack(this.asPutBack(info, all[i]!), `${why}; it waits for a sandbox on ${info.machineId}`);
+    } else if (goneOf(q) && (!texts.length || (texts.length === 1 && texts[0] === movedText(q!)))) {
+      this.deliverHeld(info, [goneOf(q)!], q, texts);
+    } else if (q) {
       // One message goes back as it was, with its attachments (w5995). Several joined ones carry each one's attachment ids as
       // text (movedText), so the joined message carries none of its own.
-      const back: QueuedSend = texts.length > 1 ? { ...q, text: texts.join('\n\n---\n\n') } : q;
-      if (back !== q) delete back.attachments;
+      // w6047: a pre-empt passes no message of its own (q is the first absorbed one, its text in texts already), so the
+      // texts are what goes back whenever q's own text is not the one message.
+      const own = texts.length === 1 && texts[0] === movedText(q);
+      const back: QueuedSend = own || !texts.length ? q : { ...q, text: texts.join('\n\n---\n\n') };
+      if (back !== q) {
+        delete back.attachments;
+        // w6047 (the w6182 review, A): with no send per text, a joined message is no one resume, so the drain's staleResume
+        // never drops a person's words with it (at worst a stale resume is delivered, never a person's message lost).
+        delete back.resumeOf;
+      }
       this.sessions.putBack(back, `${why}; it waits for a sandbox on ${info.machineId}`);
     }
     this.machines.report?.(`[machines] ${reqs.map((w) => w.id).join(', ')} stayed with worker ${info.id} on ${info.machineId}/${info.machineSandbox}: ${why} (w5976).`);
@@ -4884,9 +5436,10 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * fetched, a held pool), which the status list alone missed: 9a3c8e5d, w2547's first worker, was such a one.
    */
   workersOn(w: WorkItem): string[] {
+    // w6309 (the w6331 review): a worker moved off it that a merge listed again is not one of its workers (onRequest).
     return w.sessionIds.filter((id) => {
       const info = this.store.sessions.get(id);
-      if (!info || info.kind !== 'worker') return false;
+      if (!info || info.kind !== 'worker' || !onRequest(w, id)) return false;
       return ['running', 'starting', 'waiting_permission', 'idle'].includes(info.status) || occupies(info, !!this.sessions.sessions.get(id)?.live);
     });
   }
@@ -5056,6 +5609,18 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
 
   /** The workers holding a sandbox on `machineId`, each with whether it can move for a timed leg (w2055). */
   private preemptOccupants(machineId: string): Occupant[] {
+    // w6336: read once per machine in a pass (timedLegStepFor asked it per queued timed leg, every leg the same answer).
+    const pass = this.placesPass;
+    if (pass) {
+      const memo = (pass.occupants ??= new Map());
+      let got = memo.get(machineId);
+      if (!got) memo.set(machineId, (got = this.preemptOccupantsNow(machineId)));
+      return got;
+    }
+    return this.preemptOccupantsNow(machineId);
+  }
+
+  private preemptOccupantsNow(machineId: string): Occupant[] {
     const now = Date.now();
     const out: Occupant[] = [];
     for (const sb of this.store.machines.get(machineId)?.sandboxes ?? []) {
@@ -5106,7 +5671,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // w2521: work pinned to its computer is never moved to an idle one.
     const pin = this.pinOf(w);
     if (pin) return { stays: `it must run on ${pin.ids.join(' or ')} (${pin.why})` };
-    const live = w.sessionIds.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && s.kind === 'worker' && !!s.machineId && occupies(s, !!this.sessions.sessions.get(s.id)?.live, Date.now()));
+    const live = w.sessionIds.filter((id) => onRequest(w, id)).map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && s.kind === 'worker' && !!s.machineId && occupies(s, !!this.sessions.sessions.get(s.id)?.live, Date.now()));
     if (live.length !== 1) return undefined;
     const info = live[0];
     if (info.movedAway || this.timedMoving.has(info.id)) return undefined;
@@ -5243,13 +5808,17 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       }
       const reqs = this.openWorkOf(info);
       const lead = `[moved, w2055] FF Factory moved ${reqs.map((x) => x.id).join(', ')} to this computer between turns: its worker ${info.id} on ${from} held the slot timed leg ${w.id} needed (${why}). lothsahn: "If timing runs arrive and small machines (single slot) are working on non timing work, the dispatcher should pre-empt their existing work and move it to make space for the timing work". That worker is stopped (its work was all committed and pushed) and its sandbox released; you carry its work on from where it left off. The handover below says where its work is (its branch, pushed).`;
-      this.roomMoving.set(info.id, { to: v.move!, texts: [] });
+      // w6047 (the w5995 review): one entry, so a message absorbed while it moves (roomMove) goes with the move.
+      const entry: { to: string; texts: string[]; first?: QueuedSend; sends?: QueuedSend[]; how: string; lead: string } = { to: v.move!, texts: [], sends: [], how: `moved by FF Factory: its slot went to timed leg ${w.id} (w2055)`, lead };
+      this.roomMoving.set(info.id, entry);
+      let done: Awaited<ReturnType<Agents['moveForRoom']>>;
       try {
-        await this.moveForRoom(info, reqs, v.move!, `pre-empted for timed leg ${w.id} (w2055)`, hold, { texts: [], how: `moved by FF Factory: its slot went to timed leg ${w.id} (w2055)`, lead });
+        done = await this.moveForRoom(info, reqs, v.move!, `pre-empted for timed leg ${w.id} (w2055)`, hold, entry);
       } finally {
         this.roomMoving.delete(info.id);
       }
-      console.log(`timed preempt (w2055): worker ${info.id} on ${from} (${reqs.map((x) => x.id).join(', ')}) moved to ${v.move} so timed leg ${w.id} can start on ${machine}`);
+      const what = done === 'moved' ? `moved to ${v.move}` : done === 'given back' ? `stays its worker's (its move to ${v.move} did not start, w5976), its sandbox released` : done === 'handed back' ? `handed back to the dispatcher (its move to ${v.move} did not start)` : 'released';
+      console.log(`timed preempt (w2055): worker ${info.id} on ${from} (${reqs.map((x) => x.id).join(', ')}) ${what} so timed leg ${w.id} can start on ${machine}`);
     }
     // The sandbox the leg starts in: free now (a moved worker's release frees it as its process stops).
     let sb: MachineSandbox | undefined;
@@ -5503,6 +6072,20 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * queue. A worker with no open request is left out: its tickets count as normal.
    */
   benchPriorities(machineId: string): Record<string, BenchPriority> {
+    // w6336: within a placement pass, once per machine. preemptVerdict asked it for every occupant of every machine for every
+    // queued timed leg, each a walk of every session and the whole ledger: on 2026-11-27 06:37-06:51Z (stall profile)
+    // blockerWatch's timedLegBound held the loop 4-12 s at a time, several times a minute, and every page connect waited.
+    const pass = this.placesPass;
+    if (pass) {
+      const memo = (pass.bench ??= new Map());
+      let got = memo.get(machineId);
+      if (!got) memo.set(machineId, (got = this.benchPrioritiesNow(machineId)));
+      return got;
+    }
+    return this.benchPrioritiesNow(machineId);
+  }
+
+  private benchPrioritiesNow(machineId: string): Record<string, BenchPriority> {
     // w2044: one read of the ledger for the whole look (w5341's pair marks reuse it).
     const ledger = [...this.store.work.values()];
     const out: Record<string, BenchPriority> = {};
@@ -5785,14 +6368,18 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const out: [string, string][] = [];
     const now = Date.now();
     const queued = new Set(this.sessions.queued().map((q) => q.id));
-    const items = [...this.store.work.values()].filter((w) => isOpen(w));
+    // w6381: each session's open requests from one index, in ledger order (every open request per session was 0.1-0.2 s
+    // of the blockerWatch tick's blocks on 2026-11-27, own time in resumeBenchWaits and onRequest).
+    const bySession = this.workBySession([...this.store.work.values()].filter((w) => isOpen(w)));
     for (const s of this.store.sessions.values()) {
+      const items = bySession.get(s.id);
+      if (!items) continue;
       if (s.kind !== 'worker' || !s.lastResult || isMidTurn(s) || s.status === 'waiting_permission' || queued.has(s.id)) continue;
       const key = `${s.id}@${s.lastResultAt ?? s.lastActivityAt}`;
       if (this.benchTold.has(key)) continue;
       if (agentState(s, undefined, now).resumes?.startsWith('check-in')) continue;
       for (const w of items) {
-        if (!w.sessionIds.includes(s.id) || w.done?.[s.id]) continue;
+        if (!onRequest(w, s.id) || w.done?.[s.id]) continue;
         const l = lastOpenLine(w, s, now);
         const named = l && !l.logged ? benchWaitOf(l.line) : undefined;
         if (named === undefined) continue;
@@ -5929,7 +6516,7 @@ When only a person can move you on (they must reboot or log in to a computer, de
 When what remains is only waiting for another request to close or a pull request to merge (a gate such as "after w727's PR #1291 merges"), call \`mcp__machine__blocked_on\` with the pull requests (prs) and/or requests, and what you wait for, then end your turn with your report and a \`wNNN: still open: blocked on <them>\` line. The ledger shows your request Blocked on them (a check-in shows it Working: that is wrong for a wait on something you cannot move), your pending check-in is cancelled, and FF Factory resumes you with a message when they clear. Do NOT poll for it with \`wake_me\` and \`gh pr view\`, and do not stay in a loop; what people add meanwhile is kept and sent when you resume. A wait for a merge names the PR (prs), not the request: a request closes after its PR merges. A wait for a deploy names it in deploys ("portal", or a machine id for its daemon update); you are resumed when a different commit runs there, in any free sandbox on your machine. A wait on an FF Factory fix ("FF Factory letting …") is one too: deploys ["portal"], or nothing resumes you when it lands. \`mcp__machine__cancel_wake\` cancels a check-in you set earlier and no longer need. If a person lifts a hold ("go") while a gate is open, the gate stays: you are resumed when it clears, not before. Files or results another request's worker makes for you: \`blocked_on\` with reports (its id); you are resumed when that worker reports. Two-machine and pair checks, builds, test runs and your own CI are your own work: run them; never end a turn waiting on the orchestrator for them. A check that needs two or more computers at once (a host and a client on two machines) is \`mcp__machine__request_pair\` (its description says how). Never hold your sandbox waiting for a second machine's worker.
 
 ## Follow-up requests
-You cannot file a request. Briefs for new requests (a design approved to build in stages, a follow-up a person asked for) go to \`mcp__machine__hand_up_requests\`, one item each: your requester's orchestrator files them, and your DONE closes the request once they are filed or dropped. Never write "I couldn't file" or "someone needs to file" instead.
+You cannot file a request. Briefs for new requests (a design approved to build in stages, a follow-up a person asked for) go to \`mcp__machine__hand_up_requests\`, one item each: your requester's orchestrator files them, and your DONE closes the request once they are filed or dropped. To wait on one, end with \`wNNN: still open: blocked on the follow-up I handed up\`: once it is filed you are Blocked on it and resumed, with its id, when it closes. Never write "I couldn't file" or "someone needs to file" instead.
 
 ${project.integration === 'pull-request' ? `## Waiting on CI
 When what remains is CI on your pull request (you merge it on green, or fix it on red: Your pull requests below), do not poll it with \`wake_me\` or \`gh pr checks\`/\`gh run view\` calls: a poll sits up to a whole interval after the checks finish, holding a sandbox, and each call re-reads your whole context. Commit, then run \`ff-pr push\` (the first time with \`--base <branch> --title "<title>" --body-file <file>\`): in one call it merges origin/<base> in (it stops and names the files on a conflict), pushes, opens the PR, and checks the push landed (a push that silently failed leaves no CI to wait for), then prints the \`head\` and \`prs\` to wait with; on exit 1 fix what it names instead of waiting. Stop your Unity editor if nothing of yours needs it (\`mcp__machine__unity\` stop), then call \`mcp__machine__blocked_on\` with that \`head\` and \`prs: ["ci:<owner/repo>#<n>"]\` (the \`ci:\` prefix waits for its checks to finish, green or red, not for its merge) and what, and end your turn with a \`wNNN: still open: blocked on CI on <PR>\` line. FF Factory reads the checks every 2 minutes and resumes you within about 4 minutes of them finishing, green or red; then \`ff-pr merge\` merges on green (\`--match-head-commit\`) or names the red run to read (\`gh run view <run> --log-failed\`) and fix; \`ff-pr status\` reads without merging. Where \`ff-pr\` is missing, do those steps with git and gh, comparing \`git rev-parse HEAD\` with \`gh pr view <n> --json headRefOid,mergeable\`. Meanwhile, with your editor stopped, no batch run in flight and your work pushed, your sandbox takes other work: you are placed again on your branch when you resume, back in it if it is still free, else in another on this ${mac} (the message says where).
@@ -6174,7 +6761,41 @@ A report is for a person who asked for one, and people want very few. File one w
    * A sandbox ready for new work: ready, with no live agent and none between turns to come back to it (w475). Its label is
    * its name and says nothing about use (w575).
    */
-  private free(x: { id: string; kind?: 'light'; status: string; sessionIds: string[]; lingering?: unknown[]; path?: string; git?: { dirty: number } }, machineId?: string) {
+  private free(x: { id: string; kind?: 'light'; status: string; sessionIds: string[]; lingering?: unknown[]; path?: string; git?: { dirty: number } }, machineId?: string): boolean {
+    // w6428: within pageRead, each sandbox's answer once: a page's state build asked every sandbox three times (its machine
+    // view, then placesNow's freeSandboxes and idleEditors), 75-90 ms of 'machines' and much of 'room' on 2026-11-27.
+    const memo = this.freeMemo;
+    if (!memo) return this.freeNow(x, machineId);
+    const key = `${machineId ?? ''}/${x.id}`;
+    const had = memo.get(key);
+    if (had && had.x === x) return had.v;
+    const v = this.freeNow(x, machineId);
+    memo.set(key, { x, v });
+    return v;
+  }
+
+  /** w6428: free() of each sandbox within pageRead, `${machineId}/${id}`, with the sandbox object it was asked of (a new one asks afresh). */
+  private freeMemo?: Map<string, { x: object; v: boolean }>;
+
+  /** How many times free() worked a sandbox out (w6428 tests: once per sandbox within pageRead). */
+  freeMade = 0;
+
+  /**
+   * w6428: runs read-only `fn` (a page's state build) with places(), each machine's claims and each sandbox's free() worked
+   * out once. Only for reads that change no placement: unlike withPlacesOnce, nothing empties the free() memo inside it.
+   */
+  pageRead<T>(fn: () => T): T {
+    if (this.freeMemo) return fn();
+    this.freeMemo = new Map();
+    try {
+      return this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(fn));
+    } finally {
+      this.freeMemo = undefined;
+    }
+  }
+
+  private freeNow(x: { id: string; kind?: 'light'; status: string; sessionIds: string[]; lingering?: unknown[]; path?: string; git?: { dirty: number } }, machineId?: string): boolean {
+    this.freeMade++;
     if (x.status !== 'ready') return false;
     // w5924: a light agent folder is one worker's own, never a FREE game sandbox (agent work gets a new one: lightTarget).
     if (isLight(x)) return false;
@@ -6199,6 +6820,23 @@ A report is for a person who asked for one, and people want very few. File one w
    */
   sandboxFree(machineId: string, sb: MachineSandbox): boolean {
     return this.free(sb, machineId);
+  }
+
+  /**
+   * sandboxFree of each of a machine's sandboxes, with the machine's claims worked out once (w6381): the page's machine view
+   * asked each sandbox alone, each ask placing every released worker of the machine again (1.1-1.8 s portal blocks at
+   * 10:44-10:51Z on 2026-11-27, stall profile: machineView > sandboxFree > free > claimedBy > claims).
+   */
+  sandboxesFree(machineId: string, sbs: readonly MachineSandbox[]): boolean[] {
+    return this.placeAgain.withClaimsMemo(() => sbs.map((sb) => this.free(sb, machineId)));
+  }
+
+  /**
+   * w6381: runs read-only `fn` (every machine's bench priorities) with places() and each machine's claims computed once: the
+   * minute's pushBenchPriorities asked them per machine, a 5.8 s portal block at 10:43Z on 2026-11-27.
+   */
+  placementRead<T>(fn: () => T): T {
+    return this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(fn));
   }
 
   /** " (spoken for: …)" when a released worker is being placed again there or its resume waits for it (w640), else "". */
@@ -6247,6 +6885,14 @@ A report is for a person who asked for one, and people want very few. File one w
     if (want && refs.length !== want) throw new Error(`${w.id} is ${pairText(w.pair!)}: give ${want} sandboxes (sandbox and ${want - 1} in pair_sandboxes), not ${refs.length}`);
     if (refs.length < 1 || refs.length > PAIR_MAX_LEGS) throw new Error(`a pair run has 1 to ${PAIR_MAX_LEGS} legs, one per computer`);
     if (a.extra_agent) throw new Error('a pair run\'s legs are game work: each goes into a FREE sandbox, never beside another agent (extra_agent)');
+    // w6206: a pair run whose commit GitHub does not have is not started (one filed before the check, or by hand); a published
+    // player's own commit came from a build, and is not asked.
+    const pc = w.pair?.commit?.trim().toLowerCase();
+    const commitWarning = pc && !w.pair?.player?.key.toLowerCase().startsWith(pc) ? await this.pairCommitCheck(pc, (why) => `${w.id}'s ${why}. Nothing was started.`) : undefined;
+    // w6189: a pair run marked pre-w5297 whose commit reads FF_GAME_DATA_DIR (one filed before this check, or by hand) is
+    // decided per commit here too, so start_agent and request_pair agree; a commit that does not, or that cannot be checked,
+    // keeps the refusal below.
+    await this.clearLegacyByCommit(w, 'start_agent');
     // Every leg checked before any starts.
     const legs = refs.map((ref, i) => {
       const t = this.target(ref, i ? undefined : a.machine);
@@ -6300,6 +6946,9 @@ A report is for a person who asked for one, and people want very few. File one w
       // w2459 (w2460's rerun 2): a leg that clicks the game's menus is never started behind a locked screen.
       const locked = pairDrivesMenus(w.pair) ? desktopLacks(l.machine, m?.desktop) : undefined;
       if (locked) throw new Error(`${leg}: ${locked}, and ${w.id}'s legs click the game's menus, which take no clicks there: its legs go only on computers whose screen is unlocked (${fitNow()}). Nothing was started.`);
+      // w6311: a Linux reading is warn-only until LINUX_LOCK_ENFORCED; the portal log says what it would refuse.
+      const wouldNot = pairDrivesMenus(w.pair) ? linuxLockWarn(l.machine, m?.desktop) : undefined;
+      if (wouldNot) console.log(`${w.id} ${leg}: ${wouldNot}`);
     }
     if (w.pair?.steam) {
       // w2459: two legs on one Steam account cannot meet in a lobby (one account is signed in on one computer at a time).
@@ -6333,7 +6982,7 @@ A report is for a person who asked for one, and people want very few. File one w
     }
     this.orchestrators.pairStarted(w.id, started, crossOs ? { crossOs } : {});
     const withFiles = files.length ? ` Each gets ${files.length === 1 ? 'the attachment' : `${files.length} attachments`} (${files.map((f) => f.id).join(', ')}) in ${INBOX_DIR}/.` : '';
-    return `Started ${w.id}'s ${legs.length === 1 ? 'one leg' : `${legs.length} legs together`}, requested by ${requestedBy.displayName}: ${lines.join('; ')}. ${names(w.requesters)}'s orchestrator is told.${withFiles}${Agents.goneLine(files)}`;
+    return `Started ${w.id}'s ${legs.length === 1 ? 'one leg' : `${legs.length} legs together`}, requested by ${requestedBy.displayName}: ${lines.join('; ')}. ${names(w.requesters)}'s orchestrator is told.${withFiles}${Agents.goneLine(files)}${commitWarning ? ` ${commitWarning}` : ''}`;
   }
 
   /**
@@ -6547,7 +7196,8 @@ A report is for a person who asked for one, and people want very few. File one w
     const m = t.machineSandbox ? this.store.machines.get(t.machine) : undefined;
     const sb = m?.sandboxes?.find((x) => x.id === t.machineSandbox);
     if (!m || !sb) return;
-    const mine = workId ? this.store.work.get(workId.toLowerCase())?.sessionIds ?? [] : [];
+    const own = workId ? this.store.work.get(workId.toLowerCase()) : undefined;
+    const mine = own ? own.sessionIds.filter((id) => onRequest(own, id)) : [];
     // w2548: the request's own workers count too: two workers of one request in one sandbox share its tree as two
     // requests' would (w2547's 9a3c8e5d and 57ab10fc in lothdesktop/slot1, 2026-10-29).
     const there = this.sessionsOf(sb.sessionIds).filter((x) => x.kind === 'worker' && occupies(x, !!this.sessions.sessions.get(x.id)?.live));
@@ -6808,12 +7458,33 @@ A report is for a person who asked for one, and people want very few. File one w
     }
   }
 
-  /** Within withPlacesOnce: the next places() computes afresh (a timed leg started, moved or was re-queued). */
-  placesChanged(): void {
-    if (this.placesPass) delete this.placesPass.places;
+  /**
+   * Within withPlacesOnce or a release pass: holdsIndex of the ledger, built again once a request is saved or dropped
+   * (Store.workRev). w6336: after #1446 the release pass alone still scanned the ledger per worker (0.6 s of workIdsOf, 0.4 s of
+   * live in its 2.6 s block at 10:06Z on 2026-11-27).
+   */
+  private holdsIndexNow(): ReturnType<typeof holdsIndex> | undefined {
+    const pass = this.placesPass ?? this.holdsPass;
+    if (!pass) return undefined;
+    if (pass.holds?.rev !== this.store.workRev) pass.holds = { rev: this.store.workRev, ...holdsIndex([...this.store.work.values()]) };
+    return pass.holds;
   }
 
-  private placesPass?: { places?: Computer[] };
+  /** Within withPlacesOnce: the next places() computes afresh (a timed leg started, moved or was re-queued). */
+  placesChanged(): void {
+    if (this.placesPass) this.placesPass = {};
+  }
+
+  /** places(), and per machine preemptOccupants and benchPriorities (w6336), each computed once within withPlacesOnce. */
+  private placesPass?: {
+    places?: Computer[];
+    occupants?: Map<string, Occupant[]>;
+    bench?: Map<string, Record<string, BenchPriority>>;
+    holds?: { rev: number } & ReturnType<typeof holdsIndex>;
+    byWorker?: { rev: number; of: Map<string, WorkItem[]> };
+  };
+  /** During a release pass: its holdsIndex (holdsIndexNow). */
+  private holdsPass?: { holds?: { rev: number } & ReturnType<typeof holdsIndex> };
 
   /** w3843: within withPlacesOnce and a claims memo, the next asks compute afresh (placesChanged and PlaceAgain.claimsChanged). */
   private placementChanged(): void {
@@ -6852,8 +7523,11 @@ A report is for a person who asked for one, and people want very few. File one w
       const lights = lightFolders(m.sandboxes);
       const offersLight = this.machines.offersLight(m.id);
       const mine = placed.get(m.id) ?? [];
-      const midTurnIn = new Map<string, number>();
-      for (const x of mine) if (isMidTurn(x.info)) midTurnIn.set(x.info.machineSandbox!, (midTurnIn.get(x.info.machineSandbox!) ?? 0) + 1);
+      // w5985, config placementAgentCount "on": counted as its agent cap counts (turns sent, not yet reported, and standing
+      // agents too), and the larger of that and its daemon's fresh census, which refuses a start past it.
+      const counted = this.machines.placementCount(m.id, sbs.map((x) => x.id));
+      const midTurnIn = new Map<string, number>(counted?.inSandbox);
+      if (!counted) for (const x of mine) if (isMidTurn(x.info)) midTurnIn.set(x.info.machineSandbox!, (midTurnIn.get(x.info.machineSandbox!) ?? 0) + 1);
       // Its daemon reports its load; this host's own daemon's is this host's.
       const st = this.machines.statsOf(m.id);
       const used = st ? (st.memUsedBytes ?? st.memTotalBytes - st.memFreeBytes) : m.local ? mem.total - mem.free : undefined;
@@ -6872,7 +7546,7 @@ A report is for a person who asked for one, and people want very few. File one w
         ...(m.fence?.agentIntegrity ? { agentIntegrity: m.fence.agentIntegrity } : {}),
         ...(m.fence?.agentIntegrityWhy ? { agentIntegrityWhy: m.fence.agentIntegrityWhy } : {}),
         live: mine.filter((s) => s.live).length,
-        midTurn: mine.filter((s) => isMidTurn(s.info)).length,
+        midTurn: counted?.midTurn ?? mine.filter((s) => isMidTurn(s.info)).length,
         maxAgents: agentCap(m),
         sandboxes: sbs.length,
         maxSandboxes: pool.maxSandboxes,
@@ -6983,7 +7657,7 @@ A report is for a person who asked for one, and people want very few. File one w
     const priority = w?.priority ?? 'normal';
     const why = reservedReason(machine, this.placement(), priority);
     if (!why) return undefined;
-    if (w?.sessionIds.some((id) => placeId(this.store.sessions.get(id)?.machineId ?? '') === placeId(machine))) return undefined;
+    if (w?.sessionIds.some((id) => onRequest(w, id) && placeId(this.store.sessions.get(id)?.machineId ?? '') === placeId(machine))) return undefined;
     return `${placeId(machine)} is ${why}: ${w ? `${w.id} is ${priority}` : 'work started without a request counts as normal'}, so it does not go there. Start it on another computer (the Capacity block's Next lines, list_sandboxes), or queue it (decide_work queue) when none has room; a request a person raises to the level may go there at once.`;
   }
 
@@ -7153,6 +7827,13 @@ A report is for a person who asked for one, and people want very few. File one w
   }
 
   describeAllSandboxes(detail = false): string {
+    // w6336: one placement pass for the whole list, so every agent line reads its requests from one index (workOf): list_sandboxes
+    // blocked the portal 9.2 s at 10:06Z on 2026-11-27, under describeAllSandboxes > agentsPart > workOver's scan of every request.
+    // w6381: and each machine's claims and placement facts once, not per agent line (1.8 s at 10:44Z on 2026-11-27: facts).
+    return this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(() => this.describeAllSandboxesNow(detail)));
+  }
+
+  private describeAllSandboxesNow(detail: boolean): string {
     // The portal holds no sandboxes of its own (w510): every sandbox is a machine's, sorted by status within its machine (w509).
     const parts: string[] = [];
     for (const m of this.machines.list()) {
@@ -7363,7 +8044,7 @@ A report is for a person who asked for one, and people want very few. File one w
               }
               // A crash request that looks like one a worker is on (w1827, lothsahn: "the orchestrator should look at the
               // findings and see if they should be sent to the same worker"): a new worker needs what in FFBox's findings differs.
-              const working = (x: WorkItem) => x.sessionIds.some((id) => ['running', 'starting', 'waiting_permission', 'idle'].includes(this.store.sessions.get(id)?.status ?? 'stopped'));
+              const working = (x: WorkItem) => x.sessionIds.some((id) => onRequest(x, id) && ['running', 'starting', 'waiting_permission', 'idle'].includes(this.store.sessions.get(id)?.status ?? 'stopped'));
               const crashPeers = this.orchestrators.crashPeers(w).filter((x) => isOpen(x) && working(x));
               if (crashPeers.length && !override) {
                 throw new Error(`${w.id} may be the same crash as ${crashPeers.map((x) => x.id).join(', ')}, which a worker is on.\n\n${this.orchestrators.crashPeersText(w, crashPeers)}`);
@@ -7415,6 +8096,9 @@ A report is for a person who asked for one, and people want very few. File one w
             // w4868: work that draws a window never starts on a computer whose screen is locked (unfitWhy says the same).
             const lockedNo = pinOn && w && needsWindow(w, a.prompt) ? windowLacks(pinOn, this.store.machines.get(pinOn)?.desktop) : undefined;
             if (lockedNo) throw new Error(`${w!.id} draws a window (a capture, a screenshot, play mode, the FFU client's window; read from its words, or decide_work window true) and ${lockedNo}: a window there draws no frames (w4868, lothsahn: "Only run work on m3 it can do with the screen locked"). Start it on a computer whose screen is unlocked, or leave it Queued (decide_work queue): it waits for one, never for a person. If it runs headless (batchmode, EditMode tests, code), say so with decide_work window false and start it here.`);
+            // w6311: a Linux reading is warn-only until LINUX_LOCK_ENFORCED; the portal log says what it would refuse.
+            const wouldNot = pinOn && w && needsWindow(w, a.prompt) ? linuxLockWarn(pinOn, this.store.machines.get(pinOn)?.desktop) : undefined;
+            if (wouldNot) console.log(`${w!.id} on ${pinOn}: ${wouldNot}`);
             // w3396: no new FFU (cargo) worker on a sandbox drive under 30 GB free; it stays Queued (unfitWhy says the same).
             const cargoOn = ctx.role === 'dispatcher' && w && isCargoRepo(w.repo) && !a.disk_cleanup ? (lightOn ?? this.newWorkOn(a.sandbox, a.machine)) : undefined;
             const cargoNo = cargoOn ? cargoShortOf(this.machines.diskRoom(cargoOn)?.freeBytes) : undefined;
@@ -7500,6 +8184,7 @@ ${w.repo ?? ''}
               if (w) {
                 const why = override ? ` (not a repeat: ${override})` : '';
                 this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)}${picked.note}${why}`, { overrideGate: a.override_gate });
+                this.failedStarts.delete(w.id); // w6432: started now, it holds no sandbox as a failed start any more
                 item = ` for ${w.id}; ${names(w.requesters)}'s orchestrator is told`;
                 if (ffuShared.length) this.tellFfuShared(w, ffuShared);
               } else {
@@ -7539,10 +8224,11 @@ ${w.repo ?? ''}
             const failed = (e: unknown) => {
               const why = (e as Error)?.message ?? String(e);
               console.log(`start_agent (w5278): ${label} in ${at} did not start: ${why}`);
+              if (w && tgt.machine) this.failedStarts.set(w.id, { machine: tgt.machine, at: Date.now() });
               if (w) this.orchestrators.noteOnRequest(w.id, `its start_agent in ${at} did not start after the sandbox was prepared (w5278): ${why}`);
               this.notifyDispatcher(`[start failed] ${label} did not start in ${at}: ${why}. Nothing was started for it: start_agent it again (another free sandbox if this one is the problem).`, requestedBy);
             };
-            plan.pending.then(
+            this.track(plan.pending).then(
               (h) => {
                 if (w) this.agentStarting.delete(w.id);
                 try {
@@ -7608,7 +8294,7 @@ ${w.repo ?? ''}
             }
             const requestedBy = actor(for_user, work_id);
             const item = work_id ? this.orchestrators.requireWork(work_id) : undefined;
-            const linked = !!item?.sessionIds.includes(w.info.id);
+            const linked = !!item && onRequest(item, w.info.id);
             // A gated request is not given to a worker, not even the one already on it (w754): what people add is kept for
             // when the gates clear and it is resumed. A message_agent would also mark it active and drop the gates.
             const gated = item ? this.orchestrators.gateProblem(item, override_gate) : undefined;
@@ -7664,8 +8350,18 @@ ${w.repo ?? ''}
             await this.sendWithAttachments(session_id, `${wrap}${text}${why ? `
 
 [session] ${item!.id} came to this session, not a new one: ${why}` : ''}${fresh ? requestAsFiled(item, text) : ''}${fresh && item.source ? workerRules(item, this.sandboxBranchOf({ machine: w.info.machineId, machineSandbox: w.info.machineSandbox })) : ''}${fresh ? requestLineRule(item) : ''}`, from, { requestedBy, attachments: files });
-            // w2231: a message parked on its Claude pool has just Blocked the request on that pool; the link waits for its resume.
-            if (work_id && !this.sessions.parked(session_id).length) this.orchestrators.linkWorker(work_id, w.info, `sent to ${this.orchestrators.workerLine(w.info.id)}, already on it`, { overrideGate: override_gate });
+            // w6092, w6180: the request is linked as soon as the send returns, every time: that is still before the send queue's
+            // first pass (it drains on setImmediate and on a timer, never inside send), so a 'running' drain never takes the
+            // worker for one with no open request (Agents.drainOrphan). A send refused outright throws first and links nothing:
+            // no notice, no card closed, no other session released (w6180; #1372 linked first and could not undo those).
+            if (work_id) {
+              // w2231: a message parked on its Claude pool has just Blocked what the worker held on that pool. A request it was
+              // already on stays so (linking it again would mark it Working while nothing can start); a new one is linked and
+              // joins them, so the pool's clearing resumes it with the rest.
+              const parked = this.sessions.parked(session_id);
+              if (!(linked && parked.length)) this.orchestrators.linkWorker(work_id, w.info, `sent to ${this.orchestrators.workerLine(w.info.id)}, already on it`, { overrideGate: override_gate });
+              if (!linked && parked.length) this.poolBlock(this.sessions.get(session_id), parked[parked.length - 1].why);
+            }
             if (newTitle) this.sessions.setTitle(session_id, newTitle);
             return `Sent, for ${requestedBy.displayName}${work_id ? ` (${work_id})` : ''}${sent(files.length)}.${why ? ` Same session (${why}).` : ''}${newTitle ? ` It is now "${newTitle}".` : ''}${Agents.goneLine(files)}${this.queuedLine(session_id)}${before ? this.resumeWhere(session_id, before) : ''}`;
           }),
@@ -7734,7 +8430,7 @@ ${w.repo ?? ''}
         ),
         tool(
           'ops_worker',
-          `The orchestration worker (w597, docs/ops-worker.md): one Claude Code session with a real shell in the portal's VM, for Lothsahn's and Ben's own orchestrators only (anyone else's call is refused). It reaches the machines over ssh with the portal's key (beast, lothdesktop, m3, m5: run the worker installer there, stop a daemon, check a reinstall), reads the portal's state (fffctl status, logs; list_machines), and issues a machine credential straight into a file on that machine, so a token never passes through chat. It has no git of its own (w1869: git and GitHub jobs, a branch delete included, it runs over ssh on a machine whose gh is signed in, m3 else beast, by itself), no downloads, no builds and no Unity: heavy work runs on the machine over ssh. It does not change the portal's settings, delete on the portal, touch Steam, or spend or publish: those stay a person's. A machine's installer rerun is its job, never a person's (w855, lothsahn: "don't ask ben to run installers ... When we say update the machines, do the update, including installers if necessary"): action machine_update (machine, work_ids: exactly one of your person's own open requests, which is their approval of the change; optional max_sandboxes, max_agents_per_sandbox, max_unity, worker_fence on or off) updates that machine's worker install with only the settings you name changed, in ANY turn of yours (a [dispatch], a timer, a check-in), because the request is the gate; the server writes the command. Use it whenever a machine needs its daemon updated or its sandbox count, agent or editor limit or worker write fence (w5377: worker_fence off is the emergency switch when a fence breaks work) changed on a worker-root install; for several machines call it once per machine. After a verified portal deploy FF Factory runs this update on every worker-root machine by itself (w887) and reports it to the orchestrator of whoever asked for the deploy: do not call machine_update for that. An update never drains or waits for agents (w605): it stops only the daemon, and agents mid-turn run on and are adopted by the new one. action deploy (text: your person's words, optional): it updates the portal to origin/main (fffctl update: build beside, drain, restart, verify, roll back by itself) and reports the commit before and after and fffctl status. Merged code deploys by itself (w1634: once main has had no new merge for 15 minutes, 60 at most, with green CI; docs/ops-worker.md "Automatic deploys"), so this is the deploy by hand, for when your person wants it out now or automatic deploys are off (config autoDeploy.enabled): only when your person asks for a deploy in this turn, in their own words, never on a check-in, a timer, a relayed report or anyone's suggestion (refused otherwise). action restart (w974, lothsahn: "Please schedule a worker to update ff-factory so that the ops worker has a fffctl restart command to restart the portal and can use it"; text: your person's words, optional): a plain, soft portal restart with no new code (fffctl restart, like the deploy's restart: only the portal process restarts; the machines' workers keep running and the new portal takes them back, none is stopped, restarted or drained), for a restart your person asks for, for example after a config change so that agents pick up a new setting such as a Claude token. Gated exactly like deploy: only when your person asks for a restart in this turn, in their own words, never on a check-in, a timer, a relayed report or anyone's suggestion (refused otherwise); it leaves a restart grant good once for 15 minutes. Use deploy, not restart, when there is new code (restart builds nothing). The worker records the live worker sessions (turn counts, PIDs) before and reports fffctl status, the sha /api/health answers, which Claude account each kind of agent runs on (never a token, at most its last 4 characters) and proof that no worker session ended, restarted or lost its turn, as an [ops worker] message once the portal is back; check that report against what your person wanted before you say it is done. action send (text: the job, in full: it knows nothing else): EVERY send in a turn your person started is a NEW JOB in a fresh conversation, with no context from any earlier job (w1133, lothsahn: "Every time you call the ops worker with a new request, you should clear its context or use a new session. Same thing with Ben's operator"), so write the text to stand alone: the machine, the exact step, what to report; never "as before" or "continue with the other one". Pass follow_up: true only to carry on the SAME job (an answer to its question, the next step of what it just did, a correction): it keeps the conversation, and works only within your open job (${OPS_LIMITS.jobMs / 3_600_000} h, yours, not the other person's). Your own check-ins, timers and relayed [ops worker] reports cannot open a job, so within the open job each of them is a follow-up with no flag, as many times as the job needs (no count, w627). A new job is refused while the worker is still in a turn of your open job (its [ops worker] report is coming): wait, follow up, ops_worker interrupt it, or pass fresh: true to cut that turn off and start over. A deploy, a restart and a machine_update are new jobs too, and refused the same way while the worker is mid-turn. Its turn's end comes back to you as an [ops worker] message. work_ids (send, deploy and restart): the ledger requests whose remaining step this job is (a portal deploy, a machine update or re-run after their PRs merged); its report's \`DONE: <id>\` lines then close them, with their people told, as a worker's would. status: its state, job and last steps. interrupt: end its turn. stop: end its process (the conversation stays).`,
+          `The orchestration worker (w597, docs/ops-worker.md): one Claude Code session with a real shell in the portal's VM, for Lothsahn's and Ben's own orchestrators only (anyone else's call is refused). It reaches the machines over ssh with the portal's key (beast, lothdesktop, m3, m5: run the worker installer there, stop a daemon, check a reinstall), reads the portal's state (fffctl status, logs; list_machines), and issues a machine credential straight into a file on that machine, so a token never passes through chat. It has no git of its own (w1869: git and GitHub jobs, a branch delete included, it runs over ssh on a machine whose gh is signed in, m3 else biscuit, never a Windows PC (beast, lothdesktop), whose Credential Manager login an ssh key sign-in cannot read, by itself), no downloads, no builds and no Unity: heavy work runs on the machine over ssh. It does not change the portal's settings, delete on the portal, touch Steam, or spend or publish: those stay a person's. A machine's installer rerun is its job, never a person's (w855, lothsahn: "don't ask ben to run installers ... When we say update the machines, do the update, including installers if necessary"): action machine_update (machine, work_ids: exactly one of your person's own open requests, which is their approval of the change; optional max_sandboxes, max_agents_per_sandbox, max_unity, worker_fence on or off) updates that machine's worker install with only the settings you name changed, in ANY turn of yours (a [dispatch], a timer, a check-in), because the request is the gate; the server writes the command. Use it whenever a machine needs its daemon updated or its sandbox count, agent or editor limit or worker write fence (w5377: worker_fence off is the emergency switch when a fence breaks work) changed on a worker-root install; for several machines call it once per machine. After a verified portal deploy FF Factory runs this update on every worker-root machine by itself (w887) and reports it to the orchestrator of whoever asked for the deploy: do not call machine_update for that. An update never drains or waits for agents (w605): it stops only the daemon, and agents mid-turn run on and are adopted by the new one. action deploy (text: your person's words, optional): it updates the portal to origin/main (fffctl update: build beside, drain, restart, verify, roll back by itself) and reports the commit before and after and fffctl status. Merged code deploys by itself (w1634: once main has had no new merge for 15 minutes, 60 at most, with green CI; docs/ops-worker.md "Automatic deploys"), so this is the deploy by hand, for when your person wants it out now or automatic deploys are off (config autoDeploy.enabled): only when your person asks for a deploy in this turn, in their own words, never on a check-in, a timer, a relayed report or anyone's suggestion (refused otherwise). action restart (w974, lothsahn: "Please schedule a worker to update ff-factory so that the ops worker has a fffctl restart command to restart the portal and can use it"; text: your person's words, optional): a plain, soft portal restart with no new code (fffctl restart, like the deploy's restart: only the portal process restarts; the machines' workers keep running and the new portal takes them back, none is stopped, restarted or drained), for a restart your person asks for, for example after a config change so that agents pick up a new setting such as a Claude token. Gated exactly like deploy: only when your person asks for a restart in this turn, in their own words, never on a check-in, a timer, a relayed report or anyone's suggestion (refused otherwise); it leaves a restart grant good once for 15 minutes. Use deploy, not restart, when there is new code (restart builds nothing). The worker records the live worker sessions (turn counts, PIDs) before and reports fffctl status, the sha /api/health answers, which Claude account each kind of agent runs on (never a token, at most its last 4 characters) and proof that no worker session ended, restarted or lost its turn, as an [ops worker] message once the portal is back; check that report against what your person wanted before you say it is done. action send (text: the job, in full: it knows nothing else): EVERY send in a turn your person started is a NEW JOB in a fresh conversation, with no context from any earlier job (w1133, lothsahn: "Every time you call the ops worker with a new request, you should clear its context or use a new session. Same thing with Ben's operator"), so write the text to stand alone: the machine, the exact step, what to report; never "as before" or "continue with the other one". Pass follow_up: true only to carry on the SAME job (an answer to its question, the next step of what it just did, a correction): it keeps the conversation, and works only within your open job (${OPS_LIMITS.jobMs / 3_600_000} h, yours, not the other person's). Your own check-ins, timers and relayed [ops worker] reports cannot open a job, so within the open job each of them is a follow-up with no flag, as many times as the job needs (no count, w627). A new job is refused while the worker is still in a turn of your open job (its [ops worker] report is coming): wait, follow up, ops_worker interrupt it, or pass fresh: true to cut that turn off and start over. A deploy, a restart and a machine_update are new jobs too, and refused the same way while the worker is mid-turn. Its turn's end comes back to you as an [ops worker] message. work_ids (send, deploy and restart): the ledger requests whose remaining step this job is (a portal deploy, a machine update or re-run after their PRs merged); its report's \`DONE: <id>\` lines then close them, with their people told, as a worker's would. status: its state, job and last steps. interrupt: end its turn. stop: end its process (the conversation stays).`,
           {
             action: z.enum(['send', 'deploy', 'restart', 'machine_update', 'status', 'interrupt', 'stop']),
             text: z.string().optional().describe('action send: what it should do, in full. Action deploy or restart: your person\'s own words, as they said them.'),
@@ -7754,11 +8450,19 @@ ${w.repo ?? ''}
             transcript_lock: z.enum(['on', 'off']).optional().describe("action machine_update, a Linux machine with the worker fence on: let each locked worker write only its own conversation's transcript (w5702, docs/transcript-seal.md): on moves <root>/claude/projects to <root>/transcripts behind a link and gives each claude rules for its own conversation; off opens the transcripts folder to workers again. Unset leaves it as it is. Off is the recovery switch, and worker_fence off lifts it with the whole lock."),
             store_lock: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: the store lock (w5614, docs/machines.md \"Slot repos\"): on makes the machine's main clone read-only to fenced workers once every sandbox is a slot repo (held off, and said why, until then); warn refuses nothing and logs each write to the main clone the daemon did not make; off (the recovery switch) opens it again. Takes effect at the daemon restart the update makes. Unset leaves it as it is."),
             editor_tmpdir: z.enum(['on', 'off']).optional().describe("action machine_update: w5833: a sandbox Unity editor's temp folder on macOS and Linux: on gives each one TMPDIR=<root>/tmp/editor-<sandbox> (Unity's own IPC sockets stay in /tmp, measured), off (the default) keeps the system temp. Takes effect at the daemon's next start; off is the recovery."),
-            path_fence: z.enum(['off', 'warn']).optional().describe("action machine_update: w5863: the path fence on macOS and Linux: warn (the default) refuses nothing and logs each write to the unity-slot shims folder (first on every agent's PATH) that the daemon did not make; off stops the watch (the recovery switch). Takes effect at the daemon's next start. Unset leaves it as it is."),
+            path_fence: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: w5863/w5899: the path fence on macOS and Linux: on (the default) moves the unity-slot shims folder on every agent's PATH to <root>/tools-medium/shims, which fenced workers cannot write; warn leaves it in the Unity slots mailbox and logs each write the daemon did not make; off leaves it there unwatched, the recovery. Takes effect at the daemon's next start. Unset leaves it as it is."),
             daemon_tmpdir: z.enum(['on', 'off']).optional().describe("action machine_update: w6000: the daemon's own temp folder, every OS: on (the default) points the daemon's own TMPDIR, TEMP and TMP at <root>/tmp-daemon, off keeps the system temp folder (the recovery). Takes effect at the daemon's next start."),
+            tools_disk_lock: z.enum(['warn', 'on']).optional().describe("action machine_update: w5959, Windows only: a virtual disk (a WSL distro's ext4.vhdx) in a Low <root>/tools child (docs/worker-root.md): on keeps that child Medium, so workers can no longer write there; warn (the default) only logs it (the recovery). Written as daemon.json toolsDiskLock; takes effect at the daemon's next start. Unset leaves it as it is."),
+            win_ci_first: z.enum(['off', 'warn', 'enforce']).optional().describe("action machine_update: w6110, Windows only: CI jobs go first on a Windows CI-first machine (machine/ciFirstWin.ts): warn (the default, and the recovery) only logs what the agents' processes take beside a CI job; enforce lowers the processes agents' tools start to BelowNormal while a job runs and raises them back when it is off or warn again; off stops it. Written as daemon.json winCiFirst; takes effect at the daemon's next start. Unset leaves it as it is."),
+            shared_lock: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: the shared-cache lock (w5615, docs/worker-root.md \"Per-slot caches and the players broker\"): each sandbox gets its own copy-on-write clone of the tool caches (uv, pip, npm, NuGet, UPM, .NET, Playwright) and players are installed and launched by the daemon; warn changes the env and logs worker writes to the shared caches, players, seed and tools; on makes those read-only to workers. Unset: as daemon.json has it."),
+            host_restage: z.enum(['warn', 'on']).optional().describe("action machine_update: w6305: what the daemon does with an idle agent whose host was adopted across a sharedLock switch (w6287, docs/worker-root.md \"After a sharedLock switch\"): warn (the default, and the recovery) logs one line per such host; on ends that agent between turns, never mid-turn, so its next message starts a new host on the new mode's cache paths and FF_PLAYER_BROKER. Written as daemon.json hostRestage; takes effect at the daemon's next start, which this update makes. Send on only with a person's go, after the warn lines of a real switch were read (lothsahn's lockout rule; docs/worker-root.md 4.4); warn needs none."),
+            long_runs: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: w6367: the long-run route (machine/longRuns.ts) that starts a sanctioned long run (the nightly) outside its worker's agent host; warn (the default) logs and refuses so the caller starts it as before, on starts it, off refuses; warn or off is the way back, though off does not end runs already live (they end at their 20 h limit or by runs/stop). Written as daemon.json longRuns; takes effect at the daemon's next start, which this update makes. Send on only with a person's go (lothsahn's lockout rule; docs/worker-fence.md 'Long runs'); warn and off need none."),
+            live_run_guard: z.enum(['off', 'warn']).optional().describe("action machine_update: w6378: daemon.json liveRunGuard: warn (the default) logs a WARNING when a sandbox trim, release or delete would hit a sandbox where a run of its worker still lives; off stops the look. The way back with nobody at the machine."),
+            editor_git_packages: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: w6412: daemon.json editorGitPackages: how a sandbox editor gets a git package its Packages/manifest.json names that Library/PackageCache lacks (machine/gitPackages.ts). warn (the default) only names the missing packages in the start note, unity status and the Package Manager dialog notice; on also fetches each into a mirror under <root>/cache-medium/git-packages with the daemon's own git and credential, and gives a Windows Low-integrity editor the workers' Git on PATH and a url.insteadOf to that mirror, so its Package Manager fetches without a credential; off looks at nothing (the way back). Takes effect at the editor's next start. The way back with nobody at the machine."),
+            runner_priority: z.enum(['off', 'warn', 'enforce']).optional().describe("action machine_update: w6163, Windows only: the ffu CI runners' scheduled tasks and listeners at Normal priority (machine/runnerPriority.ts): warn only logs what it reads (the default everywhere but the machines in RUNNER_PRIORITY_ENFORCE, and the recovery), enforce sets the tasks to priority 4 and raises the listeners to Normal, off stops it. Written as daemon.json runnerPriority; takes effect at the daemon's next start. Unset leaves it as it is."),
             medium_agent_folders: z.enum(['warn', 'on']).optional().describe("action machine_update: Medium agents' own temp root and cargo home (w5862, w5869; docs/worker-root.md \"Medium agents' temp folders and cargo home\"): on moves Medium agents (outside a sandbox) to <root>/tmp-medium and <root>/cache-medium/cargo; warn only logs the exposure. Written as daemon.json mediumAgentFolders; the daemon restarts with it"),
           },
-          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, medium_agent_folders, daemon_tmpdir, words }) => {
+          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, medium_agent_folders, daemon_tmpdir, tools_disk_lock, win_ci_first, shared_lock, runner_priority, host_restage, long_runs, live_run_guard, editor_git_packages, words }) => {
             const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (ctx.role !== 'personal' || !opsAllowedOrchestrator(caller)) throw new Error(OPS_REFUSED);
             if (action === 'send') return this.ops.send(caller, text ?? '', fresh === true, work_ids ?? [], false, follow_up === true, words);
@@ -7766,7 +8470,7 @@ ${w.repo ?? ''}
             if (action === 'restart') return this.ops.restart(caller, text ?? '', work_ids ?? [], words);
             if (action === 'machine_update') {
               if (!machine || (work_ids ?? []).length !== 1) throw new Error('machine_update takes machine and exactly one work_ids entry: the person\'s own open request that asks for the update');
-              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence, mediumAgentFolders: medium_agent_folders, daemonTmpdir: daemon_tmpdir });
+              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence, mediumAgentFolders: medium_agent_folders, daemonTmpdir: daemon_tmpdir, toolsDiskLock: tools_disk_lock, winCiFirst: win_ci_first, sharedLock: shared_lock, runnerPriority: runner_priority, hostRestage: host_restage, longRuns: long_runs, liveRunGuard: live_run_guard, editorGitPackages: editor_git_packages });
             }
             if (action === 'status') return `${this.ops.status()}\nIts timers (w1106): ${describeTimers(this.timers.list(OPS_ID), this.timers.deliveredToday(OPS_ID))}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
             return this.ops.control(caller, action);
@@ -8082,9 +8786,7 @@ ${w.repo ?? ''}
             // w5921: the dispatcher restarts on the token or pool it names now, between turns (never mid-turn).
             if (key === 'claudeAccounts.dispatcher') {
               const moved = this.applyAccountConfig('config claudeAccounts.dispatcher changed');
-              const id = this.orchestrators.dispatcherId;
-              const busy = id ? this.sessions.sessions.get(id) : undefined;
-              const now = moved.length ? 'the dispatcher was stopped between turns and its next message starts it there' : busy?.live && isMidTurn(busy.info) ? 'the dispatcher is mid-turn: it restarts there within 30 s of that turn ending (never mid-turn)' : 'the dispatcher already runs there, or starts there at its next message';
+              const now = this.dispatcherConfigAnswer(moved);
               const held = this.dispatcherHeldWhy?.();
               return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json and applied at once: ${now} (w5921).${held ? ` WARNING: it cannot start on it now: ${held}; the operators were told.` : ''}`;
             }
@@ -9467,7 +10169,8 @@ ${w.repo ?? ''}
 
   /** Room for each kind of work and the held computers with room (w1089, w1098); `game` follows roomNow(), which tests replace. */
   roomFacts(): RoomNow {
-    const r: RoomNow = { ...roomNow(this.places(), this.placement()), game: this.roomNow() };
+    // w6381: places() once for both (each built claims for every machine; the blockerWatch tick's 1.1-1.3 s blocks).
+    const r: RoomNow = this.withPlacesOnce(() => ({ ...roomNow(this.places(), this.placement()), game: this.roomNow() }));
     // w1944: since when, read at every read of the room (the page, list_work, the blocker watch each minute, the capacity ping),
     // on the clock the WRONG flag reads (Orchestrators.now).
     const now = this.orchestrators?.now().getTime() ?? Date.now();

@@ -32,6 +32,15 @@ import { PREFER_TOOLS } from './bashNudge.ts';
  * lifetime.
  */
 
+/**
+ * w6287: the reply of machine_update shared_lock. A sharedLock switch restarts the daemon, which adopts the running agent
+ * hosts (w605), and a host keeps its environment, so those agents keep the old mode's cache paths and FF_PLAYER_BROKER
+ * until their next host start. daemon.json `hostRestage` "on" ends each idle one between turns so its next message starts
+ * a new host on the new mode; its default "warn" only logs them (docs/worker-root.md "After a sharedLock switch").
+ */
+export const SHARED_LOCK_DELAY_NOTE =
+  "Agents already running there keep the old shared-lock mode (their cache paths and FF_PLAYER_BROKER) until their next agent host start (a stop, the idle reap after an hour, a code update): sessions started after the switch get the new mode at once. The daemon logs each such agent (hostRestage warn, w6287; docs/worker-root.md \"After a sharedLock switch\")."
+
 /** Its one, fixed session id. Never a pool, never a configurable kind (lothsahn, 2026-10-07: "it's hardcoded"). */
 export const OPS_ID = 'ops-worker';
 export const OPS_TITLE = 'Orchestration worker (portal VM)';
@@ -94,7 +103,7 @@ export function opsAllowedOrchestrator(info: Pick<SessionInfo, 'kind' | 'orchest
  * use m3's gh login): over ssh on a machine whose gh is signed in, checked first. A non-interactive ssh shell on a Mac has
  * no Homebrew on its PATH, hence the export (the command that worked, 2026-10-23 15:16Z, the portal's journal).
  */
-export const OPS_GITHUB_ROUTE = `run git and gh on a machine whose gh is signed in, over ssh (m3 first, else beast): \`ssh m3 'export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; gh auth status 2>&1 | grep -v Token; gh api -X DELETE repos/OWNER/REPO/git/refs/heads/BRANCH'\` (docs/ops-worker.md, "Git and GitHub jobs")`;
+export const OPS_GITHUB_ROUTE = `run git and gh on a machine whose gh is signed in, over ssh (m3 first, else biscuit; never a Windows PC, whose gh login an ssh key sign-in cannot read): \`ssh m3 'export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; gh auth status 2>&1 | grep -v Token; gh api -X DELETE repos/OWNER/REPO/git/refs/heads/BRANCH'\` (docs/ops-worker.md, "Git and GitHub jobs")`;
 
 /** Commands that fetch, install, build or change things locally, which the worker runs on the target machine instead. */
 const DENIED: Record<string, string> = Object.fromEntries([
@@ -670,7 +679,7 @@ What you have:
 - A new machine, from nothing to online (docs/ops-worker.md, "A new machine"): a person adds its record (the dispatcher's add_machine with worker_install), lets the portal reach it on the tailnet, adds the portal's key line there and gives you its fingerprint. You pin it, check \`ssh <user>@<host> whoami\`, issue its credential with \`--to <user>@<host>\`, run its installer there with every answer as an option, since ssh has no terminal to ask on: \`--root --portal-url --max-sandboxes --max-agents-per-sandbox --max-unity --credential-file\` (Windows: \`-Root -PortalUrl -MaxSandboxes -MaxAgentsPerSandbox -MaxUnity -CredentialFile\`), delete that credential file, and check that list_machines shows it online and ready.
 - list_machines, list_sandboxes and system_status: the portal's state, read-only. wake_me: be woken once later (an install, a reboot).
 - set_timer, list_timers, update_timer, cancel_timer (w1106, lothsahn: "Please make sure polls are done via the timer framework and don't get interrupted by portal updates"): every poll or wait of yours ("once LothDesktop is idle", "check every 2 hours for 3 days") is a timer: every_minutes with until or max_fires, set within the job it serves. It is kept on the portal, so its fires survive a portal deploy, a restart and your own idle stop: one that came due meanwhile is delivered once when the portal is back, never lost and never twice. Each fire comes back as \`[timer <id> "<title>"]\` with your note, as the job it was set in (its person, its requests as work_ids), so it may run the check and, when the condition is met, the action that person already approved for that request, nothing more. Write the note so it stands alone (a fire may open a fresh conversation): the exact command, the condition, the action on it and what to report. When the condition is met and the action done, or the request closes, cancel_timer it. Never a background shell loop, a \`sleep\` loop, \`&\`, \`nohup\` or a backgrounded script that polls: your process ends at every deploy, restart and idle stop, and the loop with it, with nobody told (w1070's idle poll died at the first deploy). The guard refuses them. A loop in the foreground within one turn (a few minutes at most) is fine.
-- Git and GitHub jobs (w1869: delete a remote branch, read a pull request or a branch, list or compare refs) run over ssh on a machine whose gh is signed in: m3 first (its own login), else beast; never a machine on hold or one the job rules out. On a Mac, ssh's shell has no Homebrew on its PATH: \`ssh m3 'export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; gh auth status 2>&1 | grep -v Token'\` checks the login, and \`gh api repos/OWNER/REPO --jq .permissions\` that it can write. A branch delete needs no clone: \`gh api repos/OWNER/REPO/branches/BRANCH --jq .commit.sha\` to see it is there, \`gh api -X DELETE repos/OWNER/REPO/git/refs/heads/BRANCH\`, then \`git ls-remote --heads git@github.com:OWNER/REPO.git BRANCH\` prints nothing. A job that needs a clone makes it in a new \`mktemp -d\` folder there, never in a person's clone or a sandbox. Delete, close or merge only what the job names. Never print a token (keep \`grep -v Token\` on gh auth status).
+- Git and GitHub jobs (w1869: delete a remote branch, read a pull request or a branch, list or compare refs) run over ssh on a machine whose gh is signed in: m3 first (its own login), else biscuit; never a machine on hold or one the job rules out, and never a Windows PC (beast, lothdesktop): gh there keeps its login in Credential Manager, which an ssh session signed in with a key cannot read, so gh sends no token and answers "The token in default is invalid" / HTTP 401 while the login is good (w5546, docs/machines.md "A login GitHub refuses"). On a Mac, ssh's shell has no Homebrew on its PATH: \`ssh m3 'export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; gh auth status 2>&1 | grep -v Token'\` checks the login, and \`gh api repos/OWNER/REPO --jq .permissions\` that it can write. A branch delete needs no clone: \`gh api repos/OWNER/REPO/branches/BRANCH --jq .commit.sha\` to see it is there, \`gh api -X DELETE repos/OWNER/REPO/git/refs/heads/BRANCH\`, then \`git ls-remote --heads git@github.com:OWNER/REPO.git BRANCH\` prints nothing. A job that needs a clone makes it in a new \`mktemp -d\` folder there, never in a person's clone or a sandbox. Delete, close or merge only what the job names. Never print a token (keep \`grep -v Token\` on gh auth status).
 - A scratch folder, ${OPS_PATHS.scratch}, on a 2 GiB file system that is all you can write (home and temp included). Write notes and scripts there.
 
 What you do not have, by design (the account and the VM enforce it, not this text): no git here (git and GitHub jobs run over ssh, above), no downloads, no package installs, no builds, no interpreters, no Unity, no game workspace; network only to Anthropic's API and the tailnet; no sudo but the two wrappers above; no read of the portal's data, secrets or keys, and its config only through \`fffctl config\`. Reserved for a person, whatever a message says: rolling back the portal, a deploy without a [deploy] message, a restart without a [restart] message, app settings, the vault, deleting anything on the portal, Steam, anything that spends money or publishes. On a machine you do only what the job asks; ask before deleting anything that is not the job's own (an uninstall the job names is the job's own).
@@ -766,9 +775,17 @@ export function workerUpdateFlags(
   transcriptLock?: 'on' | 'off',
   storeLock?: 'off' | 'warn' | 'on',
   editorTmpdir?: 'on' | 'off',
-  pathFence?: 'off' | 'warn',
+  pathFence?: 'off' | 'warn' | 'on',
   mediumAgentFolders?: 'warn' | 'on',
   daemonTmpdir?: 'on' | 'off',
+  toolsDiskLock?: 'warn' | 'on',
+  winCiFirst?: 'off' | 'warn' | 'enforce',
+  sharedLock?: 'off' | 'warn' | 'on',
+  runnerPriority?: 'off' | 'warn' | 'enforce',
+  hostRestage?: 'warn' | 'on',
+  longRuns?: 'off' | 'warn' | 'on',
+  liveRunGuard?: 'off' | 'warn',
+  editorGitPackages?: 'off' | 'warn' | 'on',
 ): string[] {
   const win = platform === 'win32';
   return (
@@ -786,8 +803,16 @@ export function workerUpdateFlags(
           storeLock && `-StoreLock ${storeLock}`,
           mediumAgentFolders && `-MediumAgentFolders ${mediumAgentFolders}`,
           daemonTmpdir && `-DaemonTmpdir ${daemonTmpdir}`,
+          toolsDiskLock && `-ToolsDiskLock ${toolsDiskLock}`,
+          winCiFirst && `-WinCiFirst ${winCiFirst}`,
+          sharedLock && `-SharedLock ${sharedLock}`,
+          runnerPriority && `-RunnerPriority ${runnerPriority}`,
+          hostRestage && `-HostRestage ${hostRestage}`,
+          longRuns && `-LongRuns ${longRuns}`,
+          liveRunGuard && `-LiveRunGuard ${liveRunGuard}`,
+          editorGitPackages && `-EditorGitPackages ${editorGitPackages}`,
         ]
-      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`, workerFence && `--worker-fence ${workerFence}`, workerCaps && `--worker-caps ${workerCaps}`, transcriptLock && `--transcript-lock ${transcriptLock}`, storeLock && `--store-lock ${storeLock}`, editorTmpdir && `--editor-tmpdir ${editorTmpdir}`, pathFence && `--path-fence ${pathFence}`, mediumAgentFolders && `--medium-agent-folders ${mediumAgentFolders}`, daemonTmpdir && `--daemon-tmpdir ${daemonTmpdir}`]
+      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`, workerFence && `--worker-fence ${workerFence}`, workerCaps && `--worker-caps ${workerCaps}`, transcriptLock && `--transcript-lock ${transcriptLock}`, storeLock && `--store-lock ${storeLock}`, editorTmpdir && `--editor-tmpdir ${editorTmpdir}`, pathFence && `--path-fence ${pathFence}`, mediumAgentFolders && `--medium-agent-folders ${mediumAgentFolders}`, daemonTmpdir && `--daemon-tmpdir ${daemonTmpdir}`, sharedLock && `--shared-lock ${sharedLock}`, hostRestage && `--host-restage ${hostRestage}`, longRuns && `--long-runs ${longRuns}`, liveRunGuard && `--live-run-guard ${liveRunGuard}`, editorGitPackages && `--editor-git-packages ${editorGitPackages}`]
   ).filter((f): f is string => !!f);
 }
 
@@ -1025,7 +1050,7 @@ export class OpsWorker {
    */
   machineInstall(
     caller: SessionInfo | undefined,
-    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off'; workerCaps?: 'off' | 'warn' | 'enforce'; transcriptLock?: 'on' | 'off'; storeLock?: 'off' | 'warn' | 'on'; editorTmpdir?: 'on' | 'off'; pathFence?: 'off' | 'warn'; mediumAgentFolders?: 'warn' | 'on'; daemonTmpdir?: 'on' | 'off' },
+    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off'; workerCaps?: 'off' | 'warn' | 'enforce'; transcriptLock?: 'on' | 'off'; storeLock?: 'off' | 'warn' | 'on'; editorTmpdir?: 'on' | 'off'; pathFence?: 'off' | 'warn' | 'on'; mediumAgentFolders?: 'warn' | 'on'; daemonTmpdir?: 'on' | 'off'; toolsDiskLock?: 'warn' | 'on'; winCiFirst?: 'off' | 'warn' | 'enforce'; sharedLock?: 'off' | 'warn' | 'on'; runnerPriority?: 'off' | 'warn' | 'enforce'; hostRestage?: 'warn' | 'on'; longRuns?: 'off' | 'warn' | 'on'; liveRunGuard?: 'off' | 'warn'; editorGitPackages?: 'off' | 'warn' | 'on' },
   ): string {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
@@ -1053,16 +1078,37 @@ export class OpsWorker {
     if (o.transcriptLock !== undefined && m.platform !== 'linux') throw new Error(`transcript_lock: Linux only (the macOS fence already does this; docs/transcript-seal.md), and ${m.id} is not a Linux PC`);
     // w5614: the store lock's mode (daemon.json `storeLock`), every OS.
     if (o.storeLock !== undefined && o.storeLock !== 'off' && o.storeLock !== 'warn' && o.storeLock !== 'on') throw new Error('store_lock: off, warn or on');
+    // w5615: the shared-cache lock's mode (daemon.json `sharedLock`), every OS.
+    if (o.sharedLock !== undefined && o.sharedLock !== 'off' && o.sharedLock !== 'warn' && o.sharedLock !== 'on') throw new Error('shared_lock: off, warn or on');
     // w5833: the editor temp folder's switch (daemon.json `editorTmpdir`), macOS and Linux only.
     if (o.editorTmpdir !== undefined && o.editorTmpdir !== 'on' && o.editorTmpdir !== 'off') throw new Error('editor_tmpdir: on or off');
     if (o.editorTmpdir !== undefined && m.platform === 'win32') throw new Error(`editor_tmpdir: macOS and Linux only, and ${m.id} is a Windows PC`);
     // w5863: the path fence's switch (daemon.json `pathFence`), macOS and Linux only.
-    if (o.pathFence !== undefined && o.pathFence !== 'off' && o.pathFence !== 'warn') throw new Error('path_fence: off or warn');
+    if (o.pathFence !== undefined && o.pathFence !== 'off' && o.pathFence !== 'warn' && o.pathFence !== 'on') throw new Error('path_fence: on, warn or off');
     if (o.pathFence !== undefined && m.platform === 'win32') throw new Error(`path_fence: macOS and Linux only, and ${m.id} is a Windows PC`);
     // w5862, w5869: Medium agents' own temp root and cargo home (daemon.json `mediumAgentFolders`), every OS.
     if (o.mediumAgentFolders !== undefined && o.mediumAgentFolders !== 'warn' && o.mediumAgentFolders !== 'on') throw new Error('medium_agent_folders: warn or on');
     // w6000: the daemon's own temp folder (daemon.json `daemonTmpdir`), every OS.
     if (o.daemonTmpdir !== undefined && o.daemonTmpdir !== 'on' && o.daemonTmpdir !== 'off') throw new Error('daemon_tmpdir: on or off');
+    // w5959: a virtual disk in a Low tools child (daemon.json `toolsDiskLock`), Windows only: the Low label is Windows'.
+    if (o.toolsDiskLock !== undefined && o.toolsDiskLock !== 'warn' && o.toolsDiskLock !== 'on') throw new Error('tools_disk_lock: warn or on');
+    if (o.toolsDiskLock !== undefined && m.platform !== 'win32') throw new Error(`tools_disk_lock: Windows only, and ${m.id} is not a Windows PC`);
+    // w6110: CI jobs first on a Windows CI-first machine (daemon.json `winCiFirst`), Windows only: the priorities it sets are Windows'.
+    if (o.winCiFirst !== undefined && o.winCiFirst !== 'off' && o.winCiFirst !== 'warn' && o.winCiFirst !== 'enforce') throw new Error('win_ci_first: off, warn or enforce');
+    if (o.winCiFirst !== undefined && m.platform !== 'win32') throw new Error(`win_ci_first: Windows only, and ${m.id} is not a Windows PC`);
+    // w6305: what the daemon does with an idle agent adopted across a sharedLock switch (daemon.json `hostRestage`, w6287), every OS.
+    if (o.hostRestage !== undefined && o.hostRestage !== 'warn' && o.hostRestage !== 'on') throw new Error('host_restage: warn or on');
+    // w6367: the long-run route (machine/longRuns.ts; daemon.json `longRuns`), every OS.
+    if (o.longRuns !== undefined && o.longRuns !== 'off' && o.longRuns !== 'warn' && o.longRuns !== 'on') throw new Error('long_runs: off, warn or on');
+    // w6378: the live-run guard of a sandbox trim, release or delete (daemon.json `liveRunGuard`), every OS.
+    if (o.liveRunGuard !== undefined && o.liveRunGuard !== 'off' && o.liveRunGuard !== 'warn') throw new Error('live_run_guard: off or warn');
+    // w6412: how a sandbox editor gets a git package Library/PackageCache lacks (daemon.json `editorGitPackages`), every OS.
+    if (o.editorGitPackages !== undefined && o.editorGitPackages !== 'off' && o.editorGitPackages !== 'warn' && o.editorGitPackages !== 'on') throw new Error('editor_git_packages: off, warn or on');
+    // w6163: the ffu CI runners' scheduled tasks and listeners at Normal priority (daemon.json `runnerPriority`), Windows only: the priorities it sets are Windows'.
+    if (o.runnerPriority !== undefined && o.runnerPriority !== 'off' && o.runnerPriority !== 'warn' && o.runnerPriority !== 'enforce') throw new Error('runner_priority: off, warn or enforce');
+    if (o.runnerPriority !== undefined && m.platform !== 'win32') throw new Error(`runner_priority: Windows only, and ${m.id} is not a Windows PC`);
+    // Ben's standing hold on BEAST's system settings (w6163): its runners are only read; lifting it is a code change he approves
+    if (o.runnerPriority === 'enforce' && m.id.toLowerCase() === 'beast') throw new Error("runner_priority enforce: not on BEAST (Ben's hold on its system settings); off or warn only");
     // w2474: the editor and agent limits a root install's daemon runs by are the portal record's: its welcome carries them
     // (server/machines.ts setRootSettings, machine/daemon.ts currentPool), and a hello never takes them back from
     // daemon.json (adoptLayout keeps the record's). The installer's flag alone wrote daemon.json and changed nothing the
@@ -1075,7 +1121,9 @@ export class OpsWorker {
       recorded = ` The portal's record of ${m.id} now says ${Object.entries(rec).map(([k, v]) => `${k} ${v}`).join(', ')} (what its daemon runs by; it has it already, and list_machines shows it).`;
     }
     // Over the machine's own daemon link (w1596) when it takes one: the portal runs it, no ssh and no worker job.
-    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence, workerCaps: o.workerCaps, transcriptLock: o.transcriptLock, storeLock: o.storeLock, editorTmpdir: o.editorTmpdir, pathFence: o.pathFence, mediumAgentFolders: o.mediumAgentFolders, daemonTmpdir: o.daemonTmpdir }).filter(([, v]) => v !== undefined && v !== false));
+    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence, workerCaps: o.workerCaps, transcriptLock: o.transcriptLock, storeLock: o.storeLock, editorTmpdir: o.editorTmpdir, pathFence: o.pathFence, mediumAgentFolders: o.mediumAgentFolders, daemonTmpdir: o.daemonTmpdir, toolsDiskLock: o.toolsDiskLock, winCiFirst: o.winCiFirst, sharedLock: o.sharedLock, runnerPriority: o.runnerPriority, hostRestage: o.hostRestage, longRuns: o.longRuns, liveRunGuard: o.liveRunGuard, editorGitPackages: o.editorGitPackages }).filter(([, v]) => v !== undefined && v !== false));
+    // w6287: the agents the new daemon adopts keep the environment their host started with.
+    const lockNote = o.sharedLock !== undefined ? ` ${SHARED_LOCK_DELAY_NOTE}` : '';
     const viaLink = this.d.linkUpdate?.(m.id, flags);
     if (viaLink) {
       const named = Object.entries(flags).map(([k, v]) => `${k} ${v}`).join(', ');
@@ -1084,19 +1132,19 @@ export class OpsWorker {
         (r) => this.d.tellOrchestrator(person, linkUpdateMessage(m.id, id, r)),
         (e) => this.d.tellOrchestrator(person, `[machine update for ${id}] ${m.id}'s update over its daemon's link did not run: ${(e as Error).message}. Nothing was changed unless the line says it was; ask again once that is fixed (a daemon offline is updated when it is back, by the next machine_update).`),
       );
-      return `Updating ${m.id}'s worker install over its daemon's own link (w1596; no ssh, no worker job)${named ? ` with ${named}` : ' with no setting changed'}. The portal sends its update job's report to you as a [machine update] message when it ends (a few minutes; the new daemon takes the agents back, and a daemon that does not come back is put back by the job itself). It does not close ${id}: tell ${person.displayName} what it says, and close the request with update_work once it is done.${recorded}`;
+      return `Updating ${m.id}'s worker install over its daemon's own link (w1596; no ssh, no worker job)${named ? ` with ${named}` : ' with no setting changed'}. The portal sends its update job's report to you as a [machine update] message when it ends (a few minutes; the new daemon takes the agents back, and a daemon that does not come back is put back by the job itself). It does not close ${id}: tell ${person.displayName} what it says, and close the request with update_work once it is done.${lockNote}${recorded}`;
     }
     // A connected daemon is never sent to ssh (w1918: LothLaptop joined without it; port 22 timed out and nothing said why).
     const why = this.d.linkProblem?.(m.id);
     if (why) throw new Error(`machine: ${why}. Nothing was run`);
     if (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root)) throw new Error(`machine: ${m.id}'s ssh target or root folder has characters this job will not pass to a shell`);
-    const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence, o.workerCaps, o.transcriptLock, o.storeLock, o.editorTmpdir, o.pathFence, o.mediumAgentFolders, o.daemonTmpdir).join(' ');
+    const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence, o.workerCaps, o.transcriptLock, o.storeLock, o.editorTmpdir, o.pathFence, o.mediumAgentFolders, o.daemonTmpdir, o.toolsDiskLock, o.winCiFirst, o.sharedLock, o.runnerPriority, o.hostRestage, o.longRuns, o.liveRunGuard, o.editorGitPackages).join(' ');
     const commit = (this.d.portalCommit ?? portalCommit)();
     if (!commit) throw new Error('machine: the portal does not know its own full commit (git rev-parse HEAD in its release), so there is no verified commit to install; nothing was run');
     const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, commit, extra)}'`;
     const what = extra ? `with these settings changed: ${extra}` : 'with no setting changed';
     const text = `[machine update for ${id}, approved by ${person.displayName} through that request] Update ${m.id}'s worker install ${what}. Run exactly this, once, and nothing else on the machine (docs/worker-install.md, "Updating"; it asks nothing, keeps every other setting, the machine's own credential and the PATH, restarts the daemon; never issue a credential for it):\n\n${command}\n\nThen check with list_machines that ${m.id} is online again${extra ? ' and shows the new limits' : ''}, and report what the update printed (the \`~ key: before -> after\` lines) and what the portal sees.${dev.moveToDevDrive ? ` This one moves the sandboxes onto a Dev Drive (docs/worker-install.md, "The Dev Drive"): it refuses, naming them, while an agent is in a sandbox or a Unity editor runs from one, and then nothing has changed: report which and stop. When it can go ahead it takes an hour or more (it saves each sandbox's work on its branch first, moves the Library seed, and re-creates each sandbox): run it in the background and read its output until it ends, never twice at once, and never interrupt it; if it stops half way, run the same command again (it picks up where it stopped). Report the free space on the root's drive before and after (\`Get-PSDrive <letter>\` on the machine) and the sandboxes it moved.` : dev.devDrive ? ' This one also makes the Dev Drive (docs/worker-install.md, "The Dev Drive") but moves no sandbox; report the letter it chose and the size it printed.' : ''}`;
-    return `${this.send(caller, text, false, [id], true)}${recorded}`;
+    return `${this.send(caller, text, false, [id], true)}${lockNote}${recorded}`;
   }
 
   /**

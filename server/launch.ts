@@ -239,14 +239,14 @@ export const CATALOG = {
     timed: z.boolean().optional().describe('A leg takes timing measurements (exclusive bench tickets): no leg goes on a computer that takes no timed runs (m5).'),
     steam: z.string().max(300).optional().describe('Why the legs need Steam (a lobby, a Steam host or join): legs then go only on computers signed in to Steam, each on a different account. Default: read from what and brief. "none": they need none.'),
     menus: z.string().max(300).optional().describe('What its legs click in the game\'s menus (a menu, a dialog; a Steam pair always does): legs then go only on computers whose screen is unlocked. Default: read from what and brief. "none": they click none.'),
-    legacy_data: z.string().max(300).optional().describe('w5965: why the player its legs run predates w5297 (a pre-1.0 or 0.50 build, which never reads FF_GAME_DATA_DIR and writes the owner\'s own data folder): legs then go only on Windows computers whose sandbox agents were measured at Medium integrity (or a Mac whose fence is off; w6003), and when too few fit nothing is filed; never Linux. Default: read from what and brief (pre-1.0, 0.50.x). "none": it does not.'),
+    legacy_data: z.string().max(300).optional().describe('w5965: why the player its legs run predates w5297 (a pre-1.0 or 0.50 build, which never reads FF_GAME_DATA_DIR and writes the owner\'s own data folder): legs then go only on Windows computers whose sandbox agents were measured at Medium integrity (or a Mac whose fence is off; w6003), and when too few fit nothing is filed; never Linux. Default: read from what and brief (pre-1.0, 0.50.x). w6189: either way, FF Factory reads GameDataPaths.cs at commit (or the published player\'s commit); one that reads FF_GAME_DATA_DIR (game PR #4357\'s backport on pre-1.0) is no such player and its legs go anywhere, Low-integrity Windows included; give commit, since without one, or for a commit it cannot check, it stays refused. w6235: legacy_data that names another player (another sha, or a 0.50.x.y build such as a Steam one) keeps the mark, since only commit is read. "none": it does not.'),
     split: z.string().max(300).optional().describe('w4468: why its peers are spread over its computers, leg 1 the host and the others its clients (a pair lab such as lab.pair-m5-beast.json, the pair relay): its host leg starts no client, so a Mac may host it. Default: read from its words. "none" clears it on an open run.'),
     request: z.string().max(16).optional().describe('The request ("w665") it is for, when you serve several; default: the one you are on.'),
     retry: z.boolean().optional().describe('w2041: your open pair run is running but cannot deliver (a leg is stuck): cancel it and file a fresh one. A run one of whose legs already reported, or whose computer is offline, is retried without it.'),
     avoid: z.array(z.string().max(40)).max(6).optional().describe('w2041: computers (ids such as lothlaptop) no leg may go on, where you saw a leg fail for a machine reason (Tailscale stuck, offline, a broken player).'),
     pr: z.string().max(200).optional().describe('w2057: the pull request the legs check ("#2340", "Final-Factory/FinalFactory#2340" or its link). Default: the one what or brief names, else the one open pull request of your request. An open pair run of it is joined, not run twice.'),
     player: z.string().max(20).optional().describe("w4613: the attachment id publish_attachment answered for your built player of the head commit (publish_attachment player: <commit>). A leg on a computer of the same OS that lacks it fetches it into its own player cache instead of building (a Windows build took 229 s; its pack is about 750 MB); a leg on another OS builds as before. Without commit, the player's commit is the run's."),
-    commit: z.string().max(40).optional().describe('w2057: the head commit the legs run (git rev-parse HEAD). A pair run of the same pull request that finished on it answers with its result, and nothing is filed. w4601: a leg goes first on a computer whose player cache already holds a player of it, and is told its path, so pass it whenever you know it. w4925: a run whose commit CI fails to compile (error CS) ends with those errors before any leg builds or runs a player.'),
+    commit: z.string().max(40).optional().describe('w2057: the head commit the legs run (git rev-parse HEAD). A pair run of the same pull request that finished on it answers with its result, and nothing is filed. w4601: a leg goes first on a computer whose player cache already holds a player of it, and is told its path, so pass it whenever you know it. w4925: a run whose commit CI fails to compile (error CS) ends with those errors before any leg builds or runs a player. w6206: a sha the game repo does not have is refused, naming the real commit it looks like.'),
   },
   /** w5929: a clean-up worker asks its own machine's daemon for one clean-up pass now (Agents.workerCleanup). */
   machine_cleanup: {
@@ -646,7 +646,7 @@ export function standingGitEnv(prior: Record<string, string | undefined>, platfo
  * credentials for spec.login); `editorRunning`, for a machine sandbox, says whether its editor is up (raw branch switches are
  * refused then).
  */
-export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogTool, ToolHandler>>, processEnv: NodeJS.ProcessEnv = process.env, editorRunning?: () => boolean): Options {
+export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogTool, ToolHandler>>, processEnv: NodeJS.ProcessEnv = process.env, editorRunning?: () => boolean, junctionRmLog?: (line: string) => void): Options {
   // w5305: the worker root's own Claude Code folder once its plugins are in, else the legacy ~/.claude (server/claudeHome.ts).
   // w5543: a launch that is not a sandbox's runs at Medium, outside every worker fence: the Medium agents' folder instead.
   const baseEnv = agentClaudeEnv(spec.login ? usageEnv(processEnv) : processEnv, spec.env, undefined, !spec.sandbox);
@@ -682,6 +682,8 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       mainClone: g.mainClone,
       ...(g.privacy ? { privacy: privacyContext(g, agentEnv) } : {}),
       editorRunning,
+      // w6266: the junction rm warning's line goes to a log that outlasts the host (the 'junctionRm' signal), not host.log.
+      ...(junctionRmLog ? { log: junctionRmLog } : {}),
       // w4136: a rerun of a job whose runner's machine dropped from the portal at the job's end passes (server/rerunGuard.ts).
       ...(handlers.portal_logs ? { machineDrops: portalDropReader(handlers.portal_logs) } : {}),
       // The shell's own variables, so `cd $TMPDIR/ffbox && git push origin HEAD:master` is read where it goes (w1132).

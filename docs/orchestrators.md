@@ -1124,6 +1124,14 @@ without one means it is off or failing, worth a person's look.
     filed, the dispatcher is told to file it, once per request (w4225: w4207 sat Stalled 2 h on "ready for the pair run");
     a "wNNN: ready for <leg>, needs a non-<computer> computer" line from a worker with no check-in queues that leg on the
     other game computers (`Orchestrators.queueReadyLeg`), so the request reads Queued, not Stalled (w4225);
+    a `commit` that the game repo does not have is refused before anything is filed or started (w6206: w6187's run was filed
+    with a mistyped full sha, `20786882d8bd…`, whose first 10 characters matched PR #4382's real head `20786882d8c3…`, and
+    only its leg's own `gh pr view` caught it). `request_pair` and `start_agent` ask GitHub for the commit
+    (`server/gameDataDir.ts` `gameCommitAt`, the read the w6189 data-folder check uses). An unknown sha is refused with a
+    message that names it and, when its first 10 (then 7) characters name a real commit, that commit and the branches it
+    heads. A real full or short sha passes. When GitHub cannot be read, the run is placed and the reply carries a WARNING that
+    says the commit was not checked and why. A published player's own commit is not asked. The test runner turns the check
+    off (`FF_COMMIT_CHECK=off`, `scripts/testEnv.ts`); its tests replace `Agents.gameCommitAt`;
   - a worker that waits on the orchestrator for its own work stays Stalled and the line says so, adding "that is its own
     work" for a pair or two-machine check, a build, a test run or its CI (w1685). Such a worker is told at its turn's end,
     once per request (`Agents.ownWorkNudge`), and every worker's prompt says these are its own work.
@@ -3989,6 +3997,13 @@ alone (`personMessageView`, w3297). The orchestrator prompt's "How to work" says
 - The Dispatcher page has two tabs. Requests lists everyone's open requests, questions first, with the stalled and the closed ones behind
   links; a row opens to its brief, workers, pull requests, overlaps and log. Conversation is the dispatcher's log, read only. Where the
   composer would be, a line says nobody writes to the dispatcher and links "Talk to your orchestrator" (your own chat).
+- The ids an orchestrator names in its replies are links (w6216): a worker's session id (`b6c73b2b`, or the whole id),
+  a sandbox (`beast/agent4`), a machine (`BEAST`) and a request (`w6215`). A click opens its page in the right panel with
+  the chat beside it (a phone opens the page alone; Back returns to the chat). The renderer links them, not the
+  orchestrators, so past messages and every instance link with no brief change; only ids the page knows link, and an
+  8-character prefix two sessions share, an id in code, a link or a path stays text. Matcher: `shared/idLinks.ts`
+  (tests `server/idLinks.test.ts`); rendering: `web/src/components/IdLink.tsx`, switched on by `OrchestratorView.tsx`
+  for the orchestrators' chats only (e2e `e2e/idLinks.spec.ts`).
 - Decisions arrive in your chat as one-line notices ("Merged into w15: “Belts drop items…”") that open the request.
 - A message from another person arrives in your chat as an amber notice, open, with their name and text ("Lothsahn:
   Could you run the firewall script on BEAST?"); Open goes to their chat. Until you open your chat, the sidebar's

@@ -41,7 +41,8 @@ test('tempSizeNote: the paragraph names the size, the threshold of its step and 
   assert.equal(
     one.note,
     'your temp folder ($TMPDIR) holds 43.9 GB, over 35 GB (w3686): biggest ff-game 36.5 GB, cargo-target 7.3 GB, notes 0.1 GB. ' +
-      'Before you go on, delete what you no longer need, each with its path written out: rm -rf "$TMPDIR/<name>" (a delete under $TMPDIR asks nobody). ' +
+      'Before you go on, delete what you no longer need, each with its path written out: rm -rf "$TMPDIR/<name>", on Windows cmd //c "rd /s /q $(cygpath -w "$TMPDIR/<name>")" ' +
+      "(Git Bash's rm -rf goes through a junction there) (a delete under $TMPDIR asks nobody). " +
       'Keep a clone that holds unpushed work; a Unity Library or a cargo target you still build in may stay.',
   );
   assert.ok(!one.note.includes('\n'), 'one paragraph');

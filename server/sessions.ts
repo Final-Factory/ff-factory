@@ -1795,6 +1795,8 @@ export class SessionManager {
   private queue: QueuedSend[] = [];
   private readonly queueFile?: string;
   private drainTimer?: NodeJS.Timeout;
+  /** Every session was stopped with no filter: the manager is done and drains nothing more (stopAll). */
+  private done = false;
   /**
    * A machine session's place is full of mid-turn agents (its sandbox, or the machine's agent cap): why, or undefined.
    * Set by MachineManager. The portal runs no workers of its own (w510), so only a machine's limits apply.
@@ -1852,6 +1854,8 @@ export class SessionManager {
    * when a pull request of its request merged during its session and the message went to a fresh session in the same
    * sandbox, so it is not delivered here. Checked last, once nothing holds the message. Set by Agents.
    */
+  /** w6381: false when freshStart would answer false and change nothing (read-only; drainOnce asks it inside its memo). */
+  freshStartMaybe?: (s: SessionHandle, m: { images?: ImageInput[] }) => boolean;
   freshStart?: (s: SessionHandle, m: { text: string; from: 'human' | 'orchestrator' | 'system'; images?: ImageInput[]; requestedBy?: Requester; attachments?: DeliveredAttachment[] }) => boolean;
   /**
    * Why a worker's live process must restart on the FF Factory code its machine runs now before its next turn (w1166: an
@@ -2184,6 +2188,7 @@ export class SessionManager {
 
   /** Deliver the queued messages that may go now, in order. Returns how many went. */
   drain(now = Date.now()): number {
+    if (this.done) return 0;
     // w3843: a drain asked during one (a placement that failed at once drains from its finally) runs after it. Run inside,
     // it walked the whole queue again (once per sandbox tried) and the outer pass went on over a queue it had changed.
     if (this.draining) {
@@ -2213,7 +2218,17 @@ export class SessionManager {
   private drainOnce(now: number): number {
     let sent = 0;
     // w3843: what changes placement (a send, a drop, a fresh start) runs without the drain's memo of places and claims.
-    const free = <T>(fn: () => T): T => (this.placementFree ? this.placementFree(fn) : fn());
+    // w6381: one inside another (deliver's drop) runs as it is: the outer one empties the memo as it ends, after both.
+    let freeing = false;
+    const free = <T>(fn: () => T): T => {
+      if (freeing || !this.placementFree) return fn();
+      freeing = true;
+      try {
+        return this.placementFree(fn);
+      } finally {
+        freeing = false;
+      }
+    };
     // A session whose first waiting message cannot go keeps the rest waiting too, so its messages go in order (w496).
     const held = new Set<string>();
     for (const q of [...this.queue]) {
@@ -2289,7 +2304,10 @@ export class SessionManager {
       const refused = q.capRefusedAt && now - (Date.parse(q.capRefusedAt) || 0) < CAP_REFUSED_HOLD_MS ? q.why : undefined;
       let hold = onHold ?? (restart || this.fullFor(s) || refused);
       // w1532: a paused machine's worker hands its requests back instead of waiting for the unpause; the message goes with them.
-      if (onHold && free(() => this.pauseHeld?.(s, q.text))) {
+      // w6381: the check reads only (MachinePause.heldResume) and runs inside the memo; only the drop empties it. Run in free(),
+      // each message held on a computer (beast's daemon dropping) made the next one build claims and places again (1.1-1.7 s
+      // under drainOnce at 13:52Z and 13:59Z, 2026-11-27, each right after "machine beast disconnected").
+      if (onHold && this.pauseHeld?.(s, q.text)) {
         drop();
         continue;
       }
@@ -2321,7 +2339,9 @@ export class SessionManager {
         continue;
       }
       // w2043: a pilot worker whose pull request merged goes on in a fresh session; the message goes there.
-      if (free(() => this.freshStart?.(s, q))) {
+      // w6381: freshStart's own check first, inside the memo: a free() wipes it, and for each message delivered (most, none
+      // due) the next one's fullFor and roomMove built claims and places again (1.4 s under drainOnce at 12:01Z, 2026-11-27).
+      if ((this.freshStartMaybe?.(s, q) ?? true) && free(() => this.freshStart?.(s, q))) {
         drop();
         continue;
       }
@@ -2491,8 +2511,15 @@ export class SessionManager {
    * The server is stopping: every process goes (all of them, or those `which` picks), but what each was doing is kept
    * for the next server.
    */
-  stopAll(which: (s: SessionHandle) => boolean = () => true) {
-    for (const s of this.sessions.values()) if (which(s)) s.stop(false);
+  /**
+   * Stop the sessions `which` picks. With none named, every session, and the manager is done: its half-minute drain stops
+   * too (w5915: a test's manager drained on after its test ended, into the folder that test had removed, ENOENT).
+   */
+  stopAll(which?: (s: SessionHandle) => boolean) {
+    for (const s of this.sessions.values()) if (!which || which(s)) s.stop(false);
+    if (which) return;
+    this.done = true;
+    clearInterval(this.drainTimer);
   }
 
   /** Save a session's info after a field was set on it from outside (w1749: its owed compaction). */

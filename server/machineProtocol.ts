@@ -136,12 +136,28 @@ export interface LinkUpdateFlags {
   storeLock?: 'off' | 'warn' | 'on';
   /** The editor temp folder on or off (w5833), macOS and Linux only: daemon.json `editorTmpdir`; unset: carried. A daemon that predates it ignores it. */
   editorTmpdir?: 'on' | 'off';
-  /** The path fence off or warn (w5863), macOS and Linux only: daemon.json `pathFence`; unset: carried. A daemon that predates it ignores it. */
-  pathFence?: 'off' | 'warn';
+  /** The path fence on, warn or off (w5863, w5899), macOS and Linux only: daemon.json `pathFence`; unset: carried. A daemon that predates it ignores it. */
+  pathFence?: 'off' | 'warn' | 'on';
   /** Medium agents' own temp root and cargo home, warn or on (w5862, w5869; docs/worker-root.md), any OS: daemon.json `mediumAgentFolders`; unset: carried. A daemon that predates it ignores it. */
   mediumAgentFolders?: 'warn' | 'on';
   /** The daemon's own temp folder on or off (w6000), any OS: daemon.json `daemonTmpdir`; unset: carried. A daemon that predates it ignores it. */
   daemonTmpdir?: 'on' | 'off';
+  /** A virtual disk in a Low tools child, warn or on (w5959, machine/lowIntegrity.ts toolsDiskPlan), Windows only: daemon.json `toolsDiskLock`; unset: carried. A daemon that predates it ignores it. */
+  toolsDiskLock?: 'warn' | 'on';
+  /** CI jobs first on a Windows CI-first machine, off, warn or enforce (w6110, machine/ciFirstWin.ts), Windows only: daemon.json `winCiFirst`; unset: carried. A daemon that predates it ignores it. */
+  winCiFirst?: 'off' | 'warn' | 'enforce';
+  /** The shared-cache lock's mode (w5615, docs/worker-root.md "Per-slot caches and the players broker"), any OS: daemon.json `sharedLock`; unset: carried. A daemon that predates it ignores it. */
+  sharedLock?: 'off' | 'warn' | 'on';
+  /** The ffu CI runners' scheduled tasks and listeners at Normal priority, off, warn or enforce (w6163, machine/runnerPriority.ts), Windows only: daemon.json `runnerPriority`; unset: carried. A daemon that predates it ignores it. */
+  runnerPriority?: 'off' | 'warn' | 'enforce';
+  /** What an idle agent adopted across a sharedLock switch gets, warn or on (w6305, w6287), any OS: daemon.json `hostRestage`; unset: carried. A daemon that predates it ignores it. */
+  hostRestage?: 'warn' | 'on';
+  /** The long-run route (w6367, machine/longRuns.ts), off, warn or on, any OS: daemon.json `longRuns`; unset: carried. A daemon that predates it ignores it. */
+  longRuns?: 'off' | 'warn' | 'on';
+  /** w6378: daemon.json `liveRunGuard`, off or warn (the default): whether a sandbox trim, release or delete logs a WARNING when a run of its worker still lives; any OS; unset: carried. A daemon that predates it ignores it. */
+  liveRunGuard?: 'off' | 'warn';
+  /** w6412: daemon.json editorGitPackages: how a sandbox editor gets a git package its Packages/manifest.json names that Library/PackageCache lacks (machine/gitPackages.ts). warn (the default) only names the missing packages in the start note, unity status and the Package Manager dialog notice; on also fetches each into a mirror under <root>/cache-medium/git-packages with the daemon's own git and credential, and gives a Windows Low-integrity editor the workers' Git on PATH and a url.insteadOf to that mirror, so its Package Manager fetches without a credential; off looks at nothing (the way back). Takes effect at the editor's next start. Any OS; unset: carried. A daemon that predates it ignores it. */
+  editorGitPackages?: 'off' | 'warn' | 'on';
 }
 
 /**
@@ -182,8 +198,11 @@ export type DaemonSandbox = Omit<MachineSandbox, 'purpose' | 'sessionIds'>;
  * warn?, kernel? } (machine/workerCaps.ts); `warn`: warn mode, the cap would have been hit and nothing was ended; `kernel`:
  * Linux, the kernel acted and the host ended nothing. An older portal ignores it, and one that predates the two flags words a
  * warn hit as an enforced one (its ledger line says "ended 0").
+ * junctionRm (w6266, no bump): a Windows worker's guard warned of an `rm -r` over a folder holding a junction, arg { line }
+ * (server/junctionRmWarn.ts). The daemon writes the line to daemon.log and the portal to its own log, both of which outlast
+ * the host (whose host.log goes with its folder). An older daemon or portal drops it.
  */
-export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize' | 'workerCap';
+export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize' | 'workerCap' | 'junctionRm';
 
 /** The refusal of unity and switch on a machine's main clone, by the portal and by the daemon (w536). */
 export const MAIN_CLONE_NO_AGENTS = "a machine's main clone takes no agents (w536): give a sandbox";

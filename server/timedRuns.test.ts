@@ -10,7 +10,8 @@ import { AttachmentStore, machineAttachment, machineUploadHttp } from './attachm
 import { agentCap, poolSettingsOf } from './machines.ts';
 import { TimedRuns, variantProblem } from './timedRuns.ts';
 import { GROUP_MAX_BYTES, legArgs, legOrder, legTimeoutS, perfSummaryOf, PIECE_MAX_BYTES, planPieces, runBoundMinutes, runTurns, SMALL_FILE_BYTES, timedArgsProblem, timedSettingsOf, TIMED_DEFAULTS, TURN_PLAN_MS, type TimedRunOrder, type TimedSettings } from '../shared/timedRun.ts';
-import { foreignTicket, releaseTicket, takeTicket, TimedRunner, writeTarGz } from '../machine/timedRunner.ts';
+import { foreignTicket, releaseLeases, releaseTicket, takeTicket, TimedRunner, writeTarGz } from '../machine/timedRunner.ts';
+import { TIMED_SLOTS } from '../shared/timedRun.ts';
 import { readBenchLock } from '../machine/benchLock.ts';
 import { insideRoots, scanBuild, timedRunFromMachine } from '../machine/timedRunPack.ts';
 import type { Machine } from '../shared/types.ts';
@@ -219,6 +220,7 @@ test('end to end: two builds made on one computer are timed on a play-only one u
     },
     deliver: async (session, text, files) => void delivered.push({ session, text, files }),
   });
+  const marks: { folders: string[]; ended: boolean }[] = [];
   const deskDeps: ConstructorParameters<typeof TimedRunner>[0] = {
     root: deskRoot,
     portalUrl,
@@ -226,6 +228,12 @@ test('end to end: two builds made on one computer are timed on a play-only one u
     send: (m) => setImmediate(() => tr.onReport('desk', m)),
     log: () => {},
     personBusy: () => undefined,
+    // w6314 (review w6316 finding 2): its layouts in players/<slot> are marked as the daemon's writes, and each mark ends.
+    daemonWrites: (folders) => {
+      const m = { folders, ended: false };
+      marks.push(m);
+      return () => void (m.ended = true);
+    },
     savesDir: path.join(d, 'saves'),
     pollMs: 5,
     spawnPlayer: (_exe, args, cwd) => spawn(process.execPath, [fake, ...args], { cwd, stdio: 'ignore', env: { ...process.env, FAKE_LOCK: path.join(deskRoot, 'daemon', 'bench.lock') } }),
@@ -328,6 +336,8 @@ test('end to end: two builds made on one computer are timed on a play-only one u
   assert.match(tar3, /turn 4: holds the exclusive bench ticket t\d{8}: 1 legs left/);
   assert.equal([...tar3.matchAll(/lock: timed run tr_[0-9a-f]{10}: /g)].length >= 4, true, 'every leg still played under a ticket');
   assert.equal(readBenchLock(deskRoot), undefined, 'the last turn gave its ticket back');
+  assert.ok(marks.some((m) => m.folders.includes(path.join(deskRoot, 'players', TIMED_SLOTS[0]))), JSON.stringify(marks));
+  assert.ok(marks.every((m) => m.ended && m.folders.every((f) => f.startsWith(path.join(deskRoot, 'players')))), JSON.stringify(marks));
 
   // A build outside the worker's folders is refused before anything is read.
   await assert.rejects(call([{ name: 'x', path: path.join(d, 'desk') }]), /outside your sandbox/);
@@ -398,4 +408,22 @@ test("w5973: a leg past its bound is 'timeout' even when the player's exit comes
   const err = legExit(c4 as never, 60_000, async () => assert.fail('stopped'));
   c4.emit('error', new Error('ENOENT'));
   assert.equal(await err, 'error: ENOENT');
+});
+
+// w6322 finding A: the lease release's daemon-write mark ends even when an rm throws.
+test('releaseLeases ends its daemon-write mark when removing a lease throws', () => {
+  const marks: { folders: string[]; ended: boolean }[] = [];
+  const daemonWrites = (folders: string[]) => {
+    const m = { folders, ended: false };
+    marks.push(m);
+    return () => void (m.ended = true);
+  };
+  assert.throws(() => releaseLeases(['a.lease', 'b.lease'], ['slotA', 'slotB'], daemonWrites, () => {
+    throw new Error('EBUSY');
+  }), /EBUSY/);
+  assert.deepEqual(marks, [{ folders: ['slotA', 'slotB'], ended: true }]);
+  const gone: string[] = [];
+  releaseLeases(['c.lease'], ['slotC'], daemonWrites, (f) => gone.push(f));
+  assert.deepEqual(gone, ['c.lease']);
+  assert.equal(marks[1].ended, true);
 });

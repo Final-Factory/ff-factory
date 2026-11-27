@@ -11,6 +11,8 @@ import type { LowEditorFence } from '../machine/unity.ts';
  * what it answers, never the path it was handed. Every agent's spawn takes its spec from runSpec (daemon.ts: the hosted
  * spec and buildOptions), and every sandbox editor's start asks the pool's fence getter, `() => this.editorFence()`
  * (unity.ts `this.fence?.()` in start), so these two are the points before each spawn.
+ * The daemon reaches the check through lowCheck, which needs a worker root (`cfg.root`, w6314's shared-writes mark), so it
+ * is given one.
  */
 
 const PROBES: Probes = {
@@ -29,7 +31,7 @@ type Inside = {
 
 function daemon(t: { after: (f: () => void) => void }, answer: (copy: string) => string | undefined) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w6085-'));
-  const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'mx', token: 't', repoPath: root, appDir: root, tempDir: path.join(root, 'tmp'), maxEventsFile: null }, () => {
+  const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'mx', token: 't', repoPath: root, appDir: root, root, tempDir: path.join(root, 'tmp'), maxEventsFile: null }, () => {
     throw new Error('no sessions here');
   }, PROBES) as unknown as Inside;
   t.after(() => {

@@ -94,7 +94,8 @@ installer's process only as `FF_INSTALL_GH_TOKEN` for the clone, written nowhere
 and its clone failed with "could not read Username"; without either, the clone's error says so; a play-only install
 (`--play-only`) clones nothing); the daemon's code from the installer's checkout, `npm ci`; `daemon.json`; the task or
 LaunchAgent, started; the firewall rules for `players\slot1-0..slotN-1\player\finalfactory.exe` and the Unity editors, plus the
-slot config (one UAC prompt); and it waits until the portal sees the machine online with its root. Re-running it
+slot config (one UAC prompt; light agent folders, `players\agentN-*`, get no rule, and on Windows the players broker refuses
+them up front instead: docs/worker-root.md 4.4, w6348); and it waits until the portal sees the machine online with its root. Re-running it
 updates the code and keeps everything else (that is also how a root install is **updated**, see "Updating" below: the portal never
 redeploys one over ssh, it says "re-run its installer" when the daemon is outdated).
 

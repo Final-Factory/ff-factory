@@ -376,7 +376,7 @@ test('public repos: the real lookup lists the unpushed commits\' emails', async 
   git(w, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
   git(w, 'fetch', '-q', 'origin');
   git(w, '-c', 'user.name=b', '-c', 'user.email=b@example.com', 'commit', '-q', '--allow-empty', '-m', 'not yet');
-  assert.deepEqual(gitPushedEmails(w, 'origin', ['HEAD']), ['b@example.com']);
+  assert.deepEqual(await gitPushedEmails(w, 'origin', ['HEAD']), ['b@example.com']);
 });
 
 test('w1166: a PR into the retired develop is not merged or opened through gh pr merge or the API, whatever the prompt said', async () => {

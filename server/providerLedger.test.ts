@@ -95,6 +95,8 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
     server.close();
     intake.close();
     o.close();
+    // w5915: Agents' timers too, before the folder goes (a release pass wrote into a removed transcript on BEAST, ENOENT).
+    agents.close();
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 60));
     store.flush();

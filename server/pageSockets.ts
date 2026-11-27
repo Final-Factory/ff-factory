@@ -8,7 +8,7 @@ import { tailnetAddress } from './remoteChat.ts';
 import { clientAddress, directAddress, isLoopback } from './clientAddress.ts';
 
 /** Who ended a socket: the page (a close frame), the server (its ping went unanswered), or nobody (1006: the network). */
-/** The most a page may send in one message (w5527: ws's default is 100 MiB). The page sends none on /ws; ws closes the socket with 1009 above this, and the page reconnects with its backoff. */
+/** The most a page may send in one message (w5527: ws's default is 100 MiB). The page sends only its ready line on /ws (w6336); ws closes the socket with 1009 above this, and the page reconnects with its backoff. */
 export const PAGE_MAX_PAYLOAD = 1024 * 1024;
 
 export type ClosedBy = 'page' | 'ping-timeout' | 'network';
@@ -23,6 +23,55 @@ interface Open {
   via: Via;
   at: number;
   serverClose?: ClosedBy;
+  /** What the server spent on the first state (w6336: the ready line sets the page's phases beside it). */
+  state?: FirstState;
+  /** The page has said its first state is on screen (once per socket). */
+  ready?: boolean;
+}
+
+/** Building the first state, in parts: appState, JSON.stringify, and the whole. */
+/** `kept`: the whole parts the page kept its own of; `work`: requests sent of all (w6336, shared/pageParts.ts). */
+export interface FirstState { ms: number; bytes: number; sessions?: number; delta?: boolean; buildMs?: number; jsonMs?: number; kept?: string[]; checked?: number; work?: { sent: number; of: number }; phases?: readonly (readonly [string, number])[] }
+
+/**
+ * What a page says once its first state is on screen (w6336, web/src/api.ts): each phase of its connect in ms, as the
+ * page measured it. `load`: since the page itself began loading (first connect only: HTML, scripts and all).
+ */
+export interface PageReady { open: number; state: number; parse: number; render: number; load?: number }
+
+/** ", kept reports,machines, 3 of 100 requests changed": what a reconnect did not resend. */
+/**
+ * w6382: where a state's build went, its slowest phases first (server/index.ts appStateIn): " [sessions 310, work 120]".
+ * A phase under PHASE_LOG_MIN_MS is left out, so a fast build's line stays short.
+ */
+export const PHASE_LOG_MIN_MS = 5;
+function phasesOf(s: FirstState): string {
+  const shown = [...(s.phases ?? [])].filter(([, ms]) => ms >= PHASE_LOG_MIN_MS).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  return shown.length ? ` [${shown.map(([k, ms]) => `${k} ${Math.round(ms)}`).join(', ')}]` : '';
+}
+
+function keptOf(s: FirstState): string {
+  const parts = s.kept?.length ? `, kept ${s.kept.join(',')}` : '';
+  return `${parts}${s.work ? `, ${s.work.sent} of ${s.work.of} requests changed` : ''}`;
+}
+
+const PHASE_MAX_MS = 3_600_000;
+/** A page's ready message, or undefined: only these numbers, each a finite ms within an hour. */
+export function readyOf(raw: unknown): PageReady | undefined {
+  if (typeof raw !== 'string' || raw.length > 512) return undefined;
+  let m: unknown;
+  try {
+    m = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!m || typeof m !== 'object' || (m as { type?: unknown }).type !== 'ready') return undefined;
+  const o = m as Record<string, unknown>;
+  const ms = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= PHASE_MAX_MS ? Math.round(v) : undefined);
+  const open = ms(o.open), state = ms(o.state), parse = ms(o.parse), render = ms(o.render);
+  if (open === undefined || state === undefined || parse === undefined || render === undefined) return undefined;
+  const load = ms(o.load);
+  return { open, state, parse, render, ...(load !== undefined ? { load } : {}) };
 }
 
 /** A drop is a socket ended by the server's ping timeout or the network, or one the page gave up on as silent ('stale'). */
@@ -80,12 +129,12 @@ export class PageSockets<S extends object> {
   }
 
   /** `stateMs`/`stateBytes`: what building and sending the page its first full state took (the page's open waits on it). */
-  opened(ws: S, user: string, req: Pick<http.IncomingMessage, 'headers' | 'socket' | 'url'>, state?: { ms: number; bytes: number; sessions?: number; delta?: boolean }) {
+  opened(ws: S, user: string, req: Pick<http.IncomingMessage, 'headers' | 'socket' | 'url'>, state?: FirstState) {
     const { addr, via } = viaOf(req);
-    this.open.set(ws, { user, addr, via, at: this.now() });
+    this.open.set(ws, { user, addr, via, at: this.now(), state });
     const why = reconnectOf(req.url);
     if (/^why=stale\b/.test(why)) this.countDrop(user);
-    this.log(`page socket open: ${user} from ${addr} via ${via}, ${why}${state ? `, state ${Math.round(state.ms)}ms ${Math.round(state.bytes / 1024)}KB${state.sessions !== undefined ? ` ${state.sessions} sessions${state.delta ? ' changed' : ''}` : ''}` : ''} (${this.open.size} open)`);
+    this.log(`page socket open: ${user} from ${addr} via ${via}, ${why}${state ? `, state ${Math.round(state.ms)}ms${state.buildMs !== undefined && state.jsonMs !== undefined ? ` (build ${Math.round(state.buildMs)}ms${phasesOf(state)} json ${Math.round(state.jsonMs)}ms)` : ''} ${Math.round(state.bytes / 1024)}KB${state.sessions !== undefined ? ` ${state.sessions} sessions${state.delta ? ' changed' : ''}` : ''}${state.checked !== undefined ? ` (${state.checked} checked)` : ''}${keptOf(state)}` : ''} (${this.open.size} open)`);
   }
 
   /**
@@ -95,6 +144,21 @@ export class PageSockets<S extends object> {
   sent(ws: S, ms: number) {
     const o = this.open.get(ws);
     if (o && ms >= 1000) this.log(`page socket first state sent: ${o.user} via ${o.via}, ${Math.round(ms)}ms after the open`);
+  }
+
+  /**
+   * The page's first state is on screen (w6336): one line per connect with every phase, the page's (open: the attempt
+   * began to open; state: open to the whole first state in; parse; render: to the next frame after applying it) and the
+   * server's (build). Once per socket; anything else a page sends is ignored.
+   */
+  ready(ws: S, raw: unknown) {
+    const o = this.open.get(ws);
+    const r = o && !o.ready ? readyOf(raw) : undefined;
+    if (!o || !r) return;
+    o.ready = true;
+    const total = r.open + r.state + r.parse + r.render;
+    const server = o.state ? `, server build ${Math.round(o.state.ms)}ms ${Math.round(o.state.bytes / 1024)}KB` : '';
+    this.log(`page socket ready: ${o.user} via ${o.via}, ${total}ms: open ${r.open}ms, first state ${r.state}ms, parse ${r.parse}ms, render ${r.render}ms${server}${r.load !== undefined ? `; ${r.load}ms since the page began loading` : ''}`);
   }
 
   /** The server is about to end this socket itself (call before terminate/close), so its close line says so. */

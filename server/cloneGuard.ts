@@ -41,8 +41,11 @@ export const NIGHTLY_RUN =
 
 export const NIGHTLY_FROM_SANDBOX =
   'Run ffnightly.py from your sandbox\'s checkout, never a copy in $TMPDIR (a copy finds the repo two folders above itself): when the ' +
-  'commit\'s copy lacks a flag you need, write master\'s over it after the build (`git show origin/master:scripts/nightly/ffnightly.py > ' +
-  'scripts/nightly/ffnightly.py`) and put it back with `git checkout -- scripts/nightly/ffnightly.py` when the run is over.';
+  'commit\'s runner lacks a flag you need (a pre-1.0 (0.50) commit\'s does), put master\'s whole runner over it after the build, never ' +
+  'a hand-picked few files, since master\'s imports modules an old line lacks (winstop, reach, ...; w6154): ' +
+  '`git show origin/master:scripts/nightly/use_master_runner.sh > "$TMPDIR/use_master_runner.sh"`, then ' +
+  '`bash "$TMPDIR/use_master_runner.sh" apply` from your sandbox\'s root, and `bash "$TMPDIR/use_master_runner.sh" restore` when the run ' +
+  'is over (it removes the files it added and checks the changed ones out).';
 
 export const PLAYERS_IN_SANDBOX =
   `Build every commit's player in your own sandbox, one commit at a time: check the commit out, ${BUILD_PLAYER_TO_CACHE}, then check out the next. ` +

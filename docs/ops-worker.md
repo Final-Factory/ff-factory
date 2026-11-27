@@ -147,8 +147,10 @@ The VM keeps no git and no GitHub token of its own: its network reaches only Ant
 (`fff-ops@.service` `IPAddressDeny=any`), and a token there would be one more secret in a shell that people's
 orchestrators drive. The route is the machines' own logins, over the ssh the worker already has:
 
-- **Where**: m3 first (its gh login), else beast (Ben's gh login, docs/vault.md section 13); never a machine on hold or
-  one the job rules out. Check first: `ssh m3 'export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; gh auth status 2>&1 | grep -v Token'`
+- **Where**: m3 first (its gh login), else biscuit; never a machine on hold or one the job rules out, and never a
+  Windows PC (beast, lothdesktop). gh on Windows keeps its login in Credential Manager, which an ssh session signed in
+  with a key cannot read: gh then sends no token and says "The token in default is invalid" (HTTP 401) while the login
+  is good (w5546, 2026-11-26; docs/machines.md, "A login GitHub refuses"). Check first: `ssh m3 'export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; gh auth status 2>&1 | grep -v Token'`
   and `gh api repos/OWNER/REPO --jq .permissions`. A Mac's non-interactive ssh shell has no Homebrew on its PATH, hence the
   export.
 - **A branch delete** needs no clone: `gh api repos/OWNER/REPO/branches/BRANCH --jq .commit.sha` (it is there),
@@ -284,6 +286,23 @@ fffctl user delete w1021-test --by lothsahn    # --by: the person whose job this
 - It prints what went: key names and counts, never a key or a password (only their hashes were ever kept). A person runs
   `sudo fffctl user delete ID --by LOGIN` for any login but the last owner and their own.
 
+## Windows machines: PowerShell over ssh and a wedged WSL (w6010)
+
+Learned on BEAST, 2026-11-26:
+
+- `ssh beast 'powershell -NoProfile -Command -' < script.ps1` silently drops a block that spans lines (an `if (...) {`
+  over several lines never runs, and nothing says so). For a script with blocks, scp it into a scratch folder under the
+  worker root (`F:\ffw\...`), run it with `powershell -NoProfile -ExecutionPolicy Bypass -File <path>`, and delete it
+  after.
+- When `wslservice.exe` leaks handles (BEAST had 162k after 12 days, fed by a Codex app that runs `wsl.exe` every
+  30-50 s), `wsl -l -v` and `wsl --shutdown` both hang. Run every `wsl.exe` call through `Start-Process -PassThru` and
+  `WaitForExit(<ms>)`, and kill only that call when it times out. `Restart-Service WSLService -Force` hangs in
+  StopPending as well; `Stop-Process -Id <the wslservice pid> -Force` works, and the service starts again by itself
+  within seconds (handles back to a few hundred).
+- Restarting the service does not give back the kernel's paged pool (it stayed at about 19 GB): only a reboot does, and
+  that is a person's call.
+- The WSL distros and their disk folders, without `wsl.exe`: `HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss`
+  (each key's `DistributionName` and `BasePath`).
 
 ## How it runs
 

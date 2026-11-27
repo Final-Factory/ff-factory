@@ -14,7 +14,7 @@ import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager } from './sessions.ts';
 import { MachineManager } from './machines.ts';
-import { PendingCalls, type UpdateBundle, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
+import { linkControlWaitMs, PendingCalls, type UpdateBundle, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
 import type { FromDaemon, LinkUpdateReport } from './machineProtocol.ts';
 import { Daemon, RECONNECT_MS, REOFFER_MS, type DaemonConfig, type Probes } from '../machine/daemon.ts';
 import { ANSWERS, SelfUpdater, alive, checkPublished, checkoutFromBundle, downloadBundle, fetchError, inFlightRefusal, JOB_LIMIT, jobToEnd, keepRootJson, processCommand, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
@@ -860,13 +860,34 @@ const writeLog = (file: string) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.appendFileSync(file, `${new Date().toISOString()} FF Factory update job 977d56f7-1030-442b-bcad-bd6ac62ab798: update to ff-factory cccccccccccc (w1596).\nRunning the installer...\n`);
 };
-/** A stand-in job process: its command line names linkJob.ts, and it runs until it is stopped. */
-const standIn = (t: { after: (fn: () => unknown) => void }) => {
+/**
+ * A stand-in job process: its command line names linkJob.ts, and it runs until it is stopped. It is up once that command
+ * line reads as its own, not once its pid answers: spawn() can return while the child is still in its exec (libuv waits for
+ * a close-on-exec pipe, and when this process closes its own end last that wait ends at once), and until the kernel has set
+ * the new argv, /proc/<pid>/cmdline reads empty. A daemon look then saw another program, kept that for its 5 min, and the
+ * tick's one warning said so (CI run 45999031753). The read that names linkJob.ts is kept for linuxCommand.
+ */
+const standIn = async (t: { after: (fn: () => unknown) => void }) => {
   const p = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'linkJob.ts'], { stdio: 'ignore' });
   t.after(() => void p.kill('SIGKILL'));
-  return p;
+  for (const end = Date.now() + 20_000; ; await new Promise((r) => setTimeout(r, 25))) {
+    const c = await processCommand(p.pid!);
+    if (c && /linkJob\.ts/.test(c)) {
+      readOnce.set(p.pid!, c);
+      return p;
+    }
+    if (Date.now() > end) throw new Error(`timed out waiting for the stand-in up: pid ${p.pid}, its command line ${JSON.stringify(c)}`);
+  }
 };
-const linuxCommand = (pid: number) => processCommand(pid);
+// The stand-in's real command line, read once per pid: on Windows each read is a PowerShell CIM query (about 0.45 s idle
+// on BEAST), and the daemon's 5 min cache of it lapses about 20 times in a test's watched hours on the fake clock; under
+// a full run's load one of those reads failed (w5915). A failed read is not kept, so the next look reads it again.
+const readOnce = new Map<number, string>();
+const linuxCommand = async (pid: number) => {
+  const c = readOnce.get(pid) ?? (await processCommand(pid));
+  if (c) readOnce.set(pid, c);
+  return c;
+};
 
 test('w5938: a staged job past 10 min is ended by the tick once watched 5 min: failed with the reason in update-job.log and the daemon log, reported, and taken off the machine', async (t) => {
   const x = overdueFixture(t, { phase: 'staged', createdAt: ago(JOB_LIMIT.stagedMs + 60_000) });
@@ -900,8 +921,7 @@ test('w5938: a job whose process is gone is ended only past 45 min and once watc
   await old.u.tick();
   assert.equal(readJson<UpdateJob>(old.f.job)?.phase, 'running', "first look: the job's logon task may resume it");
   // Its logon task takes it over meanwhile (a new pid, its own): the daemon's watch starts again and nothing is ended.
-  const resumed = standIn(t);
-  await until('the stand-in up', () => alive(resumed.pid));
+  const resumed = await standIn(t);
   writeJson(old.f.job, { ...old.job, pid: resumed.pid });
   writeLog(old.f.log);
   await old.watch(JOB_LIMIT.watchMs + 60_000);
@@ -921,8 +941,7 @@ test('w5938: a job whose process is gone is ended only past 45 min and once watc
 });
 
 test('w5938: a live job process past 45 min is stopped and ended only when its log has been quiet 15 min while the daemon watched; one still writing, or frozen by sleep, is never touched', async (t) => {
-  const busy = standIn(t);
-  await until('the stand-in up', () => alive(busy.pid));
+  const busy = await standIn(t);
   const live = overdueFixture(t, { pid: busy.pid, createdAt: ago(3 * 60 * 60_000) }, { command: linuxCommand });
   writeLog(live.f.log);
   for (let i = 0; i < 4; i++) {
@@ -935,8 +954,7 @@ test('w5938: a live job process past 45 min is stopped and ended only when its l
   assert.equal(live.logs.filter((l) => /WARNING job 977d56f7 .* past its 45 min limit; its process is alive and still writing its log/.test(l)).length, 1, live.logs.join('\n'));
 
   // w5983's review, probe A: a job 40 min in wrote its log, then the computer slept 20 min. Waking is no quiet log.
-  const sleeper = standIn(t);
-  await until('the stand-in up', () => alive(sleeper.pid));
+  const sleeper = await standIn(t);
   const slept = overdueFixture(t, { pid: sleeper.pid, createdAt: ago(40 * 60_000) }, { command: linuxCommand });
   writeLog(slept.f.log);
   await slept.u.tick();
@@ -971,16 +989,14 @@ test('w5938: a hung job that ignores TERM gets KILL; one that will not end is le
     await x.watch(JOB_LIMIT.quietMs + 60_000);
   };
   // TERM ignored, KILL ends it.
-  const deaf = standIn(t);
-  await until('the stand-in up', () => alive(deaf.pid));
+  const deaf = await standIn(t);
   const a = overdueFixture(t, { pid: deaf.pid, createdAt: ago(JOB_LIMIT.inFlightMs + 60_000) }, { command: linuxCommand, stop: (p, s) => void (s === 'SIGKILL' && process.kill(p, s)) });
   await quietFor(a);
   assert.deepEqual(a.stopped, [`${deaf.pid} SIGTERM`, `${deaf.pid} SIGKILL`]);
   assert.equal(readJson<UpdateJob>(a.f.job)?.phase, 'done');
 
   // Neither ends it: left in flight, warned once, and a new update's refusal says why.
-  const stubborn = standIn(t);
-  await until('the stand-in up', () => alive(stubborn.pid));
+  const stubborn = await standIn(t);
   const b = overdueFixture(t, { pid: stubborn.pid, createdAt: ago(JOB_LIMIT.inFlightMs + 60_000) }, { command: linuxCommand, stop: () => undefined });
   await quietFor(b);
   await b.watch(60_000);
@@ -992,10 +1008,8 @@ test('w5938: a hung job that ignores TERM gets KILL; one that will not end is le
   assert.equal(b.stopped.length, 4, 'and again 5 min later');
 
   // Its process takes the job back while it is being stopped (a new pid): the job as it was seen is not ended.
-  const old = standIn(t);
-  await until('the stand-in up', () => alive(old.pid));
-  const fresh = standIn(t);
-  await until('the stand-in up', () => alive(fresh.pid));
+  const old = await standIn(t);
+  const fresh = await standIn(t);
   const c = overdueFixture(t, { pid: old.pid, createdAt: ago(JOB_LIMIT.inFlightMs + 60_000) }, {
     command: linuxCommand,
     stop: (p, s) => {
@@ -1135,4 +1149,10 @@ test('w5546: the read fence goes to warn, on and off again over the link with no
   assert.deepEqual(sent.map((m) => m.ok), [false, false]);
   assert.match(sent[0].error ?? '', /unknown action something-new/);
   assert.match(sent[1].error ?? '', /no read fence switch/);
+});
+
+test('w6089: a read fence switch is waited for long enough to set the Windows labels; a restart is not', () => {
+  // BEAST answered read-fence-on 1 min 18 s to 3 min 13 s after it was sent (2026-11-26), past the old 60 s.
+  for (const a of ['read-fence-off', 'read-fence-warn', 'read-fence-on']) assert.ok(linkControlWaitMs(a) >= 5 * 60_000, a);
+  for (const a of ['restart', 'uninstall']) assert.equal(linkControlWaitMs(a), 60_000, a);
 });

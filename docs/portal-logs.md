@@ -188,7 +188,14 @@ is back, the same worker session's calls work again with nothing restarted. Read
    their own time and the portal's functions on the stack under them (the minute's totals), then up to three `stall profile:
    block of 1.4 s ending …` lines from the samples taken in each longest block alone (w2044: a once-a-second save sums to
    seconds a minute without ever being the block), and keeps the profile in `<dataDir>/profiles` (the
-   newest six; an ops worker opens one in Chrome DevTools' Performance panel). A window with no stall is dropped.
+   newest six; an ops worker opens one in Chrome DevTools' Performance panel). A window with no stall is dropped. A page's
+   state build of 300 ms or more gets its own line at its window's end, stall or none (w6382): `stall profile: state build
+   of 711 ms ending … Own time: … In the portal's functions: …`, from that build's samples alone (10 ms apart, so a
+   function under 10 ms may be missed); match it to the `page socket open` line whose phases it explains by the time.
+   The windows overlap (w6416): the next one starts before the last one ends, since a start with no profile running makes
+   V8 rebuild its code map by walking the whole heap (1.1-1.7 s on the portal, once a minute, which the loop watch then
+   called a stall the profiler named itself by). A roll of 250 ms or more says where its time went: `stall profile: the
+   window's roll took … ms (next start … ms, end … ms, summaries … ms; N nodes, M samples)`.
 3. `regex: "review:|attachments:"` after that: a worker's publish landing (`publishes N file(s) … from <machine>`) is
    the proof that machine's path works again.
 
@@ -213,8 +220,19 @@ message:
   w5861 it is the only copy the page loads (it no longer fetches `/api/state` first, unless an attempt fails or has not
   opened after 2.5 s). `<n> sessions` (w5907) is how many sessions it carried: on a first open those the page shows
   (live, chats, named by a shown request or a sandbox's newest 12, or active in the last 3 days; the older finished ones
-  stay on the server and a view fetches one from `GET /api/sessions?ids=`), and with `changed` a reconnect within
-  10 minutes that got only the sessions changed since the state it held (the page sends its `sessionsRev` as `have`).
+  stay on the server and a view fetches one from `GET /api/sessions?ids=`), and with `changed` a reconnect that
+  got only the sessions changed since the state it held (the page sends its `sessionsRev` as `have`).
+  Since w6382 that holds across a portal restart too: the revs are saved in `session-revs.json` with a content key per
+  session (server/pageState.ts `SessionRevs`), and the start logs `session revs: <n> kept, <n> changed since the last
+  run`. `(build <ms> [<phase> <ms>, ...] json <ms>)` (w6382) names the build's slowest phases of 5 ms or more
+  (server/index.ts `appStateIn`; `kept` is leaving out the parts the page holds unchanged). `(<n> checked)` (w6382) is
+  how many sessions that build looked at again rather than take from `PageSessionsCache`: about 650 of 13,500 on
+  2026-11-27, the ones the page shows, since only a session that drops off the page is remembered as off. Until w6456 a
+  reconnect after a gap over 10 minutes sent no `have` and got every session again (1.9-4.5 MB that day); since then a
+  page sends it after any gap, and the server takes it while the token's run is this one or one of the last 8 saved
+  (`SessionRevs.since`). A page copy that gains or loses its last report with no change to its session (3 days idle, or
+  a shown request naming it) is a new rev too (`SessionRevs.pageCopy`, saved in `session-revs.json`), so the delta
+  still lands where a fresh load does.
 - `page socket first state sent: <login> via <path>, <ms>ms after the open` (w5861): only when handing the first state to
   the network took a second or more, which on a slow path means the page was still taking it in.
 - `page state sizes: <top fields with KB>; <n> sessions, by field: <session fields with KB>` (w5861): where the first

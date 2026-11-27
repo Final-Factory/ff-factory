@@ -19,7 +19,7 @@
 import type { Store } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
-import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, ownsPr, partOfPr, prLabel, RESUME_SWEEP_MS, sameCommit, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, onRequest, followMerged, gateWaitsOn, ownsPr, partOfPr, reviewsPr, prLabel, RESUME_SWEEP_MS, sameCommit, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner, isRateLimitText } from './githubTokens.ts';
 import { budgetOf, ghGet, GH_LOW_EVERY_MS, GH_LOW_REMAINING } from './ghBudget.ts';
@@ -27,7 +27,7 @@ import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceV
 import { pairDelivers, partOfIdsIn, reportDelivers, requestIdsIn, stillOpenIn } from './ledgerRules.ts';
 import { isOpen } from './work.ts';
 import { GAME_REPO } from './pairRuns.ts';
-import { diskWaitIn, lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
+import { diskWaitIn, handUpWaitRef, lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
 import { steamShortIn } from '../shared/capacity.ts';
@@ -108,6 +108,8 @@ export interface BlockerWatchDeps {
   room?: () => string[];
   /** Room for each kind of work and the held computers (w1089, w1098); preferred over `room`. */
   roomFacts?: () => RoomNow;
+  /** w6235: clear the pre-w5297 mark of queued pair runs whose commit reads FF_GAME_DATA_DIR (Agents.recheckLegacyPairs). */
+  legacyPairs?: () => Promise<string[]>;
   now?: () => number;
 }
 
@@ -198,7 +200,8 @@ export class BlockerWatch {
           // ledger infers, whatever else it names: w2443's "waiting on lothsahn to click Pause in FF Factory's tray" became
           // a deploy gate and held lothsahn's answer.
           if (l && personWaitOn(l.line, team)) continue;
-          const ref = l ? requestWaitOf(l.line, w.id) : undefined;
+          // w6397: a wait on its own handed-up follow-up, named by no id (it was never told one): the follow-up filed for it.
+          const ref = l ? (requestWaitOf(l.line, w.id) ?? handUpWaitRef(w, l.line, (id) => this.d.store.work.get(id.toLowerCase()))) : undefined;
           const portal = !!l && portalWaitIn(l.line, team);
           // w3338: a worker that stopped for low disk on its machine ("paused for low disk"), never a disk clean-up's own worker (w3328).
           const disk = !!l && !w.diskCleanup && !!s.machineId && diskWaitIn(l.line, team) ? s.machineId : undefined;
@@ -294,6 +297,8 @@ export class BlockerWatch {
     }
     this.busy = true;
     try {
+      // w6235: a queued pair run marked pre-w5297 whose commit reads FF_GAME_DATA_DIR is placed like any other, before the queue is read.
+      for (const id of await this.d.legacyPairs?.().catch((): string[] => []) ?? []) did.set(id, 'its commit reads FF_GAME_DATA_DIR: no longer a pre-w5297 pair run');
       // w1089: a block that is only a wait for capacity is Queued, not Blocked, whoever set it and whenever.
       for (const id of this.d.orchestrators.requeueCapacityBlocks?.() ?? []) did.set(id, 'requeued: a block that waited only for capacity');
       // w2304: a pair run that lost a leg mid-run starts again whole, Queued, never Stalled.
@@ -588,6 +593,33 @@ export class BlockerWatch {
    * none while a message to the worker waits in the send queue (it was answered, and waits for capacity), and none once
    * a worker of the request it names finished a turn after that report (it was resumed on it, and blocked again).
    */
+  /**
+   * w6446: request `w` waits on request `on`: through its gates (a request gate, done or report, or a w5845 merge wait on
+   * the request it was handed to), or its idle worker's words (saysWaitsOn), following merged requests and chains of
+   * such waits a few steps. w6077 waited on w6105, which was merged into w6090.
+   */
+  private waitsOn(w: WorkItem, on: string): boolean {
+    const target = (id: string) => followMerged(id, (x) => this.d.store.work.get(x.toLowerCase()))?.id.toLowerCase() ?? id.toLowerCase();
+    const goal = target(on);
+    const seen = new Set<string>();
+    let front = [w];
+    for (let depth = 0; depth < 6 && front.length; depth++) {
+      const next: WorkItem[] = [];
+      for (const x of front) {
+        const ids = x.status === 'blocked' ? gatesOf(x).map(gateWaitsOn).filter((y): y is string => !!y) : x.status === 'active' ? [this.saysWaitsOn(x)].filter((y): y is string => !!y) : [];
+        for (const id of ids.map(target)) {
+          if (id === goal) return true;
+          if (seen.has(id)) continue;
+          seen.add(id);
+          const t = this.d.store.work.get(id);
+          if (t) next.push(t);
+        }
+      }
+      front = next;
+    }
+    return false;
+  }
+
   private saysWaitsOn(w: WorkItem): string | undefined {
     const s = newestFirst(w).map((sid) => this.d.store.sessions.get(sid)).find((x) => x?.kind === 'worker' && x.lastResult);
     if (!s || BUSY.has(s.status) || s.queuedSend) return undefined;
@@ -597,6 +629,7 @@ export class BlockerWatch {
     const said = Date.parse(s.lastResultAt ?? s.lastActivityAt) || 0;
     const t = this.d.store.work.get(on.toLowerCase());
     const actedSince = t?.sessionIds.some((sid) => {
+      if (!onRequest(t, sid)) return false;
       const x = this.d.store.sessions.get(sid);
       return x?.kind === 'worker' && (Date.parse(x.lastResultAt ?? '') || 0) > said;
     });
@@ -608,8 +641,9 @@ export class BlockerWatch {
     return {
       now: this.now(),
       work: (id) => store.work.get(id.toLowerCase()),
+      // w6309 (the w6329 review): only a worker on it (onRequest) reports for it; a merged-back moved-off one clears no gate.
       reportedSince: (w: WorkItem, since: number, o?: { notCheckIn?: boolean }) =>
-        w.sessionIds.some((sid) => {
+        w.sessionIds.filter((sid) => onRequest(w, sid)).some((sid) => {
           const s = store.sessions.get(sid);
           if (o?.notCheckIn && this.d.checkInPending?.(sid)) return false;
           return !!s && !BUSY.has(s.status) && !!s.lastResult && (Date.parse(s.lastActivityAt) || 0) > since;
@@ -621,7 +655,7 @@ export class BlockerWatch {
           const fresh = legs.some((s) => !!s && !BUSY.has(s.status) && (Date.parse(s.lastActivityAt) || 0) > since);
           return fresh && pairDelivers(legs.map((s) => (s && !BUSY.has(s.status) ? s.lastResult : undefined)), w.id, waiter);
         }
-        return w.sessionIds.some((sid) => {
+        return w.sessionIds.filter((sid) => onRequest(w, sid)).some((sid) => {
           const s = store.sessions.get(sid);
           return !!s && !BUSY.has(s.status) && (Date.parse(s.lastActivityAt) || 0) > since && reportDelivers(s.lastResult, w.id, waiter);
         });
@@ -681,7 +715,18 @@ export class BlockerWatch {
       const sorted = [...list].sort((a, b) => Number(owns(b)) - Number(owns(a)) || (Date.parse(b.g.at) || 0) - (Date.parse(a.g.at) || 0));
       const keep = sorted[0];
       const why = owns(keep) ? `${keep.w.id} owns it (its Request: line, ledger link or branch)` : `none of them owns it and ${keep.w.id}'s worker called blocked_on on it last (${keep.g.at})`;
-      const rest = sorted.slice(1);
+      // w6446: a request that reviews the PR is woken with the owner: it reads and reports, never pushes, and the PR merges
+      // only after its report. Nor is a request the owner waits on (directly, or through one merged into it) told to wait
+      // for the merge: the two would wait on each other (w6090 and w6102 sat a day each).
+      const exempt = new Map<string, string>();
+      for (const x of sorted.slice(1)) {
+        if (ownsPr(x.w, ref, h)) continue;
+        if (reviewsPr(x.w, ref, keep.w)) exempt.set(x.w.id, `${x.w.id} reviews ${ref}, which merges only after its review`);
+        else if (this.waitsOn(keep.w, x.w.id)) exempt.set(x.w.id, `${keep.w.id} waits on ${x.w.id}: a wait for the merge would make them wait on each other`);
+      }
+      for (const [id, reason] of exempt) console.log(`blocker watch: ${ref}: ${id} is woken with ${keep.w.id}, not set to wait for it to merge (${reason}) (w6446)`);
+      const rest = sorted.slice(1).filter((x) => !exempt.has(x.w.id));
+      if (!rest.length) continue;
       console.log(`blocker watch: ${ref}: ${list.map((x) => x.w.id).join(', ')} would all be woken; only ${keep.w.id} is (${why}); ${rest.map((x) => x.w.id).join(', ')} now wait for it to merge (w5845)`);
       for (const x of rest) {
         try {
@@ -1253,8 +1298,9 @@ export async function ghChecks(ref: string, run: Runner = runProc, online?: (mac
     console.warn(`blocker watch: gh cannot read pull requests' checks (${ghSaid(r)}); CI blocks read their GitHub Actions runs instead`);
   }
   const body = JSON.parse(a.stdout) as { workflow_runs?: (GhRun & { id?: number })[] };
-  const settled = await settleAwayRuns(m[1], body.workflow_runs ?? [], away, get);
-  const s = runsState({ workflow_runs: body.workflow_runs }, ref, want ?? pr.headRefOid);
+  const runs = await orUnindexedRuns(m[1], want ?? pr.headRefOid, body.workflow_runs ?? [], get);
+  const settled = await settleAwayRuns(m[1], runs, away, get);
+  const s = runsState({ workflow_runs: runs }, ref, want ?? pr.headRefOid);
   return settled && s.green ? { ...s, text: s.text + awayNote(settled, away) } : s;
 }
 
@@ -1271,7 +1317,7 @@ async function runsAtHead(ref: string, repo: string, head: string, at: string | 
   } catch {
     return notAtHead(ref, head, at);
   }
-  runs = runs.filter((r) => !r.head_sha || sameCommit(r.head_sha, head));
+  runs = (await orUnindexedRuns(repo, head, runs, get)).filter((r) => !r.head_sha || sameCommit(r.head_sha, head));
   if (!runs.length) return { ...notAtHead(ref, head, at), none: true };
   const settled = await settleAwayRuns(repo, runs, away, get);
   const s = runsState({ workflow_runs: runs }, ref, head);
@@ -1294,8 +1340,39 @@ async function queuedRunsOr(none: CiState, ref: string, repo: string, head: stri
   } catch {
     return none;
   }
-  const q = queuedRunsState(runs, ref);
+  const q = queuedRunsState(await orUnindexedRuns(repo, head, runs, get), ref);
   return q ? { ...q, head } : none;
+}
+
+/**
+ * w6158: a commit's runs when the `head_sha` filter gave none of them. GitHub's filtered run search (head_sha, branch,
+ * status, event, created, check_suite_id) can miss a run for a long time while the unfiltered list has it: measured
+ * 2026-11-26 on Final-Factory/ffu#1203, run 45871131161 (pull_request, head b3d2850, created 17:50:46Z, status "queued"
+ * with jobs running) was absent from every filtered list at 18:15 and after, while `actions/runs?per_page=100` and
+ * `commits/<sha>/check-suites` both had it. Two workers were resumed with "no CI run exists" by that miss. So the newest
+ * 100 runs unfiltered are searched for the head, then the commit's GitHub Actions check suites (those with check runs; a
+ * suite with none is an app that never ran here). Runs that cannot be read leave `runs` as they were.
+ */
+export async function orUnindexedRuns(repo: string, head: string, runs: (GhRun & { id?: number })[], get: (path: string) => Promise<RunResult>): Promise<(GhRun & { id?: number })[]> {
+  if (runs.some((r) => !r.head_sha || sameCommit(r.head_sha, head))) return runs;
+  const l = await get(`repos/${repo}/actions/runs?per_page=100`);
+  if (l.code === 0) {
+    try {
+      const found = ((JSON.parse(l.stdout) as { workflow_runs?: (GhRun & { id?: number })[] }).workflow_runs ?? []).filter((r) => !!r.head_sha && sameCommit(r.head_sha, head));
+      if (found.length) return found;
+    } catch {
+      /* unreadable: the check suites next */
+    }
+  }
+  const c = await get(`repos/${repo}/commits/${head}/check-suites?per_page=100`);
+  if (c.code !== 0) return runs;
+  try {
+    const suites = (JSON.parse(c.stdout) as { check_suites?: { id?: number; status?: string; conclusion?: string | null; head_sha?: string; latest_check_runs_count?: number; app?: { slug?: string } }[] }).check_suites ?? [];
+    const actions = suites.filter((x) => x.app?.slug === 'github-actions' && (x.latest_check_runs_count ?? 0) > 0);
+    return actions.length ? actions.map((x) => ({ name: `GitHub Actions check suite ${x.id ?? '?'}`, status: x.status, conclusion: x.conclusion, head_sha: x.head_sha ?? head })) : runs;
+  } catch {
+    return runs;
+  }
 }
 
 /** w3527: what a head's workflow runs say when its pull request has no check runs yet: pending while any is unfinished; undefined when it has none or all finished (the rollup's "no checks" stands). */

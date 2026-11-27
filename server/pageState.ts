@@ -2,6 +2,7 @@
 // on 2026-11-25), and the page's first state had reached 18 MB of JSON: lothsahn waited 5-10 s for the page to connect
 // over Funnel, and a socket whose first message was still downloading missed its pong and was dropped. The page reads
 // only some of each session's fields; the rest stay on the server (store.sessions) and in its session events.
+import { createHash } from 'node:crypto';
 import { holdsItsPlace, holdsSandbox } from '../shared/agentState.ts';
 import type { AppState, Machine, SessionInfo, StandingAgent, WorkItem } from '../shared/types.ts';
 
@@ -84,12 +85,66 @@ export function pageNamedSessions(parts: {
   return named;
 }
 
+/**
+ * What pageSessions worked out last time, per session (w6382): which sessions stay off the page, and each page copy.
+ * pageSessions looked at all 13,511 sessions on every page connect (31-52 ms of a 407-728 ms build, by the state build
+ * profile lines of 2026-11-27 12:52Z, and holdsItsPlace's state reading for each stopped one). An entry holds while its
+ * session has had no `session` event since (Store.putSession emits one for every change, the in-place ones included).
+ * Off the page is for good once it is: a stopped session's reasons to stay (a check-in, a queued message, a hold, its
+ * last 3 days) only run out, and a session the state names is kept whatever the entry says.
+ */
+export class PageSessionsCache {
+  private changes = new Map<string, number>();
+  private off = new Map<string, number>();
+  private copies = new Map<string, { at: number; withResult: boolean; copy: SessionInfo }>();
+  /**
+   * How many sessions the last pageSessions call had to look at again (keepsOnPage), for the 'page socket open' line: the
+   * cache's misses. The first build after the 2026-11-27 14:31Z deploy spent 60 ms in `keeps`, as if it missed for most.
+   */
+  checked = 0;
+  /** Told of every page copy, with or without its report (w6456: SessionRevs.pageCopy). */
+  onCopy?: (id: string, withResult: boolean) => void;
+
+  note(e: { type: string; session?: { id: string }; id?: string }) {
+    const id = e.type === 'session' ? e.session?.id : e.type === 'session_removed' ? e.id : undefined;
+    if (id === undefined) return;
+    this.changes.set(id, (this.changes.get(id) ?? 0) + 1);
+    this.off.delete(id);
+    this.copies.delete(id);
+    if (e.type === 'session_removed') this.changes.delete(id);
+  }
+
+  /** keepsOnPage, remembered while it is false and the session unchanged. */
+  keeps(s: SessionInfo, named: ReadonlySet<string>, now: number): boolean {
+    if (named.has(s.id)) return true;
+    const at = this.changes.get(s.id) ?? 0;
+    if (this.off.get(s.id) === at) return false;
+    this.checked++;
+    const keeps = keepsOnPage(s, named, now);
+    if (!keeps) this.off.set(s.id, at);
+    return keeps;
+  }
+
+  /** pageSession, remembered while the session is unchanged and keeps (or drops) its last report as before. */
+  copy(s: SessionInfo, named: ReadonlySet<string>, now: number): SessionInfo {
+    const at = this.changes.get(s.id) ?? 0;
+    const withResult = s.lastResult !== undefined && (named.has(s.id) || now - (Date.parse(s.lastActivityAt) || 0) < PAGE_RESULT_KEEP_MS);
+    this.onCopy?.(s.id, withResult);
+    const c = this.copies.get(s.id);
+    if (c && c.at === at && c.withResult === withResult) return c.copy;
+    const copy = pageSession(s, named, now);
+    this.copies.set(s.id, { at, withResult, copy });
+    return copy;
+  }
+}
+
 /** `sessions` as the page gets them on open (keepsOnPage, pageSession), and how many older ones were left on the server. */
-export function pageSessions(sessions: Iterable<SessionInfo>, named: ReadonlySet<string>, now: number): { sessions: SessionInfo[]; older: number } {
+export function pageSessions(sessions: Iterable<SessionInfo>, named: ReadonlySet<string>, now: number, cache?: PageSessionsCache): { sessions: SessionInfo[]; older: number } {
   const out: SessionInfo[] = [];
   let older = 0;
+  if (cache) cache.checked = 0;
   for (const s of sessions) {
-    if (keepsOnPage(s, named, now)) out.push(pageSession(s, named, now));
+    if (cache ? cache.keeps(s, named, now) : keepsOnPage(s, named, now)) out.push(cache ? cache.copy(s, named, now) : pageSession(s, named, now));
     else older++;
   }
   return { sessions: out, older };
@@ -97,42 +152,219 @@ export function pageSessions(sessions: Iterable<SessionInfo>, named: ReadonlySet
 
 /**
  * When each session last changed (w5907), so a page that reconnects gets only the sessions that changed while it was
- * away. A token is `<boot>.<rev>`: a page's token from another run of the server is no use (every rev starts again).
- * Every change of a session goes through Store.putSession/removeSession, which emit the `session` and
- * `session_removed` events this counts; a session the server has not changed since it started has rev 0.
+ * away. A token is `<epoch>.<rev>`. Every change of a session goes through Store.putSession/removeSession, which emit the
+ * `session` and `session_removed` events this counts.
+ *
+ * w6382: the revs outlive a restart. Each run saves them (`saved()`, server/index.ts session-revs.json) with a content key
+ * per session, a hash of its JSON; the next run loads them (`load`), and a session whose content key no longer matches,
+ * or that the file does not know, gets a new rev. Revs are one sequence across runs, each run under its own epoch: a token
+ * of an earlier run is taken up to the rev its file was saved at (`past`), since every change after that either reached
+ * the file with a higher rev or shows as a changed content key. A token past that saw changes the file never got: sent whole.
+ * Before w6382 every restart resent all 977 sessions (2.4 MB) to each reconnecting page.
  */
 export class SessionRevs {
   readonly boot: string;
   private rev = 0;
   private revs = new Map<string, number>();
+  /** Earlier runs' epochs, and the rev each one's file was saved at, oldest first (at most PAST_EPOCHS). */
+  private past: [string, number][] = [];
+  /** Content keys as saved or loaded; a session changed since has none until the next save. */
+  private keys = new Map<string, string>();
+  /** Until `load` has read the saved revs, no token is taken (the page gets them all). */
+  private ready: boolean;
+  /** Sessions this run changed while `load` was still reading: their new rev stands. */
+  private touched = new Set<string>();
+  /**
+   * Saved revs not yet checked against the session's content key (w6382): checked on first use (`changedSince`, `saved`)
+   * or by `load` in the background, whichever comes first. The 2026-11-27 12:52Z restart's load of 13,511 sessions took
+   * 15.6 s on a busy loop, and both pages that reconnected in it got all 987 of theirs (2.4 MB); now a reconnect checks
+   * only the sessions it would leave out.
+   */
+  private pending = new Map<string, [number, string]>();
+  /**
+   * Whether the last page copy of each session carried its report (w6456, PageSessionsCache.copy). A page copy loses its
+   * report when its session goes 3 days idle with no shown request naming it, and gets it back when one names it, with
+   * no change to the session itself: such a flip is a new rev (`pageCopy`), so a page that reconnects after any gap gets
+   * the copy a fresh load would. Saved with the revs, so a flip while the server was down counts too.
+   */
+  private reports = new Map<string, boolean>();
+  private store: Pick<ReadonlyMap<string, SessionInfo>, 'get'> | undefined;
+  private counts = { kept: 0, changed: 0 };
 
-  constructor(boot: string = Math.random().toString(36).slice(2, 10)) {
+  constructor(boot: string = Math.random().toString(36).slice(2, 10), o: { ready?: boolean } = {}) {
     this.boot = boot;
+    this.ready = o.ready ?? true;
   }
 
   note(e: { type: string; session?: { id: string }; id?: string }) {
-    if (e.type === 'session' && e.session) this.revs.set(e.session.id, ++this.rev);
-    else if (e.type === 'session_removed' && e.id) {
+    if (e.type === 'session' && e.session) {
+      this.revs.set(e.session.id, ++this.rev);
+      this.keys.delete(e.session.id);
+      this.pending.delete(e.session.id);
+      if (!this.ready) this.touched.add(e.session.id);
+    } else if (e.type === 'session_removed' && e.id) {
       this.revs.delete(e.id);
+      this.keys.delete(e.id);
+      this.pending.delete(e.id);
+      this.reports.delete(e.id);
       this.rev++;
     }
+  }
+
+  /** Whether `load` has read the saved revs (or was never needed): only then are tokens taken and the revs saved. */
+  get isReady(): boolean {
+    return this.ready;
   }
 
   get token(): string {
     return `${this.boot}.${this.rev}`;
   }
 
-  /** The rev a page's token stands for, when it is this run's and not ahead of it; else undefined (send them all). */
+  /** The rev a page's token stands for, when it is this run's (not ahead of it) or an earlier saved run's; else undefined (send them all). */
   since(token: string | null | undefined): number | undefined {
+    if (!this.ready) return undefined;
     const m = /^([a-z0-9]+)\.(\d+)$/.exec(token ?? '');
-    if (!m || m[1] !== this.boot) return undefined;
+    if (!m) return undefined;
     const rev = Number(m[2]);
-    return Number.isSafeInteger(rev) && rev <= this.rev ? rev : undefined;
+    if (!Number.isSafeInteger(rev)) return undefined;
+    const upTo = m[1] === this.boot ? this.rev : this.past.find(([e]) => e === m[1])?.[1];
+    return upTo !== undefined && rev <= upTo ? rev : undefined;
+  }
+
+  /**
+   * A page copy of `id` was made, with its report or without (w6456): a new rev when that is not what the last copy had,
+   * so a page holding the other kind gets it again. True when it gave one (the revs file then wants saving).
+   */
+  pageCopy(id: string, withResult: boolean): boolean {
+    this.check(id);
+    const was = this.reports.get(id);
+    this.reports.set(id, withResult);
+    if (was === undefined || was === withResult) return false;
+    this.revs.set(id, ++this.rev);
+    return true;
   }
 
   changedSince(id: string, rev: number): boolean {
+    this.check(id);
     return (this.revs.get(id) ?? 0) > rev;
   }
+
+  /** A saved rev, checked: kept when the session's content key is the saved one, else a new rev. */
+  private check(id: string) {
+    const was = this.pending.get(id);
+    if (!was) return;
+    this.pending.delete(id);
+    const x = this.store?.get(id);
+    if (!x) return;
+    const key = contentKey(x);
+    this.keys.set(id, key);
+    if (was[1] === key) {
+      this.revs.set(id, was[0]);
+      this.counts.kept++;
+    } else {
+      this.revs.set(id, ++this.rev);
+      this.counts.changed++;
+    }
+  }
+
+  /**
+   * Take an earlier run's saved revs (`saved` as `saved()` wrote it, or undefined) for the sessions the store holds now.
+   * Tokens are taken as soon as the file is read; each saved rev is checked against its session's content key on first
+   * use, and the rest in the background, yielding to the event loop every `sliceMs` as Store.scrubSecrets does. Resolves
+   * once all are checked, with how many sessions kept their rev and how many got a new one.
+   */
+  async load(saved: unknown, sessions: Pick<ReadonlyMap<string, SessionInfo>, 'get' | 'keys'>, sliceMs = 20, clock: () => number = Date.now): Promise<{ kept: number; changed: number }> {
+    const s = readSavedRevs(saved);
+    this.store = sessions;
+    if (s) {
+      // This run's revs go on from the file's, so they are above every rev a token of the file's run can carry.
+      this.rev += s.rev;
+      for (const [id, r] of this.revs) this.revs.set(id, r + s.rev);
+      this.past = [...s.past, [s.epoch, s.rev] as [string, number]].slice(-PAST_EPOCHS);
+      const ids = [...sessions.keys()];
+      for (const id of ids) {
+        if (this.touched.has(id)) continue;
+        const was = s.sessions.get(id);
+        const seen = this.reports.get(id);
+        const savedReport = s.reports.get(id);
+        if (savedReport !== undefined && seen === undefined) this.reports.set(id, savedReport);
+        // w6456: this run made a page copy of a different kind than the last run's last one (a flip while it was down).
+        if (was && savedReport !== undefined && seen !== undefined && seen !== savedReport) {
+          this.revs.set(id, ++this.rev);
+          this.counts.changed++;
+        } else if (was) this.pending.set(id, was);
+        else {
+          this.revs.set(id, ++this.rev);
+          this.counts.changed++;
+        }
+      }
+      this.touched.clear();
+      this.ready = true;
+      let since = clock();
+      for (const id of ids) {
+        if (clock() - since >= sliceMs) {
+          await new Promise<void>((r) => setImmediate(r));
+          since = clock();
+        }
+        this.check(id);
+      }
+    }
+    this.touched.clear();
+    this.ready = true;
+    return { ...this.counts };
+  }
+
+  /** What session-revs.json holds: the epoch, the rev, the earlier runs, and each session's rev and content key. */
+  saved(sessions: ReadonlyMap<string, SessionInfo>): SavedRevs {
+    const out: SavedRevs['sessions'] = {};
+    for (const [id, s] of sessions) {
+      this.check(id);
+      let key = this.keys.get(id);
+      if (key === undefined) this.keys.set(id, (key = contentKey(s)));
+      const report = this.reports.get(id);
+      out[id] = report === undefined ? [this.revs.get(id) ?? 0, key] : [this.revs.get(id) ?? 0, key, report ? 1 : 0];
+    }
+    return { v: 1, epoch: this.boot, rev: this.rev, past: this.past, sessions: out };
+  }
+}
+
+/** The file in the data folder the revs are saved in (server/index.ts). */
+export const SESSION_REVS_FILE = 'session-revs.json';
+
+/** How many earlier runs' tokens a server still takes (w6456: a page sends its token after any gap). */
+export const PAST_EPOCHS = 8;
+
+export interface SavedRevs {
+  v: 1;
+  epoch: string;
+  rev: number;
+  past: [string, number][];
+  /** Each session's rev and content key, and (w6456) 1 or 0: whether the last page copy of it carried its report. */
+  sessions: Record<string, [number, string] | [number, string, 0 | 1]>;
+}
+
+/** A session's content key (w6382): a hash of its JSON, so a change the saved revs missed still reads as a change. */
+export function contentKey(s: SessionInfo): string {
+  return createHash('sha1').update(JSON.stringify(s)).digest('base64url').slice(0, 16);
+}
+
+/** session-revs.json read, or undefined when it is not one this server wrote (then every session counts as changed). */
+function readSavedRevs(v: unknown): { epoch: string; rev: number; past: [string, number][]; sessions: Map<string, [number, string]>; reports: Map<string, boolean> } | undefined {
+  if (typeof v !== 'object' || v === null) return undefined;
+  const o = v as Partial<SavedRevs>;
+  if (o.v !== 1 || typeof o.epoch !== 'string' || !/^[a-z0-9]+$/.test(o.epoch) || !Number.isSafeInteger(o.rev) || (o.rev as number) < 0) return undefined;
+  if (!Array.isArray(o.past) || typeof o.sessions !== 'object' || o.sessions === null) return undefined;
+  const past = o.past.filter((p): p is [string, number] => Array.isArray(p) && typeof p[0] === 'string' && Number.isSafeInteger(p[1]) && p[1] <= (o.rev as number));
+  const sessions = new Map<string, [number, string]>();
+  const reports = new Map<string, boolean>();
+  for (const [id, e] of Object.entries(o.sessions)) {
+    // A rev above the file's own is not one it could have given: such a session counts as changed.
+    if (Array.isArray(e) && Number.isSafeInteger(e[0]) && e[0] >= 0 && e[0] <= (o.rev as number) && typeof e[1] === 'string') {
+      sessions.set(id, [e[0], e[1]]);
+      if (e[2] === 0 || e[2] === 1) reports.set(id, e[2] === 1);
+    }
+  }
+  return { epoch: o.epoch, rev: o.rev as number, past, sessions, reports };
 }
 
 /**

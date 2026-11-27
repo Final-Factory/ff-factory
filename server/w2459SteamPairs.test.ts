@@ -190,7 +190,7 @@ test('w2459: readDesktopSession asks macOS for its session and Windows whether i
   assert.deepEqual(await readDesktopSession(win), { checkedAt: AT, locked: true });
   assert.deepEqual(win.ran, ['tasklist /FI IMAGENAME eq LogonUI.exe /NH /FO CSV']);
   assert.deepEqual(await readDesktopSession(fake({ platform: 'win32', procs: 'INFO: No tasks are running which match the specified criteria.' })), { checkedAt: AT });
-  assert.equal(await readDesktopSession(fake({ platform: 'linux', procs: '1' })), undefined);
+  assert.deepEqual(await readDesktopSession(fake({ platform: 'linux', procs: '1' }), { uid: 1000, env: {} }), { checkedAt: AT, via: 'none' }, 'w6311: Linux reads its lock; unreadable is via none');
   assert.deepEqual(sanitizeDesktop({ checkedAt: AT, locked: true, name: 'x' }), { checkedAt: AT, locked: true });
   assert.equal(desktopLacks('m5', undefined), undefined);
 });

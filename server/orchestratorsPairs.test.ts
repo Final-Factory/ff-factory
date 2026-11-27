@@ -43,6 +43,7 @@ import { PR2395_DIFF, W1958_0459, W1958_1632, W2651_0457, W2651_2051 } from './p
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 import { afterMergeReason } from './ledgerRules.ts';
 import { doneIdsIn, legDoneIdsIn } from './ledgerRules.ts';
+import { PAIR_FILED_BY, pairAskWords, type CommitVerdict, type DataDirVerdict } from './gameDataDir.ts';
 import { legacyFit, roomForWork, timedLine, type Computer, type RoomNow } from './placement.ts';
 import type { Occupant } from './timedLegPlace.ts';
 import { decisionsOn } from '../shared/waiting.ts';
@@ -840,14 +841,15 @@ test('w5965: request_pair marks a pair run of a pre-w5297 player from its words 
   env.machines.update('pc', { platform: 'win32', fence: { state: 'off', agentIntegrity: 'medium' } });
   const out = String(await read.h.request_pair!({ what: 'MP-activity-fingerprint on pre-1.0', brief: 'Build the 0.50 line at ac80d7b0 and run MP-activity-fingerprint.' }));
   const p = store.work.get(/^Filed (w\d+)/.exec(out)![1])!;
-  assert.equal(p.pair?.legacyData, LEGACY_READ);
+  // w6189: no commit given, so nothing could be checked for the FF_GAME_DATA_DIR backport: it stays marked, and says why.
+  assert.equal(p.pair?.legacyData, `${LEGACY_READ}; no commit was given, so FF Factory could not check it for the FF_GAME_DATA_DIR backport (pass commit; w6189)`);
   assert.match(out, /only on Windows computers whose sandbox agents were measured at Medium integrity \(or a Mac whose fence is off\), never Linux \(its player predates w5297/);
   // w5988: its brief says how to check the level, with Windows' whoami.exe (Git Bash's is coreutils).
   assert.ok(p.brief.includes(LEGACY_INTEGRITY_CHECK), p.brief);
   assert.match(LEGACY_INTEGRITY_CHECK, /MSYS2_ARG_CONV_EXCL='\*' "\$SYSTEMROOT\/System32\/whoami\.exe" \/groups/);
   const said = await startedFor(env, 'w5945');
   const out2 = String(await said.h.request_pair!({ what: 'MP-activity-fingerprint at ac80d7b0', brief: 'Run it.', legacy_data: 'ac80d7b0 is 0.50.0.47' }));
-  assert.equal(store.work.get(/^Filed (w\d+)/.exec(out2)![1])!.pair?.legacyData, 'ac80d7b0 is 0.50.0.47');
+  assert.match(store.work.get(/^Filed (w\d+)/.exec(out2)![1])!.pair?.legacyData ?? '', /^ac80d7b0 is 0\.50\.0\.47; no commit was given/);
   const none = await startedFor(env, 'w5946');
   const out3 = String(await none.h.request_pair!({ what: 'MP-activity-fingerprint on pre-1.0', brief: 'Run it.', legacy_data: 'none' }));
   assert.equal(store.work.get(/^Filed (w\d+)/.exec(out3)![1])!.pair?.legacyData, undefined);
@@ -921,7 +923,270 @@ test('w6003: legacyFit says "no computer fits", naming each computer and why, an
   assert.deepEqual(ok.fits, ['lab']);
 });
 
+// w6189 (for lothsahn): game PR #4357 backported FF_GAME_DATA_DIR to pre-1.0, and w6122 ran 5 of 5 MP scenarios of such a
+// player at Low integrity on lothdesktop, yet request_pair refused w6187's pair check of PR #4382 (head 20786882d8, which
+// carries #4357) as a pre-w5297 run. The mark is now decided per commit, from GameDataPaths.cs at that commit.
+const W6189_NEW = '20786882d8aa00000000000000000000000000aa';
+const fakeDataDir = (commit: string): Promise<DataDirVerdict> =>
+  Promise.resolve(W6189_NEW.startsWith(commit) ? { reads: true, commit: W6189_NEW }
+    : commit.startsWith('ac80d7b0') ? { reads: false, checked: true, why: 'Assets/Scripts/FFCore/GameData/GameDataPaths.cs at ac80d7b0 does not read FF_GAME_DATA_DIR: it predates the backport (game PR #4357; w6189)' }
+    : { reads: false, checked: false, why: `GitHub knows no commit ${commit.slice(0, 10)} in Final-Factory/FinalFactory, so FF Factory could not check it for the FF_GAME_DATA_DIR backport (w6189)` });
+
+test('w6189: request_pair files a pre-1.0 pair run whose commit has the FF_GAME_DATA_DIR backport for a Low-integrity Windows sandbox, and still refuses an older or uncheckable commit', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  agentsRoom(agents, []);
+  agents.gameDataDirAt = fakeDataDir;
+  putRequests(store, [{ id: 'w6187', by: LOTH }, { id: 'w6190', by: LOTH }, { id: 'w6191', by: LOTH }]);
+  env.machines.update('pc', { platform: 'win32', fence: { state: 'on', kind: 'low', agentIntegrity: 'low' } });
+  const ask = { what: 'MP determinism check of PR #4382 on pre-1.0', brief: 'Build the 0.50 line at the PR head and run the MP scenarios.' };
+  const withBackport = await startedFor(env, 'w6187');
+  const out = String(await withBackport.h.request_pair!({ ...ask, commit: '20786882d8' }));
+  const p = store.work.get(/^Filed (w\d+)/.exec(out)![1])!;
+  assert.equal(p.pair?.legacyData, undefined, 'not a pre-w5297 run');
+  assert.match(p.pair?.dataDirChecked ?? '', /^its player at 20786882d8 reads FF_GAME_DATA_DIR \(Assets\/Scripts\/FFCore\/GameData\/GameDataPaths\.cs, the backport of game PR #4357\)/);
+  assert.match(out, /Not a pre-w5297 run: its player at 20786882d8 reads FF_GAME_DATA_DIR/);
+  // Placement lets its leg on the Low-integrity Windows computer.
+  assert.equal(unfitWhy(p, 'pc', { pc: { platform: 'win32', fence: 'on', agentIntegrity: 'low' } }), undefined);
+  // Its words alone say nothing either way about a commit legacy_data names: the commit decides.
+  const said = await startedFor(env, 'w6190');
+  const before = store.work.size;
+  await assert.rejects(
+    async () => said.h.request_pair!({ ...ask, commit: 'ac80d7b0', legacy_data: 'ac80d7b0 is 0.50.0.47' }),
+    /^Error: Nothing filed: no computer fits a pair run of a pre-w5297 player \(ac80d7b0 is 0\.50\.0\.47; Assets\/Scripts\/FFCore\/GameData\/GameDataPaths\.cs at ac80d7b0 does not read FF_GAME_DATA_DIR: it predates the backport/,
+  );
+  const unknown = await startedFor(env, 'w6191');
+  await assert.rejects(
+    async () => unknown.h.request_pair!({ ...ask, commit: 'deadbeef12' }),
+    /^Error: Nothing filed: no computer fits a pair run of a pre-w5297 player \(read from its words.*; GitHub knows no commit deadbeef12 in Final-Factory\/FinalFactory, so FF Factory could not check it/,
+  );
+  // A check that throws fails closed too.
+  agents.gameDataDirAt = () => Promise.reject(new Error('gh: command not found'));
+  await assert.rejects(async () => unknown.h.request_pair!({ ...ask, commit: '20786882d8' }), /FF Factory could not check 20786882d8 for the FF_GAME_DATA_DIR backport \(gh: command not found/);
+  assert.equal(store.work.size, before, 'nothing filed for the refused ones');
+});
+
+test('w6189: start_agent decides a marked pair run per commit too: the backport starts on a Low-integrity Windows sandbox, an older or uncheckable commit is refused', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, dispatcher, call, machines, agents } = env;
+  agents.gameDataDirAt = fakeDataDir;
+  putRequests(store, [
+    { id: 'w6188', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: LEGACY_READ, commit: '20786882d8' } },
+    { id: 'w6192', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: 'ac80d7b0 is 0.50', commit: 'ac80d7b0' } },
+    { id: 'w6193', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: LEGACY_READ, commit: 'deadbeef12' } },
+  ]);
+  machines.update('pc', { platform: 'win32', fence: { state: 'on', kind: 'low', agentIntegrity: 'low' } });
+  const start = (id: string) => call(dispatcher().info, 'start_agent', { work_id: id, prompt: 'Run the MP scenarios on the 0.50 line.', title: 'pair', sandbox: 'pc/alpha' });
+  for (const id of ['w6192', 'w6193']) {
+    const r = await start(id);
+    assert.equal(r.isError, true, id);
+    assert.match(r.text, /leg 1 \(the host\) on pc\/alpha: pc: its sandbox agents were measured at Low integrity.*Nothing was started\./, id);
+    assert.deepEqual(store.work.get(id)!.sessionIds, [], id);
+  }
+  const ok = await start('w6188');
+  assert.equal(ok.isError, false, ok.text);
+  const w = store.work.get('w6188')!;
+  assert.equal(w.sessionIds.length, 1);
+  assert.equal(w.pair?.legacyData, undefined);
+  assert.match(w.pair?.dataDirChecked ?? '', /reads FF_GAME_DATA_DIR/);
+  assert.ok(w.log.some((l) => /start_agent: its player at 20786882d8 reads FF_GAME_DATA_DIR/.test(l)), w.log.join('\n'));
+});
+
+// w6235 (w6192's review of PR #1402): nit 1, nothing failed with the sameCommit guard in filePair removed; and its
+// should-fix-later point, legacy_data about another player than `commit` (a Steam 0.50 build) was cleared by that commit's file.
+const W6235_OTHER = 'ac80d7b0bb00000000000000000000000000000b';
+test('w6235: request_pair keeps the mark when the verdict is for another commit, or legacy_data names another player', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w6236', by: LOTH }, { id: 'w6237', by: LOTH }]);
+  env.machines.update('pc', { platform: 'win32', fence: { state: 'on', kind: 'low', agentIntegrity: 'low' } });
+  const ask = { what: 'MP determinism check of PR #4382 on pre-1.0', brief: 'Build the 0.50 line at the PR head and run the MP scenarios.', commit: '20786882d8' };
+  const before = store.work.size;
+  // A positive read, but of another commit than the pair's: the pair's own commit was never checked.
+  agents.gameDataDirAt = () => Promise.resolve({ reads: true, commit: W6235_OTHER });
+  const wrong = await startedFor(env, 'w6236');
+  await assert.rejects(
+    async () => wrong.h.request_pair!(ask),
+    /^Error: Nothing filed: no computer fits a pair run of a pre-w5297 player \(read from its words.*; FF Factory's check answered for ac80d7b0bb, not 20786882d8, so 20786882d8 was not checked/,
+  );
+  // The commit reads FF_GAME_DATA_DIR, but legacy_data says the host runs a Steam 0.50 build: that player was not checked.
+  agents.gameDataDirAt = fakeDataDir;
+  const steam = await startedFor(env, 'w6237');
+  await assert.rejects(
+    async () => steam.h.request_pair!({ ...ask, legacy_data: 'the host runs the Steam pre-1.0 0.50.0.47 build' }),
+    /^Error: Nothing filed: no computer fits a pair run of a pre-w5297 player \(the host runs the Steam pre-1\.0 0\.50\.0\.47 build; its legacy_data names build 0\.50\.0\.47, but FF Factory checked only 20786882d8/,
+  );
+  assert.equal(store.work.size, before, 'nothing filed');
+});
+
+test('w6235: start_agent keeps the mark when the verdict is for another commit, or the mark names another player', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, dispatcher, call, machines, agents } = env;
+  putRequests(store, [
+    { id: 'w6238', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: LEGACY_READ, commit: '20786882d8' } },
+    { id: 'w6239', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: 'the client runs ac80d7b0bb, the Steam 0.50.0.47 build', commit: '20786882d8' } },
+  ]);
+  machines.update('pc', { platform: 'win32', fence: { state: 'on', kind: 'low', agentIntegrity: 'low' } });
+  const start = (id: string) => call(dispatcher().info, 'start_agent', { work_id: id, prompt: 'Run the MP scenarios on the 0.50 line.', title: 'pair', sandbox: 'pc/alpha' });
+  for (const [id, dataDir] of [['w6238', () => Promise.resolve({ reads: true, commit: W6235_OTHER })], ['w6239', fakeDataDir]] as const) {
+    agents.gameDataDirAt = dataDir as (c: string) => Promise<DataDirVerdict>;
+    const r = await start(id);
+    assert.equal(r.isError, true, id);
+    assert.match(r.text, /leg 1 \(the host\) on pc\/alpha: pc: its sandbox agents were measured at Low integrity.*Nothing was started\./, id);
+    assert.ok(store.work.get(id)!.pair?.legacyData, id);
+    assert.equal(store.work.get(id)!.pair?.dataDirChecked, undefined, id);
+  }
+});
+
+test('w6235: the queue re-check clears a queued marked pair run whose commit reads FF_GAME_DATA_DIR, once per 10 minutes', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  const asked: string[] = [];
+  agents.gameDataDirAt = (c) => (asked.push(c), fakeDataDir(c));
+  putRequests(store, [
+    { id: 'w6240', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: LEGACY_READ, commit: '20786882d8' } },
+    { id: 'w6241', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: 'ac80d7b0 is 0.50', commit: 'ac80d7b0' } },
+    { id: 'w6242', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: 'the host runs the Steam 0.50.0.47 build', commit: '20786882d8' } },
+    { id: 'w6243', by: LOTH, status: 'done', pair: { legs: 1, legacyData: LEGACY_READ, commit: '20786882d8' } },
+  ]);
+  const t0 = Date.parse(T0);
+  assert.deepEqual(await agents.recheckLegacyPairs(t0), ['w6240']);
+  assert.equal(store.work.get('w6240')!.pair?.legacyData, undefined);
+  assert.match(store.work.get('w6240')!.pair?.dataDirChecked ?? '', /^its player at 20786882d8 reads FF_GAME_DATA_DIR/);
+  assert.ok(store.work.get('w6240')!.log.some((l) => /the queue re-check: its player at 20786882d8 reads FF_GAME_DATA_DIR/.test(l)));
+  assert.ok(store.work.get('w6241')!.pair?.legacyData, 'an older commit stays marked');
+  assert.ok(store.work.get('w6242')!.pair?.legacyData, 'words about another player stay marked, and GitHub is not asked');
+  assert.ok(store.work.get('w6243')!.pair?.legacyData, 'a closed run is left alone');
+  assert.deepEqual(asked, ['20786882d8', 'ac80d7b0']);
+  // Within 10 minutes the still-marked one is not read again; after them it is.
+  assert.deepEqual(await agents.recheckLegacyPairs(t0 + 60_000), []);
+  assert.equal(asked.length, 2);
+  await agents.recheckLegacyPairs(t0 + 11 * 60_000);
+  assert.deepEqual(asked, ['20786882d8', 'ac80d7b0', 'ac80d7b0']);
+});
+
+// w6451 (w6442's review of PR #1477): a run marked from its what or brief (no legacy_data) whose words name another player
+// was cleared by its commit's file at request_pair, start_agent and the queue re-check, which read only legacy_data.
+test('w6451: what and brief that name another player keep the mark at request_pair, start_agent and the queue re-check', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, dispatcher, call, machines } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w6452', by: LOTH }]);
+  machines.update('pc', { platform: 'win32', fence: { state: 'on', kind: 'low', agentIntegrity: 'low' } });
+  agents.gameDataDirAt = fakeDataDir;
+  const before = store.work.size;
+  const s = await startedFor(env, 'w6452');
+  await assert.rejects(
+    async () => s.h.request_pair!({ what: 'MP determinism check of PR #4382', brief: 'The host runs the Steam pre-1.0 0.50.0.47 build; the client runs the PR head.', commit: '20786882d8' }),
+    /^Error: Nothing filed: no computer fits a pair run of a pre-w5297 player \(read from its words.*its brief names build 0\.50\.0\.47, but FF Factory checked only 20786882d8/,
+  );
+  // When another reason leads (the read failed), the other player's reason is kept in the mark too.
+  putRequests(store, [{ id: 'w6457', by: LOTH }]);
+  const s2 = await startedFor(env, 'w6457');
+  await assert.rejects(
+    async () => s2.h.request_pair!({ what: 'MP determinism check of PR #4382', brief: 'The host runs the Steam pre-1.0 0.50.0.47 build.', commit: 'cafef00d12' }),
+    /GitHub knows no commit cafef00d12.*; its brief names build 0\.50\.0\.47/,
+  );
+  assert.equal(store.work.size, before + 1, 'nothing filed (w6457 is the request, put above)');
+  // Runs marked from their words before this fix: the mark is the plain LEGACY_READ, the other player is only in the brief
+  // (newPair's shape: the worker's brief, then FF Factory's own words, whose session id is hex and must not count).
+  const filed = (id: string, what: string, brief: string) => ({ id, by: LOTH, status: 'queued' as const, queuedFor: { at: T0 }, title: `Pair run for w6452: ${what}`, brief: `${brief}\n\nFF Factory filed this for worker e425e43b on w6452 (w1945, request_pair): 1 leg.`, pair: { legs: 1, legacyData: LEGACY_READ, commit: '20786882d8' } });
+  putRequests(store, [
+    filed('w6453', 'MP check of PR #4382 on pre-1.0', 'The client runs ac80d7b0bb, the Steam build.'),
+    filed('w6454', 'MP check of PR #4382 on pre-1.0', 'Run the MP scenarios at the PR head.'),
+    filed('w6455', 'MP check of 0.50.0.47 against PR #4382', 'Run the MP scenarios.'),
+  ]);
+  const r = await call(dispatcher().info, 'start_agent', { work_id: 'w6453', prompt: 'Run the MP scenarios on the 0.50 line.', title: 'pair', sandbox: 'pc/alpha' });
+  assert.equal(r.isError, true);
+  assert.ok(store.work.get('w6453')!.pair?.legacyData, 'start_agent: the brief names another commit');
+  assert.deepEqual(await agents.recheckLegacyPairs(Date.parse(T0)), ['w6454'], 'only the run whose words name no other player is cleared; the session id in FF Factory\'s words does not count');
+  assert.ok(store.work.get('w6455')!.pair?.legacyData, 'the re-check: the what names another build');
+});
+
+test('w6451: the queue re-check forgets runs that are no longer queued and marked', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  const asked: string[] = [];
+  agents.gameDataDirAt = (c) => (asked.push(c), fakeDataDir(c));
+  putRequests(store, [{ id: 'w6456', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: 'ac80d7b0 is 0.50', commit: 'ac80d7b0' } }]);
+  const t0 = Date.parse(T0);
+  await agents.recheckLegacyPairs(t0);
+  const map = (agents as unknown as { legacyRechecked: Map<string, number> }).legacyRechecked;
+  assert.deepEqual([...map.keys()], ['w6456 ac80d7b0']);
+  store.work.get('w6456')!.status = 'done';
+  await agents.recheckLegacyPairs(t0 + 60_000);
+  assert.deepEqual([...map.keys()], [], 'a closed run is dropped');
+  assert.deepEqual(asked, ['ac80d7b0']);
+});
+
+test('w6451: pairAskWords keeps the worker\'s own words of a filed pair run', () => {
+  assert.deepEqual(pairAskWords({ title: 'Pair run for w12: MP check', brief: `Run it.${PAIR_FILED_BY}e425e43b on w12.` }), { what: 'MP check', brief: 'Run it.' });
+});
+
 test('w5965: the words that mark a pre-w5297 player', () => {
   for (const t of ['MP-activity-fingerprint on pre-1.0', 'the 0.50 line at ac80d7b0', 'build 0.50.0.47', 'its player predates w5297']) assert.equal(mentionsLegacyPlayer(t), true, t);
   for (const t of ['a 0.50 s wait', 'MP-activity-fingerprint on master', 'pre-1.05 notes', 'version 10.50.1']) assert.equal(mentionsLegacyPlayer(t), false, t);
+});
+
+// w6206 (for lothsahn): w6187's pair run was filed with a mistyped full sha (20786882d8bd6c1a…) whose first 10 characters
+// matched the real head of game PR #4382 (20786882d8c3f540…); only its leg's own `gh pr view` caught it.
+const W6206_HEAD = '20786882d8c3f54012a49c63c5073eb7c2b1f0dc';
+const W6206_TYPO = '20786882d8bd6c1a00000000000000000000beef';
+const fakeCommit = (commit: string): Promise<CommitVerdict> =>
+  Promise.resolve(W6206_HEAD.startsWith(commit) ? { known: true, full: W6206_HEAD }
+    : commit === 'cafef00d12' ? { known: undefined, why: 'FF Factory could not read commit cafef00d12 from GitHub to check that it exists in Final-Factory/FinalFactory (HTTP 502; w6206)' }
+    : { known: false, why: `commit ${commit} is not in Final-Factory/FinalFactory: GitHub has no such commit; it looks like ${W6206_HEAD}, the head of w6129-port, which shares its first 10 characters. Pass the sha the legs must run (git rev-parse HEAD on the pushed branch; w6206)` });
+
+test('w6206: request_pair refuses a commit the game repo does not have, naming the head it looks like; a real full or short sha is filed; a failed read files with a warning', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  agentsRoom(agents, []);
+  agents.gameCommitAt = fakeCommit;
+  putRequests(store, [{ id: 'w6187', by: LOTH }, { id: 'w6207', by: LOTH }, { id: 'w6208', by: LOTH }]);
+  const ask = { what: 'MP determinism check of PR #4382', brief: 'Build the PR head and run the MP scenarios.' };
+  const typo = await startedFor(env, 'w6187');
+  const before = store.work.size;
+  await assert.rejects(async () => typo.h.request_pair!({ ...ask, commit: W6206_TYPO }),
+    new RegExp(`^Error: Nothing filed: commit ${W6206_TYPO} is not in Final-Factory/FinalFactory: GitHub has no such commit; it looks like ${W6206_HEAD}, the head of w6129-port`));
+  assert.equal(store.work.size, before, 'nothing filed');
+  const full = String(await typo.h.request_pair!({ ...ask, commit: W6206_HEAD }));
+  assert.match(full, /^Filed w\d+/);
+  assert.doesNotMatch(full, /WARNING/);
+  const short = await startedFor(env, 'w6207');
+  assert.match(String(await short.h.request_pair!({ ...ask, what: 'MP check of PR #4383', commit: '20786882d8' })), /^Filed w\d+/);
+  const down = await startedFor(env, 'w6208');
+  const warned = String(await down.h.request_pair!({ ...ask, what: 'MP check of PR #4384', commit: 'cafef00d12' }));
+  assert.match(warned, /^Filed w\d+.* WARNING: FF Factory could not read commit cafef00d12 from GitHub to check that it exists .*HTTP 502.*placed unchecked/);
+});
+
+test('w6206: start_agent refuses a pair run whose commit the game repo does not have, and starts one whose short sha is real', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, dispatcher, call, agents } = env;
+  agents.gameCommitAt = fakeCommit;
+  putRequests(store, [
+    { id: 'w6188', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, commit: W6206_TYPO } },
+    { id: 'w6209', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, commit: '20786882d8' } },
+  ]);
+  const start = (id: string) => call(dispatcher().info, 'start_agent', { work_id: id, prompt: 'Run the MP scenarios.', title: 'pair', sandbox: 'pc/alpha' });
+  const typo = await start('w6188');
+  assert.equal(typo.isError, true);
+  assert.match(typo.text, new RegExp(`w6188's commit ${W6206_TYPO} is not in Final-Factory/FinalFactory.*it looks like ${W6206_HEAD}.*Nothing was started\\.`));
+  assert.deepEqual(store.work.get('w6188')!.sessionIds, []);
+  // Its requester refiles it with the right sha: the refused run no longer holds the computer for itself (w3530).
+  store.putWork({ ...store.work.get('w6188')!, status: 'cancelled' });
+  const ok = await start('w6209');
+  assert.equal(ok.isError, false, ok.text);
+  assert.doesNotMatch(ok.text, /WARNING/);
+});
+
+test('w6206: start_agent starts a pair run whose commit GitHub could not be read, with a warning that says so', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, dispatcher, call, agents } = env;
+  agents.gameCommitAt = fakeCommit;
+  putRequests(store, [{ id: 'w6210', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, commit: 'cafef00d12' } }]);
+  const down = await call(dispatcher().info, 'start_agent', { work_id: 'w6210', prompt: 'Run the MP scenarios.', title: 'pair', sandbox: 'pc/alpha' });
+  assert.equal(down.isError, false, down.text);
+  assert.match(down.text, /WARNING: FF Factory could not read commit cafef00d12 .*placed unchecked/);
+  assert.equal(store.work.get('w6210')!.sessionIds.length, 1);
 });

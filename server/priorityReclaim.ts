@@ -20,7 +20,7 @@
  * person-approved bench turn, a bench lock or a Unity batch run or player of its sandbox, a Live view, a check-in with its
  * editor up, a background job, a worker starting or being moved. docs/machines.md, "Placing work".
  */
-import { priorityIndex, type SessionInfo, type WorkPriority } from '../shared/types.ts';
+import { atLeast, priorityIndex, type SessionInfo, type WorkPriority } from '../shared/types.ts';
 
 /**
  * How long a worker that was reclaimed or pre-empted is not taken from again, counted from when it was placed again. A move
@@ -67,6 +67,36 @@ export interface Pressure {
    */
   resume?: string;
 }
+
+/**
+ * w6432: the queued game work of strictly higher rank than `mine` that a free game sandbox on `machineId` is for, or
+ * undefined: work whose room there is that free sandbox (machines), or, for urgent and frantic work, that sandbox and one
+ * agent seat (preemptOn: its seat comes from a pre-emption, so a sandbox handed to lower work there is lost to it). Highest
+ * priority first. Three times on 2026-11-27 lower work took a lothdesktop sandbox while w6431 (frantic, the 0.50.0.118
+ * release) was queued for one: a move off offline m5 into slot1 at 15:04Z (w6235, normal), a move off offline BEAST into
+ * slot5 at 15:15Z (w5479, normal), and at about 15:28Z fa2c6212 (w6430, normal) resuming into slot2, the sandbox it had
+ * just given up for w6431: lothdesktop was at its agent cap, so w6431 was in preemptOn only, and w3507's yield reads machines.
+ */
+export function outrankedOn(pressure: readonly Pressure[], mine: number, machineId: string): Pressure | undefined {
+  let best: Pressure | undefined;
+  for (const p of pressure) {
+    const rank = rankOf(p.priority);
+    if (rank <= mine || (best && rankOf(best.priority) >= rank)) continue;
+    if (p.machines.includes(machineId) || (atLeast(p.priority, 'urgent') && p.preemptOn.includes(machineId))) best = p;
+  }
+  return best;
+}
+
+/**
+ * w6432: a start that failed after its sandbox was prepared (start_agent, w5278) leaves its request neither started nor
+ * Queued until the dispatcher acts (w6431: failed at 15:03:58Z, queued at 15:04:25Z, and a move took the sandbox at
+ * 15:04:04Z). For FAILED_START_MS it counts as queued game work for that computer, so nothing of lower priority takes the
+ * sandbox meanwhile. Exported for tests.
+ */
+export const FAILED_START_MS = 10 * 60_000;
+
+/** A failed start (Agents' start_agent, w5278) as pressure, for outrankedOn (w6432). Exported for tests. */
+export const failedStartPressure = (work: string, title: string, priority: WorkPriority, machine: string): Pressure => ({ work, title, priority, room: false, machines: [machine], preemptOn: [machine] });
 
 /** One occupied sandbox as reclaim sees it. */
 export interface SandboxHolders {

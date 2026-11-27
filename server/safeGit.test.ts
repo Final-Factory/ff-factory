@@ -39,7 +39,10 @@ function sources(): string[] {
  * either fences git (calls gitFence or gitFenceSync in its file, as proc.ts, worker.ts and prFlow.ts do) or joins this list.
  */
 const NOT_GIT: Record<string, string> = {
+  'machine/playersLaunch.ts|cmd': 'a players-broker player, inside the player fence (fencedPlayer: sandbox-exec or the Landlock wrapper around the slot exe, w5615)',
   'machine/daemon.ts|runnerEnvCmd': 'plutil, launchctl and powershell.exe for the macOS and Windows CI runners (machine/runnerEnv.ts, w5999)',
+  'server/spawnThread.ts|m.cmd': 'whatever execFileOffThread is given: its callers fence git (proc.run), and the lint checks each caller as a spawner (w6077)',
+  'server/spawnThread.ts|cmd': 'the same, on the main thread when the spawn thread is off: its callers fence git (proc.run; w6077)',
   'server/rerunGuard.ts|trustedGh(': 'gh (resolved from a trusted PATH, w5542)',
   'machine/ownerSecrets.ts|cmd': 'gh auth token (trustedGh, w5548)',
   'machine/lowIntegrity.ts|cmd': 'icacls (LowCopies execSync, w5838)',
@@ -52,6 +55,10 @@ const NOT_GIT: Record<string, string> = {
   'machine/fenceProbe.ts|cmd': 'the fence probe (sandbox-exec, landlock)',
   'machine/maxEventsFence.ts|cmd': 'the Max events probe (/bin/sh under sandbox-exec or landlock, w5552)',
   'machine/workerCaps.ts|exe': 'the Windows job-object helper (w5554)',
+  'machine/longRuns.ts|node': "the long-run keeper: the daemon's Low node copy (w6367)",
+  'machine/longRuns.ts|b': "the keeper script's run: Git Bash for agents on the sandbox's nightly_run.sh (w6367)",
+  'machine/longRuns.ts|tk': "the keeper's time limit and runs/stop: Windows' taskkill.exe on its run's tree (w6367)",
+  'machine/longRuns.ts|helper': 'the Windows job-object helper ffjob.exe, around a long run (w6367)',
   'machine/unity.ts|bin': 'the Unity editor',
   'machine/unity.ts|SANDBOX_EXEC': 'sandbox-exec running the Unity editor under the workers\' Seatbelt profile (w5630)',
   'machine/unity.ts|lc': 'Unity\'s licensing client (Unity.Licensing.Client), started outside the fence before a fenced Mac editor (w5630)',
@@ -65,6 +72,8 @@ const NOT_GIT: Record<string, string> = {
   'machine/unitySlots.ts|run.cmd': "a worker's own batch command (unity-slot run)",
   'machine/unitySlots.ts|process.execPath': 'node',
   'machine/ffuSlots.ts|process.execPath': 'node (the daemon runs `ffu-slot list --json`, w5912)',
+  'machine/ffuSlots.ts|cmd': 'rustc -V, to find rustc for the native slot hook (findRustc, w6062)',
+  'machine/ffuSlots.ts|rustc.cmd': 'rustc, building the native slot hook (ensureNativeSlotHooks, w6062)',
   'server/publicGit.ts|cmd': 'gh and curl',
   'server/voice.ts|c.python': 'python',
   'server/machineDeployWin.ts|cmd': 'powershell or ssh',
@@ -108,6 +117,13 @@ export function gitSpawnProblems(files: { rel: string; text: string }[]): string
       if (/['"]-c['"],\s*['"`]git\s/.test(l) && !/\bgitFence(Sync)?\(/.test(l)) problems.push(`${rel}:${i + 1}: a shell runs git without server/safeGit.ts (give it gitFence's env)`);
     });
     const { names, spaces } = childProcessNames(text);
+    // execFileOffThread starts what it is given (server/spawnThread.ts, w6077): each caller is checked as if it were execFile.
+    for (const m of text.matchAll(/import\s*\{([^}]*)\}\s*from\s*['"][^'"]*spawnThread(?:\.ts)?['"]/g)) {
+      for (const part of m[1].split(',')) {
+        const [name, alias] = part.trim().split(/\s+as\s+/);
+        if (name === 'execFileOffThread') names.add((alias ?? name).trim());
+      }
+    }
     if (!names.size && !spaces.length) continue;
     const callee = [...names].map((n) => `(?<![\\w.])${n}`).concat(spaces.map((s) => `\\b${s}\\.\\w+`));
     if (!callee.length) continue;
@@ -138,13 +154,16 @@ test('w5541: the lint catches a raw git spawn, an aliased one and a new generic 
     { rel: 'machine/d.ts', text: "import { spawn } from 'node:child_process';\nexport const go = (bin: string) => spawn(bin, []);\n" },
     { rel: 'machine/e.ts', text: "import { spawn } from 'node:child_process';\nimport { run } from './proc.ts';\nspawn('node', []);\nrun('git', []);\nd.spawn('git', []);\n" },
     { rel: 'scripts/f.ts', text: "await must('copy', 'bash', ['-c', `git -C \"$1\" archive HEAD | tar -x`, 'x', src]);\nawait must('copy', 'bash', ['-c', `git archive HEAD`], { env: (await gitFence([])).env });\n" },
+    { rel: 'machine/g.ts', text: "import { execFileOffThread as eft } from '../server/spawnThread.ts';\neft('git', [], {}, cb);\neft(bin, [], {}, cb);\neft('powershell.exe', [], {}, cb);\n" },
   ]);
-  assert.equal(p.length, 5, p.join('\n'));
+  assert.equal(p.length, 7, p.join('\n'));
   assert.match(p[0], /^machine\/a\.ts:2: execFile\('git'/);
   assert.match(p[1], /^machine\/b\.ts:2: ss\('git'/);
   assert.match(p[2], /^machine\/c\.ts:2: cp\.spawn\('git\.exe'/);
   assert.match(p[3], /^machine\/d\.ts:2: spawn\(bin, \.\.\.\) runs a program a variable names/);
   assert.match(p[4], /^scripts\/f\.ts:1: a shell runs git without server\/safeGit\.ts/);
+  assert.match(p[5], /^machine\/g\.ts:2: eft\('git'/);
+  assert.match(p[6], /^machine\/g\.ts:3: eft\(bin, \.\.\.\) runs a program a variable names/);
 });
 
 // ---------------------------------------------------------------- the pieces
@@ -431,6 +450,43 @@ test('w5573: a repository-set url.insteadOf refuses the daemon’s push and fetc
     git(main, 'config', '--unset', `url.${slash(theirs)}.insteadOf`);
     const ok = await run('git', ['-C', wt, 'push', 'origin', 'sandbox/x']);
     assert.equal(ok.code, 0, ok.stderr);
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('w6082: a planted core.alternateRefsCommand runs on a plain fetch through an alternate, never through the fence', { skip }, async () => {
+  const f = fixture();
+  try {
+    const { main } = worktree(f);
+    // The repository a worker points its alternates at, and the one it plants the command in.
+    const alt = path.join(f.root, 'alt.git');
+    git(f.root, 'clone', '-q', '--bare', slash(main), alt);
+    const me = path.join(f.root, 'me');
+    git(f.root, 'init', '-q', '-b', 'master', me);
+    fs.writeFileSync(path.join(me, '.git', 'objects', 'info', 'alternates'), `${slash(path.join(alt, 'objects'))}\n`);
+    // A command that logs and prints no refs (the fixture's evil.sh reads stdin, which git never closes here).
+    const cmd = slash(path.join(f.root, 'alt.sh'));
+    fs.writeFileSync(cmd, `#!/bin/sh\necho "alternateRefsCommand $*" >> '${f.marker}'\nexit 0\n`, { mode: 0o755 });
+    git(me, 'config', 'core.alternateRefsCommand', cmd);
+    fs.writeFileSync(path.join(main, 'b.txt'), 'b\n');
+    git(main, 'add', 'b.txt');
+    git(main, 'commit', '-qm', 'b');
+
+    // Control: plain git runs the planted command on a fetch (the plant is live).
+    spawnSync('git', ['-C', me, 'fetch', '-q', slash(main), 'master'], { encoding: 'utf8', timeout: 30_000 });
+    assert.match(f.ran(), /alternateRefsCommand /, 'plain git fetch ran the planted command');
+    fs.rmSync(f.marker, { force: true });
+
+    // The fence: run() (server/proc.ts) and the sync wrapper fetch, and the fetch still works.
+    const a = await run('git', ['-C', me, 'fetch', '-q', slash(main), 'master:refs/heads/a']);
+    assert.equal(a.code, 0, a.stderr);
+    gitExecFileSync(['-C', me, 'fetch', '-q', slash(main), 'master:refs/heads/b'], { encoding: 'utf8' });
+    assert.equal(gitExecFileSync(['-C', me, 'rev-parse', 'refs/heads/b'], { encoding: 'utf8' }).trim(), git(main, 'rev-parse', 'master').trim());
+    // The calls that skip the scan (needsScan) carry the fixed keys too.
+    for (const args of [['rev-parse', '--verify', '--quiet', 'refs/heads/a'], ['symbolic-ref', '--short', 'HEAD'], ['config', '--get', 'core.alternateRefsCommand'], ['worktree', 'list', '--porcelain']])
+      await run('git', ['-C', me, ...args]);
+    assert.equal(f.ran(), '', 'no planted program ran');
   } finally {
     fs.rmSync(f.root, { recursive: true, force: true });
   }

@@ -30,13 +30,97 @@ const plain = (cwd: string, ...a: string[]) => String(gitExecFileSync(['-C', cwd
 const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
 const anon = ['-c', 'credential.helper=', '-c', 'credential.interactive=never'];
 
+/**
+ * w6141: the hosted runner sometimes cannot reach github.com at all (run 45864772073, macos-latest: "Failed to connect to
+ * github.com port 443 after 10679 ms: Couldn't connect to server" on the first clone). These tests check the update path,
+ * not the runner's network, so a leg that reaches GitHub is run again, up to twice after a short pause, when and only when
+ * git says it never connected. Every other failure (a refusal, a missing ref, a fence error) stays fatal on its first try.
+ */
+const connectFailure = (text: string) => /Failed to connect to|Couldn't connect to server|Could not connect to server|Could not resolve host/i.test(text);
+const RETRY_PAUSES_MS = [5_000, 15_000];
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Run an exec-style leg ({ code, stderr }) again after a pause while it failed on a connect error. */
+async function retryExec<R extends { code: number; stderr: string }>(run: () => Promise<R>, pauses = RETRY_PAUSES_MS): Promise<R> {
+  for (let i = 0; ; i++) {
+    const r = await run();
+    if (r.code === 0 || i >= pauses.length || !connectFailure(r.stderr)) return r;
+    console.log(`w6141: git could not reach GitHub (${r.stderr.trim()}); trying again in ${pauses[i] / 1000} s`);
+    await pause(pauses[i]);
+  }
+}
+
+/** Run a leg that throws (a sync or async call) again after a pause while it threw a connect error. */
+async function retryThrow<T>(run: () => T | Promise<T>, pauses = RETRY_PAUSES_MS): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await run();
+    } catch (e) {
+      const err = e as Error & { stderr?: unknown };
+      const text = `${err?.message ?? e}\n${err?.stderr ?? ''}`;
+      if (i >= pauses.length || !connectFailure(text)) throw e;
+      console.log(`w6141: git could not reach GitHub (${text.trim()}); trying again in ${pauses[i] / 1000} s`);
+      await pause(pauses[i]);
+    }
+  }
+}
+
+test('w6141: only a connect failure is retried, at most twice; every other failure is fatal on its first try', async () => {
+  for (const t of [
+    "fatal: unable to access 'https://github.com/Final-Factory/ff-factory.git/': Failed to connect to github.com port 443 after 10679 ms: Couldn't connect to server",
+    "fatal: unable to access 'https://github.com/Final-Factory/ff-factory.git/': Could not resolve host: github.com",
+    "Couldn't connect to server",
+    // Linux's newer curl (measured on biscuit, git clone https://127.0.0.1:9/x.git):
+    "fatal: unable to access 'https://127.0.0.1:9/x.git/': Failed to connect to 127.0.0.1 port 9 after 0 ms: Could not connect to server",
+    'Could not connect to server',
+  ]) assert.equal(connectFailure(t), true, t);
+  for (const t of [
+    "fatal: Remote branch nope not found in upstream origin",
+    "fatal: repository 'https://github.com/Final-Factory/nope.git/' not found",
+    "fatal: unable to access 'https://github.com/x.git/': The requested URL returned error: 403",
+    "fatal: unable to access 'https://github.com/x.git/': Operation timed out after 300000 milliseconds",
+    "fatal: unable to access 'https://github.com/x.git/': SSL certificate problem: unable to get local issuer certificate",
+    'commit 0123456789ab is not on main at https://github.com/Final-Factory/ff-factory.git: refused, nothing was changed',
+    '',
+  ]) assert.equal(connectFailure(t), false, t);
+
+  const fast = [0, 0];
+  const connect = { code: 128, stderr: "fatal: unable to access 'https://github.com/x.git/': Failed to connect to github.com port 443" };
+  const other = { code: 128, stderr: 'fatal: Remote branch nope not found in upstream origin' };
+  const ok = { code: 0, stderr: '' };
+  const seq = (rs: { code: number; stderr: string }[]) => { let n = 0; return { run: async () => rs[n++], calls: () => n }; };
+
+  let s = seq([connect, ok]);
+  assert.equal((await retryExec(s.run, fast)).code, 0, 'a connect failure then a success: retried');
+  assert.equal(s.calls(), 2);
+  s = seq([connect, connect, connect, ok]);
+  assert.equal((await retryExec(s.run, fast)).stderr, connect.stderr, 'three connect failures: given up after the second retry');
+  assert.equal(s.calls(), 3);
+  s = seq([other, ok]);
+  assert.equal((await retryExec(s.run, fast)).stderr, other.stderr, 'another failure: not retried');
+  assert.equal(s.calls(), 1);
+  s = seq([connect, other, ok]);
+  assert.equal((await retryExec(s.run, fast)).stderr, other.stderr, 'a connect failure then another failure: that one is fatal');
+  assert.equal(s.calls(), 2);
+
+  let n = 0;
+  assert.equal(await retryThrow(() => { if (n++ === 0) throw new Error('could not read main (Command failed: Could not resolve host: github.com)'); return 'ok'; }, fast), 'ok');
+  assert.equal(n, 2, 'a thrown connect failure: retried');
+  n = 0;
+  await assert.rejects(retryThrow(async () => { n++; throw new Error('commit 0123 is not on main: refused'); }, fast), /is not on main/);
+  assert.equal(n, 1, 'a thrown refusal: not retried');
+  n = 0;
+  await assert.rejects(retryThrow(() => { n++; throw Object.assign(new Error('Command failed: git clone'), { stderr: Buffer.from("Couldn't connect to server") }); }, fast), /Command failed/);
+  assert.equal(n, 3, "a sync throw whose stderr says it never connected: tried three times, then thrown");
+});
+
 test('w5573: the installer clones and fetches ff-factory, and the daemon self-updates to a --ref commit, through the fence', { skip: !online && 'reaches github.com: CI or FF_NETWORK_TESTS=1', timeout: 10 * 60_000 }, async () => {
   const dir = scratch();
   try {
     const clone = path.join(dir, 'ff-factory');
-    const c = await exec('git', [...anon, 'clone', '--quiet', '--branch', 'main', FF, clone], { env, timeoutMs: 5 * 60_000 });
+    const c = await retryExec(() => exec('git', [...anon, 'clone', '--quiet', '--branch', 'main', FF, clone], { env, timeoutMs: 5 * 60_000 }));
     assert.equal(c.code, 0, `clone: ${c.stderr}`);
-    const f = await exec('git', [...anon, '-C', clone, 'fetch', '--quiet', 'origin', 'main'], { env, timeoutMs: 5 * 60_000 });
+    const f = await retryExec(() => exec('git', [...anon, '-C', clone, 'fetch', '--quiet', 'origin', 'main'], { env, timeoutMs: 5 * 60_000 }));
     assert.equal(f.code, 0, `fetch: ${f.stderr}`);
     const commit = plain(clone, 'rev-parse', 'origin/main');
 
@@ -48,11 +132,11 @@ test('w5573: the installer clones and fetches ff-factory, and the daemon self-up
     const src = path.join(dir, 'app', 'src');
     await checkoutFromBundle(src, bundle, commit);
     assert.equal(plain(src, 'rev-parse', 'HEAD'), commit, 'the install is on the commit');
-    await checkPublished(src, commit);
+    await retryThrow(() => checkPublished(src, commit));
 
     plain(src, '-c', 'user.name=t', '-c', 'user.email=t@users.noreply.github.com', 'commit', '--quiet', '--allow-empty', '-m', 'not published');
     const unpublished = plain(src, 'rev-parse', 'HEAD');
-    await assert.rejects(checkPublished(src, unpublished), /is not on main/);
+    await assert.rejects(retryThrow(() => checkPublished(src, unpublished)), /is not on main/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -70,7 +154,7 @@ test('w5573: worker.ts tools clones, then fast-forwards, the tools checkout and 
     const d = {
       // Git for real; the script's shell is replaced by a stand-in that installs master's versions where it ran.
       exec: async (cmd: string, args: string[], o: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}) => {
-        if (cmd === 'git') return exec(cmd, args, o);
+        if (cmd === 'git') return retryExec(() => exec(cmd, args, o));
         const cwd = o.cwd ?? '';
         runs.push({ cwd, script: fs.existsSync(path.join(cwd, 'registerAgents.sh')) });
         const latest = marketplaceVersions(JSON.parse(fs.readFileSync(path.join(cwd, '.claude-plugin', 'marketplace.json'), 'utf8')));
@@ -120,7 +204,7 @@ test("w5597: an old-layout machine publishes from the new checkout; hooks and sc
     // The machine before w5597: FF Factory's checkout in <root>/tools, which a worker can write, and the marker naming it.
     const legacy = legacyToolsCheckout(root);
     fs.mkdirSync(path.dirname(legacy), { recursive: true });
-    gitExecFileSync(['clone', '--quiet', '--depth', '1', '--branch', BRANCH, AGENTS_REPO_URL, legacy], { env, windowsHide: true });
+    await retryThrow(() => gitExecFileSync(['clone', '--quiet', '--depth', '1', '--branch', BRANCH, AGENTS_REPO_URL, legacy], { env, windowsHide: true, stdio: 'pipe' }));
     plant(path.join(legacy, '.git'));
     fs.writeFileSync(path.join(legacy, 'registerAgents.sh'), hook, { mode: 0o755 });
     fs.mkdirSync(claudeDir, { recursive: true });
@@ -129,7 +213,7 @@ test("w5597: an old-layout machine publishes from the new checkout; hooks and sc
     const lines: string[] = [];
     const d = {
       exec: async (cmd: string, args: string[], o: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}) => {
-        if (cmd === 'git') return exec(cmd, args, o);
+        if (cmd === 'git') return retryExec(() => exec(cmd, args, o));
         const cwd = o.cwd ?? '';
         runs.push(cwd);
         const latest = marketplaceVersions(JSON.parse(fs.readFileSync(path.join(cwd, '.claude-plugin', 'marketplace.json'), 'utf8')));

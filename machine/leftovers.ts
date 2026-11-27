@@ -120,6 +120,11 @@ export interface ProcEnv {
   run?: string;
   /** FF_UNITY_MCP: the Unity MCP server an agent's claude runs, and its uvx and python (w5766, machine/unityMcp.ts). */
   mcp?: string;
+  /**
+   * w6217: GITHUB_ACTIONS or RUNNER_TRACKING_ID is set: a CI runner's or a CI job's process, whatever FF variables it also
+   * carries (a runner started from a worker's shell inherits its FF_SESSION_ID). Read only when asked (`readEnvs` ci).
+   */
+  ci?: boolean;
 }
 
 /** w4047: a program a worker started for a person (`ff-leftovers launch`): the marker, and no session of its own. */
@@ -972,17 +977,22 @@ public static class FFProcEnv {
   }
 }`;
 
-export function winEnvScript(pids: number[]): string {
+export function winEnvScript(pids: number[], ci = false): string {
   const list = pids.filter((p) => Number.isInteger(p) && p > 4).join(',');
+  const ciTest = ci ? " -or $b.Contains('GITHUB_ACTIONS=') -or $b.Contains('RUNNER_TRACKING_ID=')" : '';
+  const ciField = ci ? "; ci = ($b.Contains('GITHUB_ACTIONS=') -or $b.Contains('RUNNER_TRACKING_ID='))" : '';
   return [
     `Add-Type -TypeDefinition @'\n${WIN_ENV_CS}\n'@`,
-    `$out = foreach ($id in @(${list || '0'})) { $b = $null; try { $b = [FFProcEnv]::Block([int]$id) } catch { }; if ($b -and ($b.Contains('FF_SESSION_ID=') -or $b.Contains('FF_FOR_PERSON='))) { $m = @{}; foreach ($kv in $b.Split([char]0)) { if ($kv -match '^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON|FF_TIMED_RUN|FF_UNITY_MCP)=(.*)$') { $m[$matches[1]] = $matches[2] } }; [pscustomobject]@{ pid = [int]$id; session = $m['FF_SESSION_ID']; sandbox = $m['FF_SANDBOX_ID']; machine = $m['FF_MACHINE_ID']; root = $m['FF_WORKER_ROOT']; person = $m['FF_FOR_PERSON']; run = $m['FF_TIMED_RUN']; mcp = $m['FF_UNITY_MCP'] } } }`,
+    `$out = foreach ($id in @(${list || '0'})) { $b = $null; try { $b = [FFProcEnv]::Block([int]$id) } catch { }; if ($b -and ($b.Contains('FF_SESSION_ID=') -or $b.Contains('FF_FOR_PERSON=')${ciTest})) { $m = @{}; foreach ($kv in $b.Split([char]0)) { if ($kv -match '^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON|FF_TIMED_RUN|FF_UNITY_MCP)=(.*)$') { $m[$matches[1]] = $matches[2] } }; [pscustomobject]@{ pid = [int]$id; session = $m['FF_SESSION_ID']; sandbox = $m['FF_SANDBOX_ID']; machine = $m['FF_MACHINE_ID']; root = $m['FF_WORKER_ROOT']; person = $m['FF_FOR_PERSON']; run = $m['FF_TIMED_RUN']; mcp = $m['FF_UNITY_MCP']${ciField} } } }`,
     `@($out) | ConvertTo-Json -Compress`,
   ].join('\n');
 }
 
-/** The FF variables of each process, as this platform lets them be read. */
-export async function readEnvs(platform: UnityPlatform, pids: number[]): Promise<Map<number, ProcEnv>> {
+/**
+ * The FF variables of each process, as this platform lets them be read. `ci` (Windows only, w6217): also each process
+ * whose environment holds GITHUB_ACTIONS or RUNNER_TRACKING_ID, marked `ci`, with or without FF variables.
+ */
+export async function readEnvs(platform: UnityPlatform, pids: number[], opts: { ci?: boolean } = {}): Promise<Map<number, ProcEnv>> {
   const out = new Map<number, ProcEnv>();
   if (!pids.length) return out;
   if (platform === 'linux') {
@@ -1005,10 +1015,11 @@ export async function readEnvs(platform: UnityPlatform, pids: number[]): Promise
     }
     return out;
   }
-  const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winEnvScript(pids)], { timeoutMs: 120_000 });
+  const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winEnvScript(pids, !!opts.ci)], { timeoutMs: 120_000 });
   if (r.code !== 0) throw new Error(`reading process environments failed (${r.code}): ${r.stderr.trim().slice(0, 200)}`);
-  for (const x of parsePsJson<{ pid: number; session?: string; sandbox?: string; machine?: string; root?: string; person?: string; run?: string; mcp?: string }>(r.stdout, 'the Windows process environments')) {
-    if (x.session || x.person) out.set(Number(x.pid), { ...(x.session ? { session: x.session } : {}), ...(x.sandbox ? { sandbox: x.sandbox } : {}), ...(x.machine ? { machine: x.machine } : {}), ...(x.root ? { root: x.root } : {}), ...(x.person ? { person: x.person } : {}), ...(x.run ? { run: x.run } : {}), ...(x.mcp ? { mcp: x.mcp } : {}) });
+  for (const x of parsePsJson<{ pid: number; session?: string; sandbox?: string; machine?: string; root?: string; person?: string; run?: string; mcp?: string; ci?: boolean }>(r.stdout, 'the Windows process environments')) {
+    if (opts.ci && x.ci) out.set(Number(x.pid), { ...(x.session ? { session: x.session } : {}), ...(x.root ? { root: x.root } : {}), ci: true });
+    else if (x.session || x.person) out.set(Number(x.pid), { ...(x.session ? { session: x.session } : {}), ...(x.sandbox ? { sandbox: x.sandbox } : {}), ...(x.machine ? { machine: x.machine } : {}), ...(x.root ? { root: x.root } : {}), ...(x.person ? { person: x.person } : {}), ...(x.run ? { run: x.run } : {}), ...(x.mcp ? { mcp: x.mcp } : {}) });
   }
   return out;
 }
@@ -1374,7 +1385,7 @@ export function slotProcList(procs: Proc[], self: number, callers: number[] = []
 /** The player slots' context for `folders`, `check` and `remove-slot` (w2796): this host, live pids and the running processes' command lines. */
 export async function slotContext(o: { procs?: () => Promise<Proc[]>; self?: number; callers?: number[]; session?: string } = {}): Promise<SlotContext> {
   const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
-  const list = o.procs ?? workerCensus(platform, procsMailbox(slotsDir()));
+  const list = o.procs ?? workerCensus(platform, procsMailbox(slotsDir(), process.env.FF_SANDBOX_ID));
   const all = await list().catch(() => undefined);
   const procList = all && slotProcList(all, o.self ?? process.pid, o.callers ?? callerPids(process.env.FF_LEFTOVERS_CALLERS));
   const procs = procList?.map((p) => p.cmd);
@@ -1726,7 +1737,7 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   const { realDeps } = await import('./unity.ts');
   const hands = realDeps(platform);
   // w5397: under the worker fence `ps` is refused, and the daemon reads for this worker.
-  const read = t.read ?? workerReaders(platform, procsMailbox(slotsDir(e)), undefined, undefined, whoAsks(e));
+  const read = t.read ?? workerReaders(platform, procsMailbox(slotsDir(e), e.FF_SANDBOX_ID), undefined, undefined, whoAsks(e));
   const send = t.signal ?? ((pid: number, sig: 'SIGTERM' | 'SIGKILL') => hands.kill(pid, sig));
   const wait = t.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const tempRoot = sessionTempRoot(session, e);

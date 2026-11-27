@@ -1958,12 +1958,28 @@ export interface UpdateFlags {
   storeLock?: 'off' | 'warn' | 'on';
   /** The editor temp folder (w5833), macOS and Linux only: written as daemon.json's `editorTmpdir`; unset carries daemon.json's (absent: off). */
   editorTmpdir?: 'on' | 'off';
-  /** The path fence (w5863), macOS and Linux only: written as daemon.json's `pathFence`; unset carries daemon.json's (absent: warn). */
-  pathFence?: 'off' | 'warn';
+  /** The path fence (w5863), macOS and Linux only: written as daemon.json's `pathFence`; unset carries daemon.json's (absent: on). */
+  pathFence?: 'off' | 'warn' | 'on';
   /** Medium agents' own temp root and cargo home (w5862, w5869; docs/worker-root.md), every OS: written as daemon.json's `mediumAgentFolders`; unset carries daemon.json's. */
   mediumAgentFolders?: 'warn' | 'on';
   /** The daemon's own temp folder (w6000, machine/daemonTemp.ts), every OS: written as daemon.json's `daemonTmpdir`; unset carries daemon.json's (absent: on). */
   daemonTmpdir?: 'on' | 'off';
+  /** A virtual disk in a Low tools child (w5959, machine/lowIntegrity.ts toolsDiskPlan), Windows only: written as daemon.json's `toolsDiskLock`; unset carries daemon.json's (absent: warn). */
+  toolsDiskLock?: 'warn' | 'on';
+  /** CI jobs first on a Windows CI-first machine (w6110, machine/ciFirstWin.ts), Windows only: written as daemon.json's `winCiFirst`; unset carries daemon.json's (absent: warn). */
+  winCiFirst?: 'off' | 'warn' | 'enforce';
+  /** The shared-cache lock (w5615, docs/worker-root.md "Per-slot caches and the players broker"), every OS: written as daemon.json's `sharedLock`; unset carries daemon.json's. */
+  sharedLock?: 'off' | 'warn' | 'on';
+  /** The ffu CI runners' scheduled tasks and listeners at Normal priority (w6163, machine/runnerPriority.ts), Windows only: written as daemon.json's `runnerPriority`; unset carries daemon.json's (absent: the daemon's default). */
+  runnerPriority?: 'off' | 'warn' | 'enforce';
+  /** What an idle agent adopted across a sharedLock switch gets (w6305, w6287, docs/worker-root.md "After a sharedLock switch"), every OS: written as daemon.json's `hostRestage`; unset carries daemon.json's (absent: warn). */
+  hostRestage?: 'warn' | 'on';
+  /** The long-run route (w6367, machine/longRuns.ts): starts a sanctioned long run (the nightly) outside its worker's agent host; warn (default) logs and refuses so the caller starts it as before, on starts it, off refuses; every OS: written as daemon.json's `longRuns`; unset carries daemon.json's (absent: warn). */
+  longRuns?: 'off' | 'warn' | 'on';
+  /** w6378: daemon.json liveRunGuard: warn (the default) logs a WARNING when a sandbox trim, release or delete would hit a sandbox where a run of its worker still lives; off looks at nothing (the way back). Unset carries daemon.json's. */
+  liveRunGuard?: 'off' | 'warn';
+  /** w6412: daemon.json editorGitPackages: how a sandbox editor gets a git package its Packages/manifest.json names that Library/PackageCache lacks (machine/gitPackages.ts). warn (the default) only names the missing packages in the start note, unity status and the Package Manager dialog notice; on also fetches each into a mirror under <root>/cache-medium/git-packages with the daemon's own git and credential, and gives a Windows Low-integrity editor the workers' Git on PATH and a url.insteadOf to that mirror, so its Package Manager fetches without a credential; off looks at nothing (the way back). Takes effect at the editor's next start. Unset carries daemon.json's. */
+  editorGitPackages?: 'off' | 'warn' | 'on';
   /** The Dev Drive (w900): "on" makes one if the install has none; unset keeps the one it has (an update never makes one on its own). */
   devDrive?: 'on' | 'off';
   devDriveMaxGB?: number;
@@ -2057,15 +2073,15 @@ export function applyEditorTmpdir(config: Record<string, unknown>, setting: 'on'
   return { ...config, editorTmpdir: setting };
 }
 
-/** `--path-fence off|warn` (w5863): anything else is refused, never guessed at. Exported for tests. */
-export function pathFenceFlag(v: string | undefined): 'off' | 'warn' | undefined {
+/** `--path-fence on|warn|off` (w5863, w5899): anything else is refused, never guessed at. Exported for tests. */
+export function pathFenceFlag(v: string | undefined): 'off' | 'warn' | 'on' | undefined {
   if (v === undefined) return undefined;
-  if (v !== 'off' && v !== 'warn') throw new Error(`--path-fence is off or warn, not "${v}"`);
+  if (v !== 'off' && v !== 'warn' && v !== 'on') throw new Error(`--path-fence is on, warn or off, not "${v}"`);
   return v;
 }
 
 /** daemon.json with the path fence's mode set, "warn" written as "warn" (w5863); macOS and Linux only: the shims folder is on their PATH. Exported for tests. */
-export function applyPathFence(config: Record<string, unknown>, setting: 'off' | 'warn' | undefined, platform: NodeJS.Platform = process.platform): Record<string, unknown> {
+export function applyPathFence(config: Record<string, unknown>, setting: 'off' | 'warn' | 'on' | undefined, platform: NodeJS.Platform = process.platform): Record<string, unknown> {
   if (!setting) return config;
   if (platform === 'win32') throw new Error(`--path-fence: macOS and Linux only, not ${platform}`);
   return { ...config, pathFence: setting };
@@ -2083,6 +2099,106 @@ export function daemonTmpdirFlag(v: string | undefined): 'on' | 'off' | undefine
   if (v === undefined) return undefined;
   if (v !== 'on' && v !== 'off') throw new Error(`--daemon-tmpdir is on or off, not "${v}"`);
   return v;
+}
+
+/** `--tools-disk-lock warn|on` (w5959): anything else is refused, never guessed at. Exported for tests. */
+export function toolsDiskLockFlag(v: string | undefined): 'warn' | 'on' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'warn' && v !== 'on') throw new Error(`--tools-disk-lock is warn or on, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with toolsDiskLock set (w5959), Windows only: the Low label it acts on is Windows'. Exported for tests. */
+export function applyToolsDiskLock(config: Record<string, unknown>, setting: 'warn' | 'on' | undefined, platform: NodeJS.Platform = process.platform): Record<string, unknown> {
+  if (!setting) return config;
+  if (platform !== 'win32') throw new Error(`--tools-disk-lock: Windows only, not ${platform}`);
+  return { ...config, toolsDiskLock: setting };
+}
+
+/** `--win-ci-first off|warn|enforce` (w6110): anything else is refused, never guessed at. Exported for tests. */
+export function winCiFirstFlag(v: string | undefined): 'off' | 'warn' | 'enforce' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'off' && v !== 'warn' && v !== 'enforce') throw new Error(`--win-ci-first is off, warn or enforce, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with winCiFirst set (w6110), Windows only: the process priorities it sets are Windows'. Exported for tests. */
+export function applyWinCiFirst(config: Record<string, unknown>, setting: 'off' | 'warn' | 'enforce' | undefined, platform: NodeJS.Platform = process.platform): Record<string, unknown> {
+  if (!setting) return config;
+  if (platform !== 'win32') throw new Error(`--win-ci-first: Windows only, not ${platform}`);
+  return { ...config, winCiFirst: setting };
+}
+
+/** `--shared-lock off|warn|on` (w5615): anything else is refused, never guessed at. Exported for tests. */
+export function sharedLockFlag(v: string | undefined): 'off' | 'warn' | 'on' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'off' && v !== 'warn' && v !== 'on') throw new Error(`--shared-lock is off, warn or on, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with the shared-cache lock set, "off" written as "off" like the caps' modes (w5615); every platform. Exported for tests. */
+export function applySharedLock(config: Record<string, unknown>, setting: 'off' | 'warn' | 'on' | undefined): Record<string, unknown> {
+  return setting ? { ...config, sharedLock: setting } : config;
+}
+
+/** `--host-restage warn|on` (w6305): anything else is refused, never guessed at. Exported for tests. */
+export function hostRestageFlag(v: string | undefined): 'warn' | 'on' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'warn' && v !== 'on') throw new Error(`--host-restage is warn or on, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with hostRestage set (w6305, w6287); every platform. Exported for tests. */
+export function applyHostRestage(config: Record<string, unknown>, setting: 'warn' | 'on' | undefined): Record<string, unknown> {
+  return setting ? { ...config, hostRestage: setting } : config;
+}
+
+/** `--long-runs off|warn|on` (w6367): anything else is refused, never guessed at. Exported for tests. */
+export function longRunsFlag(v: string | undefined): 'off' | 'warn' | 'on' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'off' && v !== 'warn' && v !== 'on') throw new Error(`--long-runs is off, warn or on, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with longRuns set (w6367); every platform. Exported for tests. */
+export function applyLongRuns(config: Record<string, unknown>, setting: 'off' | 'warn' | 'on' | undefined): Record<string, unknown> {
+  return setting ? { ...config, longRuns: setting } : config;
+}
+
+/** `--live-run-guard off|warn` (w6378): anything else is refused, never guessed at. Exported for tests. */
+export function liveRunGuardFlag(v: string | undefined): 'off' | 'warn' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'off' && v !== 'warn') throw new Error(`--live-run-guard is off or warn, not "${v}"`);
+  return v;
+}
+
+/** `--editor-git-packages off|warn|on` (w6412): anything else is refused, never guessed at. Exported for tests. */
+export function editorGitPackagesFlag(v: string | undefined): 'off' | 'warn' | 'on' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'off' && v !== 'warn' && v !== 'on') throw new Error(`--editor-git-packages is off, warn or on, not "${v}"`);
+  return v;
+}
+/** daemon.json with editorGitPackages set (w6412); every platform. Exported for tests. */
+export function applyEditorGitPackages(config: Record<string, unknown>, setting: 'off' | 'warn' | 'on' | undefined): Record<string, unknown> {
+  return setting ? { ...config, editorGitPackages: setting } : config;
+}
+/** daemon.json with liveRunGuard set (w6378); every platform. Exported for tests. */
+export function applyLiveRunGuard(config: Record<string, unknown>, setting: 'off' | 'warn' | undefined): Record<string, unknown> {
+  return setting ? { ...config, liveRunGuard: setting } : config;
+}
+
+/** `--runner-priority off|warn|enforce` (w6163): anything else is refused, never guessed at. Exported for tests. */
+export function runnerPriorityFlag(v: string | undefined): 'off' | 'warn' | 'enforce' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'off' && v !== 'warn' && v !== 'enforce') throw new Error(`--runner-priority is off, warn or enforce, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with runnerPriority set (w6163), Windows only: the process and task priorities it sets are Windows'. Exported for tests. */
+export function applyRunnerPriority(config: Record<string, unknown>, setting: 'off' | 'warn' | 'enforce' | undefined, platform: NodeJS.Platform = process.platform): Record<string, unknown> {
+  if (!setting) return config;
+  if (platform !== 'win32') throw new Error(`--runner-priority: Windows only, not ${platform}`);
+  return { ...config, runnerPriority: setting };
 }
 
 /** daemon.json with the daemon's own temp folder set, "off" written as "off" (w6000); every platform. Exported for tests. */
@@ -2131,7 +2247,7 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
     ...(f.devDriveSkip ? { devDriveSkip: f.devDriveSkip } : {}),
     ...(f.moveToDevDrive ? { moveToDevDrive: true, devDrive: 'on' as const } : {}),
-    carry: { ...applyDaemonTmpdirSetting(applyMediumAgentFolders(applyPathFence(applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), f.pathFence, platform), f.mediumAgentFolders), f.daemonTmpdir), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
+    carry: { ...applyEditorGitPackages(applyLiveRunGuard(applyLongRuns(applyHostRestage(applySharedLock(applyRunnerPriority(applyWinCiFirst(applyToolsDiskLock(applyDaemonTmpdirSetting(applyMediumAgentFolders(applyPathFence(applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), f.pathFence, platform), f.mediumAgentFolders), f.daemonTmpdir), f.toolsDiskLock, platform), f.winCiFirst, platform), f.runnerPriority, platform), f.sharedLock), f.hostRestage), f.longRuns), f.liveRunGuard), f.editorGitPackages), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
     // A test install stays one through its updates (w1596): daemon.json says so (daemonJson, --no-cleanup).
     ...(config.leftovers === false ? { noCleanup: true } : {}),
     update: true,
@@ -2372,6 +2488,14 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   if (f.pathFence) say(`path fence: ${f.pathFence}`);
   if (f.mediumAgentFolders) say(`medium agent folders: ${f.mediumAgentFolders}`);
   if (f.daemonTmpdir) say(`daemon tmpdir: ${f.daemonTmpdir}`);
+  if (f.toolsDiskLock) say(`tools disk lock: ${f.toolsDiskLock}`);
+  if (f.winCiFirst) say(`win ci first: ${f.winCiFirst}`);
+  if (f.sharedLock) say(`shared lock: ${f.sharedLock}`);
+  if (f.runnerPriority) say(`runner priority: ${f.runnerPriority}`);
+  if (f.hostRestage) say(`host restage: ${f.hostRestage}`);
+  if (f.longRuns) say(`long runs: ${f.longRuns}`);
+  if (f.liveRunGuard) say(`live-run guard: ${f.liveRunGuard}`);
+  if (f.editorGitPackages) say(`editor git packages: ${f.editorGitPackages}`);
   // Every prerequisite first (w629), before anything is fetched, stopped or restarted: m5's update over ssh found no
   // git-lfs, and its refused run still restarted the daemon and then reported the old one as current.
   say('Checking prerequisites (nothing changes until they all pass)...');
@@ -2968,13 +3092,39 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
              repo, daemon.json storeLock; default: as daemon.json has it; docs/machines.md "Slot repos")
             [--editor-tmpdir on|off] (w5833, macOS and Linux: each sandbox's Unity editor gets its own TMPDIR under <root>/tmp, daemon.json
              editorTmpdir; default: as daemon.json has it, off if it has none)
-            [--path-fence off|warn] (w5863, macOS and Linux: warn logs each write to the unity-slot shims folder on every agent's PATH
-             that the daemon did not make, off stops the watch, daemon.json pathFence; default: as daemon.json has it, warn if it has none)
+            [--path-fence on|warn|off] (w5863, w5899, macOS and Linux: on moves the unity-slot shims folder on every agent's PATH to <root>/tools-medium/shims, which fenced workers cannot write; warn leaves it in the mailbox and logs each write the daemon did not make; off leaves it unwatched, the recovery; daemon.json pathFence; default: as daemon.json has it, on if it has none)
             [--medium-agent-folders warn|on] (w5862, w5869, every OS: on moves Medium agents' temp root and cargo home to <root>/tmp-medium
              and <root>/cache-medium/cargo, warn only logs the exposure, daemon.json mediumAgentFolders; default: as daemon.json has it;
              docs/worker-root.md)
             [--daemon-tmpdir on|off] (w6000, every OS: on points the daemon's own TMPDIR, TEMP and TMP at <root>/tmp-daemon, off keeps
              the system temp folder, the recovery; daemon.json daemonTmpdir; default: as daemon.json has it, on if it has none)
+            [--tools-disk-lock warn|on] (w5959, Windows: on keeps a <root>/tools child that holds a virtual disk (.vhd, .vhdx) Medium,
+             so workers cannot write there; warn only logs it, the recovery; daemon.json toolsDiskLock; default: as daemon.json has it,
+             warn if it has none; docs/worker-root.md)
+            [--win-ci-first off|warn|enforce] (w6110, Windows: enforce lowers the processes agents' tools start to BelowNormal while a CI
+             job runs on a CI-first machine, warn only logs what they take, the recovery, off stops it; daemon.json winCiFirst;
+             default: as daemon.json has it, warn if it has none)
+            [--shared-lock off|warn|on] (w5615, every OS: per-slot copy-on-write tool caches, players installed and launched by the daemon;
+             warn logs worker writes to the shared caches, players, seed and tools, on makes them read-only to workers; daemon.json
+             sharedLock; default: as daemon.json has it; docs/worker-root.md "Per-slot caches and the players broker")
+            [--host-restage warn|on] (w6305, every OS: on ends an idle agent adopted across a sharedLock switch between turns, so its
+             next message starts a host on the new mode; warn only logs it, the default and the recovery; daemon.json hostRestage;
+             default: as daemon.json has it, warn if it has none; docs/worker-root.md "After a sharedLock switch")
+            [--long-runs off|warn|on] (w6367, every OS: the long-run route, machine/longRuns.ts, that starts a sanctioned long run (the nightly) outside its
+             worker's agent host; warn logs and refuses so the caller starts it as before, on starts it, off refuses; warn or off is the way back;
+             daemon.json longRuns; default: as daemon.json has it, warn if it has none)
+            [--live-run-guard off|warn] (w6378, every OS: warn, the default, logs a WARNING when a sandbox trim, release or delete would hit
+             a sandbox where a run of its worker still lives; off looks at nothing, the way back; daemon.json liveRunGuard;
+             default: as daemon.json has it, warn if it has none)
+            [--editor-git-packages off|warn|on] (w6412, every OS: how a sandbox editor gets a git package its Packages/manifest.json names that
+             Library/PackageCache lacks, machine/gitPackages.ts; warn, the default, only names the missing packages in the start note, unity status
+             and the Package Manager dialog notice; on also fetches each into a mirror under <root>/cache-medium/git-packages with the daemon's own
+             git and credential, and gives a Windows Low-integrity editor the workers' Git on PATH and a url.insteadOf to that mirror; off looks at
+             nothing, the way back; takes effect at the editor's next start; daemon.json editorGitPackages;
+             default: as daemon.json has it, warn if it has none)
+            [--runner-priority off|warn|enforce] (w6163, Windows: enforce sets the ffu CI runners' scheduled tasks to priority 4 and raises
+             their listeners to Normal, warn only logs what it reads, the recovery, off stops it; daemon.json runnerPriority;
+             default: as daemon.json has it, the daemon's own default if it has none)
             [--dev-drive] [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--move-to-dev-drive] (Windows, w900: make the Dev Drive if the
              install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of
              workers and editors. An update without these keeps the drive it has and makes none.)
@@ -3078,6 +3228,14 @@ export async function main(argv = process.argv.slice(2)) {
     const pathFence = flags.has('path-fence') ? pathFenceFlag('') : pathFenceFlag(opts['path-fence']);
     const mediumAgentFolders = flags.has('medium-agent-folders') ? mediumAgentFoldersFlag('') : mediumAgentFoldersFlag(opts['medium-agent-folders']);
     const daemonTmpdir = flags.has('daemon-tmpdir') ? daemonTmpdirFlag('') : daemonTmpdirFlag(opts['daemon-tmpdir']);
+    const toolsDiskLock = flags.has('tools-disk-lock') ? toolsDiskLockFlag('') : toolsDiskLockFlag(opts['tools-disk-lock']);
+    const winCiFirst = flags.has('win-ci-first') ? winCiFirstFlag('') : winCiFirstFlag(opts['win-ci-first']);
+    const sharedLock = flags.has('shared-lock') ? sharedLockFlag('') : sharedLockFlag(opts['shared-lock']);
+    const runnerPriority = flags.has('runner-priority') ? runnerPriorityFlag('') : runnerPriorityFlag(opts['runner-priority']);
+    const hostRestage = flags.has('host-restage') ? hostRestageFlag('') : hostRestageFlag(opts['host-restage']);
+    const longRuns = flags.has('long-runs') ? longRunsFlag('') : longRunsFlag(opts['long-runs']);
+    const liveRunGuard = flags.has('live-run-guard') ? liveRunGuardFlag('') : liveRunGuardFlag(opts['live-run-guard']);
+    const editorGitPackages = flags.has('editor-git-packages') ? editorGitPackagesFlag('') : editorGitPackagesFlag(opts['editor-git-packages']);
     await update(opts.root, {
       maxSandboxes: opt('max-sandboxes'),
       maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
@@ -3096,6 +3254,14 @@ export async function main(argv = process.argv.slice(2)) {
       ...(pathFence ? { pathFence } : {}),
       ...(mediumAgentFolders ? { mediumAgentFolders } : {}),
       ...(daemonTmpdir ? { daemonTmpdir } : {}),
+      ...(toolsDiskLock ? { toolsDiskLock } : {}),
+      ...(winCiFirst ? { winCiFirst } : {}),
+      ...(sharedLock ? { sharedLock } : {}),
+      ...(runnerPriority ? { runnerPriority } : {}),
+      ...(hostRestage ? { hostRestage } : {}),
+      ...(longRuns ? { longRuns } : {}),
+      ...(liveRunGuard ? { liveRunGuard } : {}),
+      ...(editorGitPackages ? { editorGitPackages } : {}),
       ...devDriveFlags(opts, flags),
     });
   } else if (cmd === 'reinstall') {

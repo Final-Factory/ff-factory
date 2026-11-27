@@ -174,6 +174,19 @@ before their ref update (git has no hook before them), so the ref stays but the 
 files merged (`git merge --abort` puts them back). Recovery if the check ever misfires: `ffu-slot take` rewrites the holder
 file, and a shell with `FF_SESSION_ID` unset skips the check.
 
+**On Windows the slots run a native `reference-transaction`** (w6062). Git runs that hook at every phase of every ref
+transaction: 7 times for one `git commit` (preparing, prepared, committed; preparing, aborted, prepared, committed), and each
+start of Git Bash's `sh` cost about 30 ms on LothDesktop, so the shell hooks added about 210 ms per commit (measured; the
+hook already exited at once outside `prepared`, and an `exit 0` shell hook cost the same). `machine/ffuSlotHooks/native/
+reference_transaction.rs` is the same check in Rust (std only). `take` on Windows builds it once per version of the hooks
+with `rustc` (on PATH, else `CARGO_HOME`, `<root>/tools/cargo` with its `rustup` beside it, `<root>/cache/cargo`,
+`~/.cargo`; about 4 s) into `ffu-sandboxes/hooks/<hash>/` beside copies of `pre-push`, `pre-rebase` and `slot-guard.sh`,
+and points `core.hooksPath` there; no rustc, or a failed build, keeps the shell hooks (`take` says so). That folder is a
+worker's to write, as the shared clone's config already is: the guard stops slips, not a worker set on getting past it.
+The daemon does not build it: its rustc would be one a Low worker can write. macOS and Linux keep the shell hooks (about
+2 ms a call). Change `slot-guard.sh` and the `.rs` together: `server/ffuSlotGuard.test.ts` runs every refusal on both.
+Cost on LothDesktop (measured 2026-11-26, 40 empty commits per hook set, interleaved, under an exclusive bench ticket; the median a commit adds over no hooks, in the two calmest of three runs): the shell hooks added 237 and 296 ms, the native hook 90 and 102 ms. Most of what is left is Windows starting the hook 7 times.
+
 ## On the portal (w5912)
 
 Each machine's ffu slots show on its page, in a set of their own under its sandboxes (`web/src/components/FfuSlots.tsx`),
@@ -197,9 +210,26 @@ clone. Nothing goes while cargo builds in the target, as `cargoTargetBusy` judge
 names the target or runs in the checkout's process tree. A write within the settle time (15 min) in its top three levels
 stops only the incremental trim and the whole removals: the stale-unit sweep still runs and spares every unit written
 within the settle time (w4258: four slots in steady use, 71 GB on LothDesktop, were each written every few minutes, and a
-pass on 2026-11-15 freed nothing). A target kept whole over the cap is named in every pass's kept list. A program that only runs from the target (a long test binary from `debug/deps`, with the
-`cargo test` and the shell that started it) no longer keeps it whole (w4258): `cargoTargetRunners` finds those, and the
-sweep spares the units they run. Otherwise:
+pass on 2026-11-15 freed nothing). A target kept whole over the cap is named in every pass's kept list.
+
+**Anything running from the slot keeps its whole target (w6240).** No sweep, no trim and no whole removal while a process
+runs from the slot, as `runsFromDir` (`server/installLeftovers.ts`) judges it: a command line naming the target or the slot
+(its checkout included), an executable inside the target, or a working folder inside the slot. The executables and working
+folders come from `server/procPlaces.ts`: `/proc/<pid>/exe` and `cwd` on Linux, `lsof -d cwd,txt` on macOS, Win32_Process
+`ExecutablePath` on Windows (which gives no working folder, so there the executable and the command line stand for it). A
+process list or places that cannot be read keep the target, and `ffuSlotBusyNow` checks the same again right before each
+removal, sweeps included. Why: on biscuit, 2026-11-27T00:23:32Z, the sweep took 12.0 GB of slot4's 35.0 GB target at the
+15 min window, 62 of the 257 test binaries among it (`deps/redteam_race-b158fae8531a6a53`, `deps/alarms-bdd02d47710ae4cf`),
+while its holder ran `python3 tools/run_tests_parallel.py` over them in the checkout; the run died with FileNotFoundError.
+The runner's argv named neither the target nor the checkout, so w4258's `cargoTargetRunners` (a command line naming the
+target), which let the sweep run beside a long test binary, did not see it.
+
+**The latest build's executables are roots (w6240).** `cargo test --no-run` rewrites only the units that changed: a test
+binary whose crate did not change keeps its old time and its old fingerprint, so a window measured from the newest build
+(15 min over the cap) left it unreached. The sweep (`server/cargoGraphSweep.ts`) roots the newest executable of each name
+in `deps/` (`<name>-<hash>`, no extension, or `.exe`), however old, and so keeps its fingerprint, its `.d`, `.dSYM` or
+`.pdb` and everything it was built from. An older binary of the same name (another feature set, an older build) still goes.
+Otherwise:
 
 | When | What goes |
 |---|---|
@@ -218,6 +248,26 @@ The rule runs on every hourly pass (the daemon's `cargo-cap` scope), not only on
 21 GB of it idle `debug/incremental`), because the rule ran only in the full plan (`server/installLeftovers.ts`,
 `ffuSlotTargets`).
 
+**A busy target is judged again between passes (w6290).** A pass keeps a slot's whole target while a build or a test runs
+in or from it (`cargoTargetBusy`, `runsFromDir`): a rustc reads the rlibs it links, and a running test executable's
+siblings are files no unit graph sees in use (w6240). It also keeps one written within the settle time. On LothDesktop the
+slots build most of the day, so the next hourly pass often met the same slot busy again: on 2026-11-26/27
+(`cleanup-log.jsonl`) slot1 to slot4 were kept at 16.1 to 20.4 GB on 7 passes, and slot4 stayed kept from 15:48 to 17:59
+UTC before a pass swept 15.6 GB of it. Now every slot a pass keeps for one of those reasons is planned again, alone, every
+`staleOutput.ffuBusyRetryMinutes` (5) until the next pass is due (`machine/ffuBusyRetry.ts`, the `ffu-busy-retry` scope of
+`planInstallLeftovers`). The rule is the same one, so the re-check never takes more than an idle pass would. Still busy, the
+slot is kept again and stays watched. Once idle, the re-check plans what the pass would take then: the stale units, then
+`debug/incremental` over the cap. Each removal still asks `ffuSlotBusyNow` right before its rename.
+
+`staleOutput.ffuBusyRetry` sets the mode. `warn` is the default: it logs `would remove` lines to the clean-up history
+(`portal_logs cleanup`, trigger `ffu-busy-retry`) and removes nothing (docs/worker-fence.md: warn-only first). `on` removes,
+and only while the stale-output mode is `on` too. `off` stops the re-check. Pruning by age inside a busy target was rejected
+because a running rustc or test run can need any file in `deps/` whatever its age. The age window that is safe is the
+unit-graph sweep's, and a pass already runs it whenever nothing runs in the target.
+
+Recovery needs no person. A unit removed by mistake is one cargo rebuilds on the next build in that slot, as it does after
+any sweep. Setting `ffuBusyRetry` to `off` (portal config `cleanup.staleOutput`) turns the re-check off.
+
 **Released targets first (w6044).** A pass plans and removes the released slots' targets before every slower step (the
 `ffu-slots` scope, `cleanupPass`'s `first` step in `server/staleOutput.ts`): a slot no running or resumable worker holds and
 nothing runs from, taken whole only. On a low pass a settled one goes, with no sweep or size walk; on any other pass one idle
@@ -229,6 +279,16 @@ daemon logs `clean-up: ffu slots first (w6044): N item(s) planned in S s, M remo
 2026-11-26, three released targets held 190.6 GB (49.2, 57.7 and 83.6 GB) while no pass had finished since 2026-11-25
 04:09Z; the 09:10Z low pass was cut off 4 min into its `regular` step, before the ffu rule ran in its `stale` step. Stage 1
 (#1353) only said the plan; stage 2 removes it.
+
+**Alone during a pass that is not low (w6044 stage 3).** A low-space tick, an asked pass or a critical one that meets a
+pass in flight that is not low (an hourly one) runs the first step alone, at low (`CleanupRunner`'s `firstAlone`,
+`server/cleanup.ts`; the daemon's `ffuFirstAlone`, `machine/daemon.ts`): a tick at most every 15 min, a hold (a timed run)
+deferring it as it defers a pass. Before it, the runner dropped both (`if (this.running) return undefined`), and the hourly
+pass's own first step had run with the 7-day idle rule: on BEAST, 2026-11-26, hourly passes ran 59 to 72 min back to back
+(13:22-14:12, 14:13-15:14, 15:16-16:28Z), so six asked passes were refused "already running" (w6115) while a released
+slot2 held a 78 GB target. The daemon logs `clean-up: ffu slots first, alone during a pass that is not low (<trigger>, ...)
+(w6044): ...`. Stage 3a (#1384) only said its plan; stage 3b removes it with the stale-output mode on (dry-run says it,
+off skips it), and writes what it freed to the clean-up history (`cleanup-log.jsonl`, `ffuFirstAlone: true`).
 
 The sweep and the trims that go with one pass are one clean-up item. Before w5503 the incremental trim, an item inside the
 swept target, was dropped from the plan, so a slot swept on every pass kept its cache. Measured on LothDesktop at

@@ -239,6 +239,41 @@ paused listener is in SIGSTOP, so it does not poll at all. After SIGCONT it open
 `status=Busy` only if it was already stuck before the pause. What the pause can do is hide a stuck listener for as long
 as a bench turn lasts. Rule (b) picks it up 10 minutes after the turn ends.
 
+### Windows CI runners at Normal priority (w6163)
+
+A Windows runner started through its scheduled task (`Start-ScheduledTask`, which the daemon uses to start one again) runs
+at the task's priority. The default is 7: BelowNormal class, I/O Low and memory priority 2, and its jobs inherit all
+three. At logon it starts from the Startup folder's `.cmd` at Normal. Of the task priorities, only 4 starts a process at
+Normal in all three; 5 and 6 lower the memory priority.
+
+`machine/runnerPriority.ts` runs once a minute from `machine/daemon.ts` and looks only at ffu- runners.
+- **The task.** It reads each running listener's scheduled task at the first tick, for a runner folder not seen before,
+  and every hour.
+- **The processes.** It reads the class, I/O and memory priority of the listener and of the cmd.exe and conhost.exe it
+  runs under, when the listener is new. Under enforce it looks again 30 minutes after a raise that failed or stayed low,
+  or whose class reads below Normal again. run.cmd starts a relaunched listener (a new pid) under the same cmd. Each pid
+  is checked to be the runner's own image (Runner.Listener.exe, then cmd.exe or conhost.exe) and no younger than its
+  child before anything is read or set.
+
+Under `enforce` (the machines `RUNNER_PRIORITY_ENFORCE` lists):
+- It sets a task above 4 to 4 with `Set-ScheduledTask`. That is the user's own task, so no elevation is needed; the
+  Schedule service rewrites its own copy of the task.
+- It raises each of those processes below Normal to Normal in all three priorities (SetPriorityClass, ProcessIoPriority,
+  ProcessMemoryPriority) and reads them back, so the jobs started after that run at Normal.
+- Nothing is restarted, a job already running keeps its priority, and a process above Normal is left alone.
+- A runner running a job has its task set at the first tick it is between jobs.
+- A "parent" that started after its child is a stranger with a reused pid: the chain ends there and it is left alone.
+- A raise that fails or does not hold is tried again after 30 minutes, not every minute.
+
+The first step listed no machine and only logged (lothsahn's lockout rule). Its lines on LothDesktop (2026-11-26 20:22Z)
+showed both tasks at 7 and both listeners at BelowNormal, I/O 1, memory 2, read at the daemon's Medium integrity. The
+second step lists LothDesktop. BEAST stays log-only in code: `enforce` in its daemon.json is read as `warn`, and
+`ops_worker runner_priority enforce` is refused for it, under Ben's standing hold on its
+system settings. daemon.json `runnerPriority` (`off`, `warn` or `enforce`) overrides the default at the daemon's start;
+`ops_worker machine_update runner_priority warn` sets it with nobody at the machine, and is the recovery. A failure is
+logged once and changes nothing else. ffu's
+`install-ffu-runner.ps1` registers new tasks at 4 with no 72-hour limit (ffu #1204).
+
 ### Runner temp folders on macOS and Windows (w5999)
 
 On Linux each runner unit's `ff-runner-tmpdir.conf` drop-in (w5834) puts its temp files inside the worker root. The
@@ -288,6 +323,83 @@ else wants the CPU, so with no CI job running the agents still get the whole mac
 priority. When a CI job starts or ends the daemon logs a `ci first:` line with both sides: the job's worker nice and cgroup
 `cpu.weight`, and FF Factory's scopes' `cpu.weight` and highest thread priority (`-` means the cpu controller is off
 there, so nice decides). GPU and memory are not shared out by either. Tests: `server/w5322CiFirst.test.ts`.
+
+### CI jobs go first on LothDesktop (w6110)
+
+On 2026-11-26 from 12:54 to 14:53 UTC a worker's planted CPU hogs (64 to 96 busy loops for w6066's failover test) ran at
+Normal priority on LothDesktop's 16 threads beside its two ffu runners, and their steps ran 10 to 25 times slower: a
+crosscheck of 1 to 4 min took 56 min and was cancelled at its timeout, clippy's build of 6.5 min took 50 min. Neither
+guard covered it: the CI load gate (w3305) only stops an idle runner from taking a job, and the biscuit section above is
+Linux only. Windows has no scopes or nice; it has priority classes, which a child process inherits.
+
+`machine/ciFirstWin.ts` (`WIN_CI_FIRST`: lothdesktop only, ticked once a minute from `machine/daemon.ts`) finds, while a
+CI job runs, each agent host's processes by walking down from the host's own process. The walk never enters the host
+(its heartbeat), another host, the daemon or a runner's tree, and keeps a child only when its parent started before it
+(Windows reuses pids and does not reparent orphans). With daemon.json `winCiFirst` unset or `warn` it sets nothing. It logs a `ci first:` line when a job
+starts or ends, and at most every 5 min while the agents' processes use 4 cores or more: the cores the machine, the jobs,
+each agent and the rest (editors, orphans, processes that ended) used over the last tick, and how many of the agents'
+tools' processes run above Idle. Editors the daemon starts are not under a host and count as the rest (the pool's
+`belowNormal` setting runs them BelowNormal where it is on); batch builds go to Idle.
+
+With `winCiFirst` `enforce` (set by `ops_worker machine_update win_ci_first enforce`, Windows only; read at the daemon's
+start) the same tick lowers those tools' processes to Idle while a job runs, and what they start inherits it. Idle, not
+BelowNormal: the runners run their jobs at BelowNormal themselves (the daemon restarts a runner with its scheduled task,
+whose default priority 7 is BelowNormal; measured 2026-11-26, both workers at BelowNormal), so on the morning of
+2026-11-26 Normal-priority busy loops beside them did not share the CPU with the jobs but went ahead of them. Below the
+jobs means Idle:
+- **What is lowered**: an agent's tools only, what its claude starts (shells, cargo, rustc, python, players). The host and
+  its direct children (claude) keep their priority, so the agent's own loop and its heartbeat are not starved. No Unity
+  editor or what it started is lowered (one a lowered tool starts later inherits Idle), nor the daemon, another
+  host or a runner's tree. Windows reuses pids, so each tick reads every candidate's start time: a process started after
+  the listing could have been taken is left alone, and a host whose pid started after the host wrote its own record is no
+  host (a job's process that got it stays the job's). Between that read and the lowering a pid could still change hands
+  (milliseconds, against a listing at most 6 s old); that gap is accepted: the worst case is one process at Idle
+  until the job ends.
+- **The hang watch** (w3673) reads exactly those tools' CPU; a silent agent with a tool at Idle beside a job at the
+  last tick is kept and looked at again (`toolsLowered`), since starved tools say little about a hang.
+- **Only with a record**: what a tick is about to lower is written to `<root>/tmp/ci-first-lowered.json` first; if that
+  write fails nothing is lowered (said once per streak), so nothing is ever lowered that a restart could not undo. No
+  worker root, no record: enforce lowers nothing.
+- **Turns are acted on within 5 s**: a bench or a person's turn that begins or ends ticks at once (a 5 s check), not at
+  the next minute's tick; a tick asked for while one runs runs once more after it.
+- **The record**: each lowered process, by pid and start time, with the priority it had, in
+  `<root>/tmp/ci-first-lowered.json`; each lowering is a `ci first: lowered N ...` line naming the pids and images.
+- **Raised back**: once no CI job runs; while a bench or a person's play turn holds the machine (nothing is lowered then,
+  so a timed run measures what it always did); and by a daemon started with `warn` or `off` while the record holds
+  anything. Each recorded process still running with the same start time goes back to the priority it had, and so does
+  what it started since it was lowered that still runs at Idle, even once it ended (Windows gives an orphan no new
+  parent, so its parent pid still names the recorded one); a pid Windows gave to another process, and what that one
+  started, are left alone. A raised entry stays in the record (`raisedAt`, the time the raise was done) for one more
+  raise, which catches what it started before that the first raise's listing could not show yet (and only that: what it
+  started after its raise, or a priority it set itself since, is its own). A raise that fails is tried again for 3 ticks,
+  then given up with a line in the log. An entry whose process was gone from the listing too, with nothing listed under
+  its pid, is dropped.
+- **Orphaned tools** (w6217): a tool whose starter exited (Windows does not reparent it) is outside every walk from a
+  host; on 2026-11-26 from 21:54 UTC a `cargo test` under a `bash /tmp/bugchecks.sh` whose parent was gone stayed at
+  Normal beside both jobs for at least 9 minutes. Each tick also takes every listed process outside the known trees
+  whose parent is gone or started after it, walks its tree, and reads each member's environment once (`readEnvs` with
+  `ci`, as the leftovers sweep reads them; cached by pid and start): a member with FF_SESSION_ID of a live host here,
+  under this daemon's FF_WORKER_ROOT, is that host's tool, and so is what is below it (a Git Bash shell shows no
+  environment, the cargo it starts does). They are lowered, recorded (with their host) and raised back with the rest,
+  under the same cutoff and holds. Never one of them:
+  - a Unity process or what it started;
+  - a CI process (GITHUB_ACTIONS or RUNNER_TRACKING_ID in its environment: a job step's orphan carries the runner's
+    environment, and with it any FF_SESSION_ID a runner started from a worker's shell inherited), what it started, or
+    what is above it;
+  - a process with a listener, a job or a host below it, and what is above that: an orphaned `cmd.exe /c run.cmd`
+    starts the listener again after a runner update, and would hand it Idle (the w6222 review of step 1).
+  - a runner's shell (a cmd.exe or conhost.exe whose command line names run.cmd, run-helper.cmd or a runner's folder),
+    even between two listeners when nothing below it is fenced (the w6225 review of step 2);
+  - Unity's helpers: its licensing client (a batch Unity leaves it running and every editor asks it), Unity Hub, and
+    anything run from a Unity Editor install.
+  A tree with a member whose environment could not be read is left alone; a failed read is tried again after 5 ticks.
+  Each newly found one is named once in a `ci first: N more of the agents' tools' process(es) run above Idle ... with
+  the process that started them gone, found by their session's environment` line (with how many orphan trees and
+  processes were looked at), and the job lines count them (`N of them with the process that started them gone`).
+- **Recovery**: `ops_worker machine_update win_ci_first warn` (or `off`, which also stops the logging); the daemon restarts
+  with it and raises everything back, needing nobody at the machine.
+
+Tests: `server/w6110CiFirstWin.test.ts`.
 
 ## 3. The VHDX policy
 
@@ -746,8 +858,9 @@ the daemon do a nightly cleanup for anything the worker missed"):
 | the nightly lab | `<root>/nightly`: `builds/*` beyond the newest 2, `runs/*` but the newest, `rehearsals/*`, `logs/*` | idle 6 h / 3 days / 2 days / 3 days |
 | the timed runner's folders (w3502) | `<root>/timing/builds/*` (the builds a timed run lays out) and, **only while free space is below the soft threshold**, `<root>/timing/cache/*` (its build pieces; machine/timedRunner.ts trims them to 8 GB after a run). `timing/runs` stays (the runner keeps 10). Only while no bench ticket with reason `timing` (or `timed_run`) is held or waiting in `<root>/tmp/bench.queue` with its helper alive, and the daemon's TimedRunner is not busy (`timingHeld`); otherwise a low pass logs them as `kept` with the ticket. On LothDesktop on 2026-11-07 they held 8.9 + 3.6 GB of a V: at 14.2 GB free, freed by hand (w3482). The next run fetches or lays them out again | builds untouched 24 h (`timingBuildHours`), or 15 min (`lowCacheSettleMinutes`) in a low pass; cache pieces untouched 15 min in a low pass. Rules `timing-build`, `timing-cache` |
 | FFU runners' job folders (w3502) | `<root>/ffu-runners/<runner>/_work/*` but `_tool` and `_actions` (the `actions-work` rule of server/cleanup.ts matches only `actions-runner*` under home or a drive root, and has no job check). Only while that runner runs no job (`runnerJobWhy`): no Runner.Worker of it, no process run from its `_work`, and its listener's `_diag` log does not say it was just handed a job (machine/benchRunners.ts `holdsJob`, the check that pauses the runners for timed runs); an unreadable process list keeps every runner. A CI checkout's repo does not keep it (the job recreates it). The next job rebuilds its cargo target cold. `ff-leftovers check` and `folders` judge a job folder the same way at the 15 min settle, so a low-disk clean-up can take an idle runner's between two passes (w5235, `judgeRunnerWorkPath`) | untouched 14 days (`runnerWorkDays`), or 15 min in a low pass; `machine_cleanup`'s asked pass is a low one, so it takes the folder at once on a disk that is not low (w5929: a fenced Windows worker cannot delete it, and on a disk clean-up request of its machine runs `machine_cleanup` itself). Rule `ffu-runner-work` |
+| FFU runners' cargo targets (w6291, **warn-only**) | `<root>/ffu-runners/<runner>/_work/<entry>/target` and `_work/<entry>/<child>/target` (CI's checkout is `_work/ffu/ffu/target`). A busy runner is never idle 14 days, so before w6291 its target had no cap until a low pass took the whole job folder (ffu-lothdesktop-1's target: 19.2 GB on disk, 2026-11-27, measured; 8.4 GB of it debug `.pdb` files). Same job check as the row above, re-checked just before removal (`runnerBusyNow`), and never in a low pass (that pass keeps the whole-folder rule above). Never through a link or junction (review w6301 of #1427, which made the removal delete outside the install folder): `linkOnPath` refuses a target whose real path is not the install folder's real path plus the same relative path, or that has a link or junction anywhere under it (each folder's real path is compared, since lstat calls a Low-made junction a plain folder, w5915). `runnerTargetLinksNow` runs the same check again right before the removal, over the whole target or each member. The stale-unit mark and sweep of the ffu slots (`server/cargoGraphSweep.ts`): units no workspace build of the last `runnerTargetKeepHours` uses, the window narrowing (24, 6, 1, 0.25 h) only while over `runnerTargetCapGB`, then the whole target once still over the cap and nothing in it was written for 15 min. Measured on that target: 48 h frees 0 GB (2049 of 2049 units live), 6 h 0.5 GB, 1 h 4.5 GB; so today's warm CI target is all live, and the cap is a backstop against variant growth | 48 h (`runnerTargetKeepHours`), cap 24 GB (`runnerTargetCapGB`; above the 19 GB a warm target holds, so a warm target stays warm). Mode `runnerTargetMode`, default `warn`: the plan lists `warn-only (runnerTargetMode warn, w6291): would take …` and removes nothing, and the stale step counts misses (units it would have swept that a later build used again) in `<daemon dir>/ffu-runner-sweep-warn.json`. `on` (rule `ffu-runner-target`) comes in a separate PR after the warn period measures zero misses, with a daemon.json switch back to `warn` as its recovery |
 | The shared player cache (w5235) | `<root>/player-cache/<40 hex>-<os>[-burstN]`, the game repo's `scripts/nightly/player_cache.py` entries (it evicts to 8 entries or 24 GB after each build). The daemon's sweep never takes one; `ff-leftovers folders`, `check` and `remove` do (`judgePlayerCachePath`). Kept: a running process naming the entry or its commit (a build holding its lock), a live pin (`<entry>.pins/<pid>`), a `last-used` under 60 min old, no ready manifest within 6 h, a player slot filled from it that a lease, fill or process holds, a worker that built or used it (`cache.log` `built-ok`/`hit` lines) and still runs or has a request not closed, and the 2 newest ready builds (`PLAYER_CACHE_KEEP_NEWEST`: a before/after leg needs two commits' players). The cache folder itself is never removed whole | a clean-up worker's `ff-leftovers remove` only |
-| ffu slots' cargo targets (w3764) | `<root>/ffu-sandboxes/slot<N>/target`, the warm targets `ffu-slot` leases ([ffu-sandboxes.md](ffu-sandboxes.md)); never a slot's checkout or the shared `repo`. Kept while cargo builds in it (`cargoTargetBusy`: a cargo, rustc or linker process naming the target or in the checkout's tree, a write within the settle time); a program only running from it (a test binary, `cargoTargetRunners`, w4258) does not keep it. The whole target of a slot no running or resumable worker holds and nothing runs from, untouched `ffuSlotIdleDays` (7); on every pass the stale units no workspace build within `ffuSlotKeepHours` (48) uses and superseded `.rcgu.o` files (`server/cargoGraphSweep.ts`, w4258, one item with `members`), the window narrowing to 24/6/1 h over `ffuSlotTargetCapGB` (16 GB) or on a low pass; still over the cap, `debug/incremental`, and the whole target only when unheld and nothing runs from it; a low pass takes unheld slots' targets whole and held ones' `debug/incremental`. A worker holding a slot gets cap 0 on its temp-folder cargo targets (`capCargo`, w4258). `ff-leftovers check` and `folders` judge a slot's target, and a stray `slot<N>/ffu/target` with cargo's `CACHEDIR.TAG`, the same way (w4422, `judgeFfuSlotPath`) | rule `ffu-slot-target` (`cargo-target-cap` for the temp targets) |
+| ffu slots' cargo targets (w3764) | `<root>/ffu-sandboxes/slot<N>/target`, the warm targets `ffu-slot` leases ([ffu-sandboxes.md](ffu-sandboxes.md)); never a slot's checkout or the shared `repo`. Kept while cargo builds in it (`cargoTargetBusy`: a cargo, rustc or linker process naming the target or in the checkout's tree, a write within the settle time); anything running from the slot keeps it whole (`runsFromDir`, w6240: a command line naming the target or slot, an executable in the target, a working folder in the slot, read by `server/procPlaces.ts`; unreadable processes keep it), and the sweep roots the newest test binary and bin of each name in `deps/` however old (w6240). The whole target of a slot no running or resumable worker holds and nothing runs from, untouched `ffuSlotIdleDays` (7); on every pass the stale units no workspace build within `ffuSlotKeepHours` (48) uses and superseded `.rcgu.o` files (`server/cargoGraphSweep.ts`, w4258, one item with `members`), the window narrowing to 24/6/1 h over `ffuSlotTargetCapGB` (16 GB) or on a low pass; still over the cap, `debug/incremental`, and the whole target only when unheld and nothing runs from it; a low pass takes unheld slots' targets whole and held ones' `debug/incremental`. A worker holding a slot gets cap 0 on its temp-folder cargo targets (`capCargo`, w4258). `ff-leftovers check` and `folders` judge a slot's target, and a stray `slot<N>/ffu/target` with cargo's `CACHEDIR.TAG`, the same way (w4422, `judgeFfuSlotPath`) | rule `ffu-slot-target` (`cargo-target-cap` for the temp targets) |
 | stale scratch | `<root>/scratch/*` | untouched 3 days and no open request (ledger context) named in it |
 | stopped sessions' temp | `<temp root>/ffa-<session>` | the session is not live (the guard's inUse) nor resumable (which since w1575 includes a request closed less than 7 days ago: see below), untouched 2 h. One that cannot go whole is taken entry by entry, three levels down, never inside a repo (w1575): a clone with unpushed work stays and is listed, what changed in the last 2 h stays, the rest goes; a folder of more than 200,000 entries is judged by its entries (beast's 139 GB folder of 12 game clones answered "changed recently" and was kept, unlisted, for days). Test fixture repos do not hold anything back: `ffbox-test-*`, `ffsb-e2e-*` (`e2e/server.ts`), the game repo's `build-player-restore-*`, `w<N>-lostlines-*`, `w<N>-lines-*` (Windows leaves those half deleted: `rmtree(ignore_errors=True)` skips git's read-only objects) |
 | old player builds | any folder under `<temp root>/ffa-<session>`, six levels down (w1813: an urgent release's Mac player sits at `urgent-<v>/workers/osx-<edition>/release/player/finalfactory.app`), holding `UnityPlayer.dll`/`.so` (or an `.app` with `UnityPlayer.dylib`), **live and resumed sessions too** | beyond that session's newest 2, untouched 6 h, and no process names it (w1575: 24 builds of about 2 GB in LothDesktop's open requests' folders). The item carries `inSession`, so the last check before removal lifts that one folder's inUse/resumable guard for it alone |
@@ -1343,6 +1456,20 @@ batchmode build); a release with the editor up waits (`pendingTrim`) and trims a
 two files when a lock file appears. **Failure**: a hung, failing or slow trim is cut off after `timeoutMs`, the sandbox goes
 back to `ready` and the pool logs why (and tells the orchestrator when it stopped early); a daemon restart reads `cleanup` back
 as `ready`. `daemon.json` `sandboxCacheTrim` sets the limits or `false` for never.
+
+**A run of its worker still there** (w6378, `machine/liveRunGuard.ts`): "no live agent" is the trim's only test of the
+worker, and a run the worker started in the background (a nightly e2e, `nohup ... & disown`; a unity-slot batch build; a
+loose batchmode Unity) is no agent. On 2026-11-27 the nightly of w6357 waited for its bench turn in lothdesktop/slot2 when its
+worker's check-in came at 10:00:56Z: the portal restarted the idle worker on the machine's new code (w1166 codeMove), the old
+host closed, and the next look trimmed slot2 (`cleanup`, the new host refused at 10:00:59Z) and its release sweep removed
+`Builds/cache/b19302c0...-win`, the night's own player build, at 10:01:57Z. Now every trim, pool release and delete first looks
+for such runs (`Daemon.liveRunIn`: `nightsIn`, `slotRunsFor`, `batchUnityIn`, the same looks as a branch switch's refusal,
+`machine/switchHolds.ts`) and logs `WARNING sandbox <id>: <what> while a run of its worker still lives there: <runs>.
+liveRunGuard warn: it goes ahead as before`. Warn only (lothsahn's lockout rule): nothing waits for the look (it is cut off
+after 30 s; a failed look is logged) and the trim, sweep and release go ahead unchanged. `daemon.json` `liveRunGuard`: `warn`
+(unset: the default) or `off` (no look; the way back, set remotely with `ops_worker machine_update live_run_guard off` or the
+installer's `--live-run-guard` / `-LiveRunGuard`). The later, separately reviewed step keeps the sandbox (no trim, sweep or
+release, the trim kept pending) while a run lives there.
 
 **Backstop** (`cleanupRules`, for sandboxes nobody releases): `sandbox-lib-cache-stale` takes the same stale entries in every
 pass, once nothing in the two caches was written for an hour, no `Temp/UnityLockfile` is there and no agent uses the sandbox.

@@ -82,3 +82,14 @@ test('w4669: gitBash prefers Claude Code\'s Git bash, skips System32 and Windows
   assert.equal(gitBash({ PATH: 'C:\\Windows\\System32;C:\\Users\\a\\AppData\\Local\\Microsoft\\WindowsApps' }, has('C:\\Windows\\System32\\bash.exe', 'C:\\Users\\a\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe')), 'bash');
   assert.equal(gitBash({ PATH: 'C:\\Windows\\System32' }, has('C:\\Program Files\\Git\\bin\\bash.exe')), 'C:\\Program Files\\Git\\bin\\bash.exe');
 });
+
+// w6154: a 0.50 (pre-1.0) leg that wrote only master's ffnightly.py, lab.py and player_slots.py failed at once on 48f1fbab
+// (`ModuleNotFoundError: No module named 'winstop'`, lab.py:35); the game repo's scripts/nightly/use_master_runner.sh
+// overlays master's whole top-level scripts/nightly *.py and *.json set and restores it.
+test('w6154: the pair brief overlays master\'s whole runner through use_master_runner.sh, never single files', () => {
+  const cmds = commands(PLAYERS_IN_SANDBOX);
+  assert.ok(cmds.includes('git show origin/master:scripts/nightly/use_master_runner.sh > "$TMPDIR/use_master_runner.sh"'));
+  assert.ok(cmds.includes('bash "$TMPDIR/use_master_runner.sh" apply'));
+  assert.ok(cmds.includes('bash "$TMPDIR/use_master_runner.sh" restore'));
+  for (const c of cmds) assert.doesNotMatch(c, /origin\/master:scripts\/nightly\/\w+\.py\s*>/, `no single-module overlay: ${c}`);
+});

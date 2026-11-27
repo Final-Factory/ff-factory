@@ -32,7 +32,7 @@ const plugin = (dir: string, version: string, script: string) => {
   put(path.join(dir, 'skills', 'evidence-gate', 'pr_evidence.py'), script);
 };
 
-test('w5542: a planted 999 pr_evidence.py in the plugin cache, the tools checkout or FF_SKILLS is never run; the trusted copy is', { skip: !hasPython && `no ${PY}` }, () => {
+test('w5542: a planted 999 pr_evidence.py in the plugin cache, the tools checkout or FF_SKILLS is never run; the trusted copy is', { skip: !hasPython && `no ${PY}` }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w5542-root-'));
   const marks = path.join(root, 'tmp', 'marks');
   fs.mkdirSync(marks, { recursive: true });
@@ -63,24 +63,24 @@ test('w5542: a planted 999 pr_evidence.py in the plugin cache, the tools checkou
   assert.equal(findPrEvidence({ env, home: root }), path.join(root, 'claude', 'plugins', 'cache', 'final-factory-agents', 'ff-agents', '999.0.0', 'skills', 'evidence-gate', 'pr_evidence.py'));
   const lines: string[] = [];
   const ev = makeGhEvidence({ prUrl: () => 'https://github.com/Final-Factory/FinalFactory/pull/4328', appDir, refresh: () => undefined, log: (l) => lines.push(l) });
-  assert.equal(ev('4328', 'Final-Factory/FinalFactory', path.join(root, 'sandboxes', 's1'), env), undefined, 'the trusted copy passed it');
+  assert.equal(await ev('4328', 'Final-Factory/FinalFactory', path.join(root, 'sandboxes', 's1'), env), undefined, 'the trusted copy passed it');
   assert.deepEqual(fs.readdirSync(marks).sort(), ['trusted'], 'only the trusted copy ran');
   assert.match(lines.join('\n'), /evidence check Final-Factory\/FinalFactory#4328: .* -s .*exit 0/);
   assert.doesNotMatch(lines.join('\n'), new RegExp(path.join(root, 'unity-slots').replace(/[\\.]/g, '\\$&')), 'not the planted python');
 });
 
-test('w5542: with no trusted copy the merge is refused, even when planted copies are there', () => {
+test('w5542: with no trusted copy the merge is refused, even when planted copies are there', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w5542-none-'));
   plugin(path.join(root, 'tools', 'final-factory-agents', 'plugins', 'ff-agents'), '999.0.0', 'print("PASS")');
   let ran = 0;
   const ev = makeGhEvidence({ prUrl: () => 'https://github.com/Final-Factory/FinalFactory/pull/1', appDir: path.join(root, 'daemon'), refresh: () => 'git clone: network unreachable', run: () => (ran++, { status: 0, stdout: 'PASS', stderr: '' }), log: () => undefined });
-  assert.match(ev('1', undefined, root, { FF_WORKER_ROOT: root }) ?? '', /no pr_evidence\.py found.*the guard's trusted copy: git clone: network unreachable/);
+  assert.match((await ev('1', undefined, root, { FF_WORKER_ROOT: root })) ?? '', /no pr_evidence\.py found.*the guard's trusted copy: git clone: network unreachable/);
   assert.equal(ran, 0);
   // Another repository is not checked at all.
-  assert.equal(makeGhEvidence({ prUrl: () => 'https://github.com/Final-Factory/ff-factory/pull/2', appDir: root, refresh: () => { throw new Error('not asked'); } })('2', undefined, root, {}), undefined);
+  assert.equal(await makeGhEvidence({ prUrl: () => 'https://github.com/Final-Factory/ff-factory/pull/2', appDir: root, refresh: () => { throw new Error('not asked'); } })('2', undefined, root, {}), undefined);
 });
 
-test('w5542: a stale trusted copy is fetched again once and run again; a real FAIL still refuses', () => {
+test('w5542: a stale trusted copy is fetched again once and run again; a real FAIL still refuses', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w5542-stale-'));
   const appDir = path.join(root, 'daemon');
   put(checkoutScript(trustedAgentsCheckout(appDir)), '');
@@ -91,10 +91,10 @@ test('w5542: a stale trusted copy is fetched again once and run again; a real FA
     run: () => { const a = answers.shift()!; return { status: a.startsWith('PASS') ? 0 : 1, stdout: a, stderr: '' }; },
   });
   const r1: boolean[] = [];
-  assert.equal(make([STALE, 'PASS'], r1)('9', undefined, root, { FF_WORKER_ROOT: root, PATH: process.env.PATH ?? '' }), undefined);
+  assert.equal(await make([STALE, 'PASS'], r1)('9', undefined, root, { FF_WORKER_ROOT: root, PATH: process.env.PATH ?? '' }), undefined);
   assert.deepEqual(r1, [false, true], 'a check by age, then one forced fetch');
   const r2: boolean[] = [];
-  assert.match(make([STALE, 'evidence-gate: FAIL\n- no \'Not verified:\' line\n'], r2)('9', undefined, root, { FF_WORKER_ROOT: root, PATH: process.env.PATH ?? '' }) ?? '', /no 'Not verified:' line/);
+  assert.match((await make([STALE, 'evidence-gate: FAIL\n- no \'Not verified:\' line\n'], r2)('9', undefined, root, { FF_WORKER_ROOT: root, PATH: process.env.PATH ?? '' })) ?? '', /no 'Not verified:' line/);
   assert.deepEqual(r2, [false, true]);
 });
 
@@ -133,7 +133,7 @@ test('w5542: the run has no PYTHON* setting, -s, the checkout as cwd, and the sa
   assert.match('error' in bad ? bad.error : '', /workers can write/);
 });
 
-test('w5542: the trusted checkout is cloned aside and renamed into place, fetched when old or forced, kept when a fetch fails', () => {
+test('w5542: the trusted checkout is cloned aside and renamed into place, fetched when old or forced, kept when a fetch fails', async () => {
   const app = fs.mkdtempSync(path.join(os.tmpdir(), 'w5542-co-'));
   const co = trustedAgentsCheckout(app);
   const calls: string[][] = [];
@@ -145,20 +145,20 @@ test('w5542: the trusted checkout is cloned aside and renamed into place, fetche
     return { code: args.includes('fetch') && !fetchWorks ? 128 : 0, stderr: args.includes('fetch') && !fetchWorks ? 'fatal: unable to access' : '' };
   };
   const deps = { git, now: () => t };
-  assert.equal(refreshTrustedCheckout(co, deps), undefined);
+  assert.equal(await refreshTrustedCheckout(co, deps), undefined);
   assert.equal(calls[0]![0], 'clone');
   assert.notEqual(calls[0]!.at(-1), co, 'cloned into a folder of its own');
   assert.ok(fs.existsSync(path.join(co, '.git', 'HEAD')), 'then renamed into place');
   calls.length = 0;
   // Fresh (the marker's mtime is now; the fake clock is far behind it): no fetch.
   t = Date.now();
-  assert.equal(refreshTrustedCheckout(co, deps), undefined);
+  assert.equal(await refreshTrustedCheckout(co, deps), undefined);
   assert.deepEqual(calls, []);
-  assert.equal(refreshTrustedCheckout(co, deps, { force: true }), undefined);
+  assert.equal(await refreshTrustedCheckout(co, deps, { force: true }), undefined);
   assert.deepEqual(calls.map((a) => a[2]), ['fetch', 'reset']);
   calls.length = 0;
   t = Date.now() + 11 * 60_000;
   fetchWorks = false;
-  assert.match(refreshTrustedCheckout(co, deps) ?? '', /git fetch .*unable to access/);
+  assert.match((await refreshTrustedCheckout(co, deps)) ?? '', /git fetch .*unable to access/);
   assert.ok(fs.existsSync(path.join(co, '.git', 'HEAD')), 'the copy it had stays');
 });

@@ -82,6 +82,11 @@ What standing up Ben's Light Tree portal on BEAST, m5, m3 and biscuit beside the
   (docs/instances.md), and prints what needs the owner: the first login (`server/user.ts`), the vault tokens, and per
   machine its record, credential and `--instance` install line. `--dry-run` prints it all and changes nothing. The
   script is the one source now: copies rebuilt from Light Tree's first-draft scripts failed on m5 and m3 (w4038).
+- **A sandbox worker on BEAST cannot run it** (w6207, 2026-11-26, measured): since w5539 a worker's tools run at Low
+  integrity and every root folder they do not write stays Medium, so making `F:/ffw/<dir>` fails with "Permission
+  denied". `--dry-run` works from a worker's own ff-factory clone and checks the name, port and folder; the real run
+  goes to the ops worker (or a person's own shell) as the user, not elevated. Ssh from another machine would step
+  around that fence, so a worker hands the step up instead.
 
 ## The product's name: Ryding Factory, and FF Factory on Final Factory's install
 

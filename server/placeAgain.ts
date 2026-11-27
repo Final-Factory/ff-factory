@@ -30,7 +30,7 @@ import type { Machine, MachineSandbox, SessionInfo, WorkItem } from '../shared/t
 import type { SaveResult } from './saveWork.ts';
 import { unityInstanceName } from '../shared/unityInstance.ts';
 import type { WorkPriority } from '../shared/types.ts';
-import { PREEMPT_STANDS_MS, RECLAIM_STANDS_MS, pickReclaim, preemptNotice, preemptResume, protectedUntil, rankOf, topPriority, type Pressure, type SandboxHolders } from './priorityReclaim.ts';
+import { PREEMPT_STANDS_MS, RECLAIM_STANDS_MS, outrankedOn, pickReclaim, preemptNotice, preemptResume, protectedUntil, rankOf, topPriority, type Pressure, type SandboxHolders } from './priorityReclaim.ts';
 
 /**
  * A stopped worker's check-in further away than this releases its sandbox. Moving it costs a few minutes when it comes
@@ -508,6 +508,8 @@ export interface PlaceAgainDeps {
    * Read once a pass: claims() and answer() read the pass's copy, since computing it reads free(), which reads claims().
    */
   pressure?: () => readonly Pressure[];
+  /** w6432: requests whose start failed a moment ago (Agents.failedStartPressure), as pressure on the computer they were started on. */
+  failedStarts?: () => readonly Pressure[];
   /**
    * w3588: each Queued pair run (Agents.pairPlan) with the computers where one free sandbox lets it start, read once a pass
    * as pressure is. A released worker of no higher priority yields such a computer to it: it neither claims it nor holds it
@@ -611,13 +613,54 @@ export class PlaceAgain {
     this.d = d;
   }
 
+  /** w6432: when each warn-only line (warnOnce) was last logged, by its key. */
+  private readonly warned = new Map<string, number>();
+
+  /**
+   * w6432: the queued game work (or a start that just failed) of strictly higher rank than `mine` that a free game sandbox
+   * on `machineId` is for (priorityReclaim.ts outrankedOn), from the pass's pressure. Undefined: none.
+   */
+  outranking(mine: number, machineId: string): Pressure | undefined {
+    const failed = this.d.failedStarts?.() ?? [];
+    if (!this.pressureNow.length && !failed.length) return undefined;
+    return outrankedOn([...this.pressureNow, ...failed], mine, machineId);
+  }
+
+  /** w6432: log a warn-only line once per key in 10 minutes, so a decision taken every pass is not logged every pass. */
+  warnOnce(key: string, line: string): void {
+    const now = this.now();
+    const was = this.warned.get(key);
+    if (was !== undefined && now - was < 10 * 60_000) return;
+    if (this.warned.size > 500) for (const [k, at] of this.warned) if (now - at >= 10 * 60_000) this.warned.delete(k);
+    this.warned.set(key, now);
+    console.warn(line);
+  }
+
   private now() {
     return (this.d.now ?? Date.now)();
   }
 
+  /**
+   * w6381: facts() by its sessions list: within a claims memo that list is the memo's own (sessionsOn), so a machine's facts are
+   * made once until claimsChanged; outside one every call filters afresh and gets a new list. describeAllSandboxes asked facts
+   * per agent line, 0.7 s of its 1.8 s block at 10:44Z on 2026-11-27 (stall profile: facts, inSandbox).
+   */
+  private readonly factsMemo = new WeakMap<SessionInfo[], PlaceFacts>();
+  /** w6381: how many times claims() worked a machine's claims out (not a memo hit), for the tests. */
+  claimsMade = 0;
+
   private facts(machineId: string): PlaceFacts {
+    const sessions = this.sessionsOn(machineId);
+    const kept = this.claimsMemo && this.factsMemo.get(sessions);
+    if (kept) return kept;
+    const made = this.factsOf(machineId, sessions);
+    if (this.claimsMemo) this.factsMemo.set(sessions, made);
+    return made;
+  }
+
+  private factsOf(machineId: string, sessions: SessionInfo[]): PlaceFacts {
     return {
-      sessions: this.sessionsOn(machineId),
+      sessions,
       live: this.d.isLive,
       unityHolders: this.d.unityHolders(machineId),
       now: this.now(),
@@ -686,6 +729,7 @@ export class PlaceAgain {
   claims(machineId: string): Map<string, string> {
     const memo = this.claimsMemo?.get(machineId);
     if (memo) return memo;
+    this.claimsMade++;
     const m = this.d.machine(machineId);
     const out = new Map<string, string>();
     if (!m) return out;
@@ -1251,6 +1295,14 @@ export class PlaceAgain {
     const ahead = this.yieldsTo(info, m.id);
     if (ahead && !('room' in ahead)) return `Queued pair run ${ahead.work} (${ahead.priority ?? 'normal'}) starts with the next free sandbox on ${m.id}, so it takes it first (w3588); it is placed again after`;
     if (ahead) return `higher-priority queued work ${ahead.work} (${ahead.priority}) takes the next free sandbox on ${m.id} first (w3507); it is placed again after`;
+    // w6432 (warn-only): w3507's yield reads only the computers where a free sandbox is all the queued work lacks; urgent
+    // and frantic work that lacks a seat there too (preemptOn) is passed over. fa2c6212 (w6430, normal) resumed into
+    // lothdesktop/slot2 at about 15:28Z on 2026-11-27, the sandbox it had given up for w6431 (frantic) at 15:22Z.
+    if (this.d.priorityOf) {
+      const mine = this.d.priorityOf(info);
+      const would = this.outranking(rankOf(mine), m.id);
+      if (would) this.warnOnce(`resume:${info.id}:${m.id}:${would.work}`, `place again (w6432, warn-only): ${info.id} (${mine ?? 'no open request'}) resumes on ${m.id} while ${would.work} (${would.priority}) is queued for a game sandbox there; once enforced it yields to it`);
+    }
     const f = this.facts(m.id);
     const taken = this.claims(m.id);
     const p = placeFor(info, m, f, taken, this.failedIn(info.id));

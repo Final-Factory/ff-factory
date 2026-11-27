@@ -68,7 +68,7 @@ function adopted(t: { after: (fn: () => void) => void }, id: string, host: Parti
   assert.equal(s.live, false, 'its agent has ended');
   const commands = () => fs.readFileSync(f.in, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { op: string; text?: string });
   const hostSays = (m: object) => fs.appendFileSync(f.out, JSON.stringify(m) + '\n');
-  return { s, launched, commands, hostSays };
+  return { s, launched, commands, hostSays, old };
 }
 
 /** The old host gets a stop, not the message; once it has closed, a new host starts from the run now with the message. */
@@ -77,6 +77,9 @@ async function startsANewHost(r: ReturnType<typeof adopted>, mcp: LaunchSpec['mc
   assert.deepEqual(r.commands().map((c) => c.op), ['attach', 'stop'], 'the old host gets a stop, not the message');
   assert.equal(r.launched.length, 0, 'no new host while the old one still runs');
   r.hostSays({ op: 'closed', consumed: r.commands().length });
+  // and exits, as a real host does after its closed line. A stand-in left running made each test wait out the 10 s
+  // EXIT_WAIT_MS and a tree kill before the new host, past this 15 s wait on a loaded Windows machine (BEAST, w5915).
+  r.old.kill();
   await until('a new host started', () => r.launched.length === 1);
   assert.deepEqual(r.launched[0].spec.mcp, mcp);
   assert.deepEqual(r.commands().filter((c) => c.op === 'send').map((c) => c.text), ['#tools']);

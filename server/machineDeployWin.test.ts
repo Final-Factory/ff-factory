@@ -605,6 +605,17 @@ test('windows (real PowerShell): probe, unpack, npm ci, install into an app_dir,
   assert.equal(up.code, 0, up.stderr);
   assert.ok(fs.existsSync(path.join(appDir, 'app.new', 'machine', 'daemon.ts')));
   assert.ok(!fs.existsSync(tgz), 'the uploaded bundle is deleted after unpacking');
+  // w5980: app.new carries the read fence's give-back label of its own (inherited by what tar made), so the rename to app
+  // keeps it readable to Low workers under a No-Read-Up daemon folder.
+  // On the system drive (the runner's temp folder) it is skipped and said: the fence labels nothing there.
+  const lab = execFileSync('icacls', [path.join(appDir, 'app.new')], { encoding: 'utf8' });
+  if (path.parse(appDir).root.slice(0, 2).toLowerCase() === (process.env.SystemDrive || 'C:').slice(0, 2).toLowerCase()) {
+    assert.match(up.stdout, /read-back label on .* skipped: on the system drive/, up.stdout);
+    assert.doesNotMatch(lab, /Mandatory Label/, lab);
+  } else {
+    assert.match(lab, /Mandatory Label\\Medium Mandatory Level:\(OI\)\(CI\)\(NW\)/, lab);
+  }
+  assert.doesNotMatch(up.stdout, /read-back label .* not set/, up.stdout);
 
   const npm = await runPs(win.npmScript(p.node!, 'abc1234', appDir), { env, timeoutMs: 8 * 60_000 });
   assert.equal(npm.code, 0, npm.stderr || npm.stdout);
@@ -658,7 +669,7 @@ function logs(appDir: string) {
 // w1532: the tray app the daemon builds and starts on a Windows PC (machine/tray.ts, machine/tray/FFFactoryTray.cs). Built
 // with the C# compiler every Windows PC has, it says hello with its low-level input hooks, counts a key that SendInput
 // injected (an agent driving the game, a test) as injected and never as a person's, sends no `input` for it, and ends on quit.
-test('windows (real tray app): built with the in-box csc, it starts, counts a SendInput key as injected (never a person), and quits (w1532)', { skip: process.platform !== 'win32' && 'Windows only', timeout: 3 * 60_000 }, async (t) => {
+test('windows (real tray app): built with the in-box csc, it starts, counts a SendInput key as injected (never a person), keeps the foreground lock timeout at 0 (w6350), and quits (w1532)', { skip: process.platform !== 'win32' && 'Windows only', timeout: 3 * 60_000 }, async (t) => {
   const { buildTray, traySourceDir, trayInstance } = await import('../machine/tray.ts');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-tray-'));
   // One hook, the tray ended before its folder goes (w1758): Windows refuses to delete the exe of a running process, and a
@@ -794,6 +805,60 @@ $null = [Console]::In.ReadLine()
     const input = await next('input');
     assert.ok(input.kind === 'key' || input.kind === 'click', `the tray sent the person's input (${JSON.stringify(input)})`);
   } else t.diagnostic(`the tray's input hooks did not install here (${String(hello.hooks)}): the injected-key check is skipped`);
+  // w6350: the foreground lock guard. The live ForegroundLockTimeout is set to Windows' logon value (2147483647) the way a
+  // logon does, the state turns the guard on, and the tray must put 0 back by itself, then what the computer had is put back.
+  // On a CI runner the guard must win; elsewhere a refused set (error 5 from a Low process, as an agent's) is a diagnostic.
+  {
+    const since = (from: number, type: string, ok: (l: Record<string, unknown>) => boolean = () => true, ms = 15_000) => async () => {
+      const end = Date.now() + ms;
+      for (;;) {
+        const hit = lines.slice(from).find((l) => l.type === type && ok(l));
+        if (hit) return hit;
+        if (Date.now() > end) throw new Error(`no ${type} from the tray; it said: ${JSON.stringify(lines.slice(from))}`);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    };
+    const flt = async (set?: number) => {
+      const from = lines.length;
+      tray.stdin.write(`${JSON.stringify(set === undefined ? { type: 'flt' } : { type: 'flt', set })}\n`);
+      return since(from, 'flt')();
+    };
+    const state = (fltGuard: boolean) => tray.stdin.write(`${JSON.stringify({ type: 'state', paused: false, why: 'x', schedule: 'none', work: 'x', settings: { schedule: { enabled: false, start: '22:00', end: '08:00', days: [0] }, activity: { enabled: false, idleMinutes: 90 } }, machine: 'test', fltGuard })}\n`);
+    const had = Number((await flt()).live);
+    t.diagnostic(`the live ForegroundLockTimeout here: ${had} ms`);
+    // Only a caller that may force the foreground can set the value (SystemParametersInfo, SPI_SETFOREGROUNDLOCKTIMEOUT:
+    // "The calling thread must be able to change the foreground window, otherwise the call fails"), and the tray in the
+    // background may only once the lock has expired (SetForegroundWindow's rules), which at 0 it always has. So the test
+    // arms it only from 0; a value Windows already armed (a hosted runner that logged on just before, w6366) is used as it
+    // is: a direct set of it is refused with error 87, and the guard must still repair it.
+    const armed = had === 0 ? await flt(2147483647) : { type: 'flt', live: had, set: true, error: 0 };
+    t.diagnostic(had === 0 ? `set to 2147483647: ${JSON.stringify(armed)}` : `already armed at ${had} ms: the guard leg starts from it`);
+    if (armed.set !== true || armed.live !== (had === 0 ? 2147483647 : had)) {
+      assert.ok(!process.env.CI, `a CI runner must let the tray set the live ForegroundLockTimeout: ${JSON.stringify(armed)}`);
+      t.diagnostic('the live value could not be set here (an agent at Low integrity): the guard leg is skipped');
+    } else {
+      const from = lines.length;
+      state(true);
+      const on = await since(from, 'flt_guard', (l) => l.on === true)();
+      t.diagnostic(`guard on: ${JSON.stringify(on)}`);
+      // A failing line is one attempt, not the verdict: the guard tries again every 2 s, and its momentary window waits for
+      // 3 s without input, so an attempt right after the test's own injected key and click reports failing: 1 (w6366).
+      const fixed = await since(from, 'flt_guard', (l) => l.live === 0, 60_000)();
+      t.diagnostic(`guard: ${JSON.stringify(fixed)}; its log: ${JSON.stringify(lines.slice(from).filter((l) => l.type === 'log').map((l) => l.text))}`);
+      assert.equal(fixed.live, 0, `the guard put 0 back: ${JSON.stringify(fixed)}`);
+      assert.equal((await flt()).live, 0, 'the live value read afterwards is 0');
+      const off = lines.length;
+      state(false);
+      await since(off, 'flt_guard', (l) => l.on === false)();
+      // Off, it no longer repairs: Windows' value set again stays.
+      if ((await flt(2147483647)).live === 2147483647) {
+        await new Promise((r) => setTimeout(r, 4_000));
+        assert.equal((await flt()).live, 2147483647, 'off, the guard leaves the live value alone');
+      }
+    }
+    const back = await flt(had);
+    t.diagnostic(`put back ${had}: ${JSON.stringify(back)}`);
+  }
   tray.stdin.write(`${JSON.stringify({ type: 'quit' })}\n`);
   const code = await new Promise<number | null>((r) => tray.on('exit', (c) => r(c)));
   assert.equal(code, 0);
@@ -818,4 +883,43 @@ test('logs: the real supervisor block, run by PowerShell over many restarts, kee
   assert.equal(listArchives(dir).filter((x) => x.base === 'daemon.err.log').length, 3, 'empty err logs are not archived');
   maintainLogs(dir, { platform: 'win32' });
   assert.equal(listArchives(dir).filter((x) => x.base === 'daemon.log' && x.gz).length, 5);
+});
+
+test('w5980: the staged app.new gets the read fence give-back label before tar unpacks into it', () => {
+  for (const s of [win.uploadScript(), win.uploadScript('D:\ff', '.ff-factory-upload-1.tgz')]) {
+    const label = s.indexOf("[FfStageLabel]::Set($new, 'S:(ML;OICI;NW;;;ME)')");
+    assert.ok(label > s.indexOf("New-Item -ItemType Directory -Force $new"), 'after app.new is made');
+    assert.ok(label < s.indexOf("'-xzf'"), 'before tar makes its files, so they inherit it');
+    assert.match(s, /^"@$/m, 'the here-string closes at column 0');
+  }
+});
+
+// The label for real, under a parent closed as on closes the daemon's folder: the files made in app.new after it is set
+// read as given back (their first label is NW, not NW NR). SystemDrive is pointed elsewhere for the child only, so the
+// runner's temp folder (on C:) stands in for a work drive; a Low process cannot set a Medium label (1299), so skipped there.
+test('w5980 (Windows): app.new labelled before tar keeps its files given back under a No-Read-Up daemon folder', { skip: process.platform !== 'win32' ? 'Windows only' : /S-1-16-4096\b/.test(execFileSync(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'whoami.exe'), ['/groups'], { encoding: 'utf8' })) ? 'this process is Low' : false }, async () => {
+  const { labelScript, NO_READ_UP } = await import('../machine/lowIntegrity.ts');
+  const ps = (script: string, env: NodeJS.ProcessEnv = process.env) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(`$ProgressPreference = 'SilentlyContinue'\n${script}`, 'utf16le').toString('base64')], { encoding: 'utf8', env });
+  // Windows names are any case (Git Bash passes SYSTEMDRIVE): one key, or the first one wins.
+  const withSystemDrive = (v: string) => ({ ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toLowerCase() !== 'systemdrive')), SystemDrive: v });
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w5980-stage-'));
+  try {
+    assert.match(ps(labelScript([{ path: d, sddl: NO_READ_UP.dir }])), /^ok 0/m);
+    const stage = path.join(d, 'app.new');
+    fs.mkdirSync(stage);
+    const out = ps(`$ErrorActionPreference = 'Stop'\n$new = '${stage.replace(/'/g, "''")}'\n${win.readBackScript('$new')}\n'end'`, withSystemDrive('Q:'));
+    assert.doesNotMatch(out, /read-back label/, out);
+    fs.mkdirSync(path.join(stage, 'machine'));
+    fs.writeFileSync(path.join(stage, 'machine', 'ghApp.ts'), 'x');
+    for (const x of [stage, path.join(stage, 'machine'), path.join(stage, 'machine', 'ghApp.ts')]) {
+      const first = execFileSync('icacls', [x], { encoding: 'utf8' }).split(/\r?\n/).find((l) => /Mandatory Label/.test(l)) ?? '';
+      assert.match(first, /Medium Mandatory Level:.*\(NW\)/, `${x}: ${first}`);
+      assert.doesNotMatch(first, /\(NR\)/, `${x}: ${first}`);
+    }
+    // And on the system drive it is skipped: the same folder, with SystemDrive left as it is when that is its drive.
+    const sysOut = ps(`$new = '${stage.replace(/'/g, "''")}'\n${win.readBackScript('$new')}`, withSystemDrive(stage.slice(0, 2)));
+    assert.match(sysOut, /skipped: on the system drive/, sysOut);
+  } finally {
+    fs.rmSync(d, { recursive: true, force: true });
+  }
 });

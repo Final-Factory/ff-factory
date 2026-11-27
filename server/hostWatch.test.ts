@@ -318,6 +318,25 @@ test('w3673: busy tools keep a silent agent (a long build), flagged; progress cl
   assert.ok(Number(fs.readFileSync(hostFiles(dir).progress, 'utf8')) > Date.now() - 60_000, 'its progress time kept for the next daemon');
 });
 
+test('w6110: idle tools that run lowered below a CI job keep a silent agent, flagged, rather than end it', { timeout: 60_000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w6110-lowered-'));
+  const dir = path.join(root, 'h6');
+  const { pid, child } = await fakeHost(dir);
+  const h = hostedOn(root, 'h6', {
+    hang: { SILENT_MS: 1, LOOK_MS: 500, BUSY_CPU_MS: 30_000 },
+    toolsCpu: async () => new Map([['9@x', 1_200]]),
+    toolsLowered: (p) => p === pid,
+  });
+  t.after(async () => {
+    h.s.detach();
+    await cleanUp(root, pid, child);
+  });
+  assert.equal(h.s.adopt(), true);
+  await until('kept as lowered', () => /they run lowered below a CI job \(w6110\)/.test(lastSession(h)?.info.statusDetail ?? ''));
+  assert.ok(fs.existsSync(dir) && pidAlive(pid), 'its host runs on');
+  assert.ok(!h.out.some((m) => m.type === 'session' && !m.live), 'never ended');
+});
+
 test('w3673: the hang watch\'s clock goes on across daemons (daemon.progress), and a message held mid-turn does not reset it', { timeout: 60_000 }, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w3673-adopt-'));
   const dir = path.join(root, 'h3');
