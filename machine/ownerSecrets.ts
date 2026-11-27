@@ -375,13 +375,36 @@ export function sayOwnerRules(mode: string, platform: NodeJS.Platform, owner: re
  */
 export const OWNER_LABEL_ON_SYSTEM_DRIVE: ReadonlySet<string> = new Set(['lothdesktop']);
 
+/**
+ * w6569 (lothsahn, 2026-11-27: "File it: move BEAST's gh login out of Credential Manager, as w5749 did on LothDesktop";
+ * "Write only inside F:\ffw, except for the gh login move itself"): the Windows machines whose owner-secret plan is said
+ * but held at warn whatever the read fence's mode (ownerLabelMode), the warn stage of lothsahn's lockout rule. BEAST's
+ * fence is already `on` (its daemon log, 2026-11-27 22:42:47Z), so listing it in OWNER_LABEL_ON_SYSTEM_DRIVE alone would
+ * move the login at its next start; the enforce stage moves it from here to there. Measured from a Low sandbox worker on
+ * BEAST (w5932, and again by w6569 on 2026-11-27): GH_CONFIG_DIR at an empty folder with a token-less hosts.yml naming
+ * bryding, no GH_TOKEN: `gh auth status` said "Logged in to github.com account bryding (keyring)" and `gh api user` 200.
+ */
+export const OWNER_LABEL_WARN_ONLY: ReadonlySet<string> = new Set(['beast']);
+
+/**
+ * w6569: the machines whose plan is the gh login alone: the go there was for "the gh login move itself", so ~/.ssh is left
+ * open (with its reason) and its folder never labelled. The gh folder's label is part of that move: a login moved into
+ * hosts.yml with the folder still open to Low would be as readable as it was in Credential Manager.
+ */
+export const OWNER_LABEL_GH_ONLY: ReadonlySet<string> = new Set(['beast']);
+
 /** One owner path the Windows read fence labels, or leaves open and says why. */
 export interface OwnerLabelPlan {
   /** Labelled No-Read-Up in on mode (a folder: inherited by everything in it, files made later included). */
   label: LabelTarget[];
   /** Left open, each with its reason, said in the warn and on lines. */
   left: { path: string; why: string }[];
+  /** w6569: a machine in OWNER_LABEL_WARN_ONLY: the plan is said, never applied (ownerLabelMode). */
+  warnOnly?: boolean;
 }
+
+/** The mode the owner labels follow (w6569): the fence's, except `on` is held at `warn` on a warn-only machine (its way back runs). */
+export const ownerLabelMode = <M extends string>(mode: M, plan: Pick<OwnerLabelPlan, 'warnOnly'>): M | 'warn' => (plan.warnOnly && mode === 'on' ? 'warn' : mode);
 
 /**
  * The Windows owner-secret labels for this machine (w5749). On a machine in OWNER_LABEL_ON_SYSTEM_DRIVE: the gh login's
@@ -393,10 +416,19 @@ export interface OwnerLabelPlan {
  * then never called, so nothing on their system drive is even looked at.
  */
 export function ownerLabelTargets(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv; machineId?: string; exists?: (p: string) => boolean }): OwnerLabelPlan {
-  if (o.platform !== 'win32' || !o.machineId || !OWNER_LABEL_ON_SYSTEM_DRIVE.has(o.machineId.toLowerCase())) return { label: [], left: [] };
+  const id = o.machineId?.toLowerCase();
+  const on = !!id && OWNER_LABEL_ON_SYSTEM_DRIVE.has(id);
+  const warnOnly = !on && !!id && OWNER_LABEL_WARN_ONLY.has(id);
+  if (o.platform !== 'win32' || (!on && !warnOnly)) return { label: [], left: [] };
   const exists = o.exists ?? fs.existsSync;
-  const out: OwnerLabelPlan = { label: [], left: [] };
+  const out: OwnerLabelPlan = { label: [], left: [], ...(warnOnly ? { warnOnly } : {}) };
+  const ghOnly = OWNER_LABEL_GH_ONLY.has(id!);
   for (const s of ownerSecretPaths(o)) {
+    if (ghOnly && s.kind !== 'gh') {
+      // w6569: only the gh folder is looked at on a gh-only machine: nothing else on its system drive, not even whether it exists.
+      if (s.kind === 'ssh') out.left.push({ path: s.path, why: "not in this machine's go (the gh login move only, w6569)" });
+      continue;
+    }
     if (!exists(s.path)) continue;
     if (s.kind === 'browser') out.left.push({ path: s.path, why: "its browser's own AppContainer (Low) reads the profile's Network folder; a No-Read-Up label would refuse it the owner's cookies" });
     else out.label.push({ path: s.path, sddl: NO_READ_UP.dir });
@@ -435,7 +467,8 @@ export function machineGhStatusEnv(env: NodeJS.ProcessEnv = process.env): NodeJS
 /** The warn and on line for the Windows owner-secret labels (w5749): what on labels, the gh login's move, and what stays open. */
 export function sayOwnerLabels(mode: string, plan: OwnerLabelPlan, gh: 'keyring' | 'file' | undefined): string {
   if (!plan.label.length && !plan.left.length) return `read fence (${mode}): owner-secret rules: none on this Windows machine (the fence labels the owner's folders on the system drive only on ${[...OWNER_LABEL_ON_SYSTEM_DRIVE].join(', ')})`;
-  const verb = mode === 'on' ? 'label' : 'would label (warn only: no label set)';
+  const held = plan.warnOnly && mode === 'on' ? ' (held at warn on this machine: OWNER_LABEL_WARN_ONLY, w6569)' : '';
+  const verb = ownerLabelMode(mode, plan) === 'on' ? 'label' : `would label (warn only: no label set${held})`;
   const move = gh === 'keyring' ? "; the gh login is in Credential Manager (keyring), which the label does not close: on moves it into the gh folder's hosts.yml" : gh === 'file' ? '; the gh login is in its folder (hosts.yml)' : '; no gh login found';
   const left = plan.left.length ? `; left open: ${plan.left.map((l) => `${l.path} (${l.why})`).join(', ')}` : '';
   return `read fence (${mode}): owner-secret rules ${verb} No-Read-Up on ${plan.label.length ? plan.label.map((t) => t.path).join(', ') : 'nothing'}${move}${left}`;
@@ -575,7 +608,9 @@ export function ownerSocketPaths(o: { runtimeDir?: string; env: NodeJS.ProcessEn
   const out: string[] = [];
   if (o.runtimeDir) {
     const r = (...s: string[]) => path.posix.join(o.runtimeDir!, ...s);
-    out.push(r('bus'), r('keyring'), r('gcr'), r('gnupg'), r('openssh_agent'));
+    // w6443: systemd, the user manager's own sockets (`private`, `notify`...), through which `systemd-run --user` starts a
+    // job outside the lock and every read rule (w5463): the worst of them, so the probe counts it.
+    out.push(r('bus'), r('systemd'), r('keyring'), r('gcr'), r('gnupg'), r('openssh_agent'));
   }
   if (o.env.SSH_AUTH_SOCK) out.push(path.posix.resolve(o.env.SSH_AUTH_SOCK));
   return [...new Set(out)];
@@ -616,7 +651,8 @@ function statOr(p: string): fs.Stats | undefined {
  * siblings there at start). Effective from Landlock ABI 9; the probe tells whether they are (probeOwnerSockets).
  */
 export function ownerSocketDenyArgs(runtimeDir: string | undefined): string[] {
-  return ownerSocketPaths({ runtimeDir, env: {} }).flatMap((p) => ['--deny-unix', p]);
+  // systemd's folder is denied to every locked run already (writeLockArgs, w5562); it is only probed here (w6443).
+  return ownerSocketPaths({ runtimeDir, env: {} }).filter((p) => p !== path.posix.join(runtimeDir ?? '', 'systemd')).flatMap((p) => ['--deny-unix', p]);
 }
 
 /**

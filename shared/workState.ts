@@ -88,9 +88,10 @@ export interface WorkLive {
    */
   orchestrator?: boolean;
   /**
-   * w4352: what it waits on is follow-up requests its worker handed up, for its requester's orchestrator to file: that
-   * orchestrator's backlog, shown apart from waits on a person on the Waiting on input tab. FF Factory re-sends them at
-   * 2 h, and at 12 h they become a card for that person (handUpCard, w5577; Orchestrators.handUpStep).
+   * w4352: what it waits on is follow-up requests its worker handed up, for its requester's orchestrator to file or drop:
+   * that orchestrator's backlog. w6581: Working, since the orchestrator has it, so it is not on any person's Waiting on
+   * input tab. FF Factory re-sends them at 2 h, and at 12 h they become a card for that person (handUpCard, w5577;
+   * Orchestrators.handUpStep).
    */
   backlog?: boolean;
   /** w5577: the hand-up's card: its person files or drops the follow-ups with one click (WorkHandedUp.card). */
@@ -587,7 +588,7 @@ export const HAND_UP_CARD_MS = 12 * 3_600_000;
 export function handUpsPending(w: Pick<WorkItem, 'handedUp'>): number {
   const h = w.handedUp;
   if (!h || h.autoFiled || h.dropped) return 0;
-  return Math.max(0, h.count - h.filed.length);
+  return Math.max(0, h.count - h.filed.length - (h.droppedItems?.length ?? 0));
 }
 
 /**
@@ -815,7 +816,9 @@ const orchestratorLive = (w: Pick<WorkItem, 'requestedBy'>, worker: string, line
 
 /**
  * w4352: the hand-up's wait (WorkItem.handedUp), on the orchestrator of the person it was sent to, and from 12 h on (w5577)
- * on that person, as their card to file or drop them; undefined when none is pending.
+ * on that person, as their card to file or drop them; undefined when none is pending. w6581: until the card, Working, not
+ * Waiting on input: the orchestrator has it (file_follow_ups files or drops it), and lothsahn asked why w6534's row read
+ * "waiting on input" when "it's yours".
  */
 export function handUpLive(w: Pick<WorkItem, 'handedUp' | 'requestedBy' | 'requesters'>, now: number): WorkLive | undefined {
   const left = handUpsPending(w);
@@ -836,8 +839,8 @@ export function handUpLive(w: Pick<WorkItem, 'handedUp' | 'requestedBy' | 'reque
   const at = Date.parse(h.at) || now;
   const cardAt = new Date(at + HAND_UP_CARD_MS).toISOString();
   return {
-    state: 'waiting',
-    why: `${what} wait${left === 1 ? 's' : ''} for ${to.displayName}'s orchestrator to file ${them}; left unfiled, ${left === 1 ? 'it becomes' : 'they become'} a card for ${to.displayName} to file or drop at ${cardAt.slice(11, 16)} UTC${cardAt.slice(0, 10) !== new Date(now).toISOString().slice(0, 10) ? ` on ${cardAt.slice(0, 10)}` : ''} (w5577)`,
+    state: 'working',
+    why: `${what}: ${to.displayName}'s orchestrator has ${them} to file or drop; left unfiled, ${left === 1 ? 'it becomes' : 'they become'} a card for ${to.displayName} to file or drop at ${cardAt.slice(11, 16)} UTC${cardAt.slice(0, 10) !== new Date(now).toISOString().slice(0, 10) ? ` on ${cardAt.slice(0, 10)}` : ''} (w5577)`,
     waitsOn: [`${to.displayName}'s orchestrator`],
     worker: h.worker,
     orchestrator: true,
@@ -1125,8 +1128,9 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
     return { state: 'waiting', why: `${asking.id} waits for permission${p ? ` to use ${p.toolName}` : ''}`, waitsOn: names(asking.requestedBy ? [asking.requestedBy] : w.requesters), worker: asking.id };
   }
 
-  // w4352: follow-up requests its worker handed up wait for the requester's orchestrator to file them (w2969): Waiting, on
-  // that orchestrator, as its backlog, not on a person; 12 h after the hand-up they become that person's card (w5577).
+  // w4352: follow-up requests its worker handed up wait for the requester's orchestrator to file or drop them (w2969):
+  // Working, on that orchestrator, as its backlog, not on a person (w6581); 12 h after the hand-up they become that
+  // person's card (w5577), Waiting on input on them.
   const handUp = handUpLive(w, f.now);
   if (handUp) return handUp;
 

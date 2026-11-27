@@ -36,10 +36,14 @@ test('w6484: the stale slots of a report are the free ones a holder that no long
   assert.deepEqual(staleSlotsOf(running), [], 'a running holder is left to a take');
 });
 
-test('w6484: warn-only (the default) says each stale hold once and frees nothing', async () => {
-  assert.equal(staleOutputSettings({}).ffuSlotSweep, 'warn', 'warn-only first');
-  assert.equal(staleOutputSettings({ ffuSlotSweep: 'on' }).ffuSlotSweep, 'on');
-  assert.equal(staleOutputSettings({ ffuSlotSweep: 'yes' }).ffuSlotSweep, 'warn');
+test('w6484: on by default (the enforce step); the portal turns it back to warn or off', () => {
+  assert.equal(staleOutputSettings({}).ffuSlotSweep, 'on', 'enforce step: lothsahn turned it on everywhere');
+  assert.equal(staleOutputSettings({ ffuSlotSweep: 'yes' }).ffuSlotSweep, 'on', 'an unknown value keeps the default');
+  assert.equal(staleOutputSettings({ ffuSlotSweep: 'warn' }).ffuSlotSweep, 'warn', 'recovery: warn from the portal');
+  assert.equal(staleOutputSettings({ ffuSlotSweep: 'off' }).ffuSlotSweep, 'off', 'recovery: off from the portal');
+});
+
+test('w6484: warn-only says each stale hold once and frees nothing', async () => {
   const r = rig('warn');
   assert.deepEqual(await r.a.onReport(REPORT), ['slot3', 'slot4']);
   assert.equal(r.sweeps(), 0, 'no sweep runs');

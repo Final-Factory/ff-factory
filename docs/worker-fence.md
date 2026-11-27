@@ -333,11 +333,12 @@ daemon folder's walk, and the gh shim's `ghApp.ts` read as missing to Low worker
 | `warn` | no read rules | as `off` | yes, logged |
 | `on` | the read rules, once a probe has passed | No-Read-Up set at each start and at the switch | yes; a probe that finds a path workers need refused, or cannot judge one, leaves runs without read rules until one passes |
 
-**`on` is refused on Linux for now** (lockout re-review B4 of #1193, machine/readFence.ts `readFenceOnRefusal`): the switch
-answers with the reason, and a `read-fence` file that says `on` there is read as `warn`. See "Linux, a self-update" below:
-until the code folder survives an update, `on` would cost every running worker git push, gh, ff-pr and unity-slot at each
-update. macOS and Linux: switching to `off` or `warn` covers runs started afterwards only; Seatbelt and Landlock cannot be
-lifted from a running process, so runs already going keep the read rules they started with until they end.
+**`on` on Linux needs the code link** (w6434, machine/readFence.ts `readFenceOnHeld`; before it, lockout re-review B4 of
+#1193 refused `on` there outright). Until `<daemon>/app` is the link to `code/app` (see "Linux, a self-update" below),
+`on` is held at warn and the probe logs `read fence (on): not enforced here, warn only: ... not the code link yet`. The
+first daemon update that runs w6434's installer moves the folder over by itself. macOS and Linux: switching to `off` or
+`warn` covers runs started afterwards only; Seatbelt and Landlock cannot be lifted from a running process, so runs already
+going keep the read rules they started with until they end.
 
 The probe (`probeReadFence`, machine/daemon.ts) runs at daemon start and at each switch, in a child of the daemon's own
 under the same fence a run gets (macOS Seatbelt, Linux Landlock with the read rules): node opens each closed path (the
@@ -410,11 +411,16 @@ Limits:
   update's `job.json`) stays readable: on Windows it inherits the folder's read-back label, and on Linux a folder grant
   covers what is made in it later. What remains is a writer added later that renames a given-back file: the
   `FENCE_FILE_WRITERS` test fails on a given-back file with no writer named, and checks that the two durable writers pass `inPlace`.
-- **Linux, a self-update** (in `on` mode): the update puts the new code in a new `app` folder (scripts/worker/linkJob.ts),
-  which a run that outlives the update was never granted, so until that run ends its gh helper, git credential helper and
-  `unity-slot` (all `node <daemon>/app/machine/...`) are refused. New runs are fine. This is why `on` is refused on Linux
-  until the code moves to a folder that survives the swap (a given-back `code/{app,app.old,app.new}`, or shims at a fixed
-  path). Related: `~/.gitconfig` rewritten by rename after a run started (`git config --global`, `gh auth setup-git`) is
+- **Linux, a self-update** (w6434, closed): Landlock grants by inode when a run starts, and the daemon's folder is closed
+  with its children given back one by one, so a new `app` renamed into it after a run started was unreadable to that run
+  (B4 of #1193: its gh helper, git credential helper, ff-pr and `unity-slot`, all `node <daemon>/app/machine/...`). Now
+  the code lives in `<daemon>/code/` (`app`, `app.old`, `app.new`, `app.failed`), `<daemon>/app` is a relative link to
+  `code/app` that an update never touches, and `code` is given back as a folder (server/daemonReads.ts), so what an update
+  renames inside it stays readable (scripts/worker/linuxCode.ts; the installer `installDaemonLinux` and the rollback
+  `swapBack` in scripts/worker/linkJob.ts). Landlock checks the file a link leads to, not the link. A real `app` folder
+  (the old layout, or one a downgrade's installer put back) becomes `code/app.old` at the next update.
+  `live w6434` (scripts/worker/linuxCode.test.ts) runs a locked reader across both swaps: the link keeps the new code
+  readable, the old layout's swap is refused. Related, still open: `~/.gitconfig` rewritten by rename after a run started (`git config --global`, `gh auth setup-git`) is
   unreadable to that run, and git treats that as fatal; a per-run `GIT_CONFIG_GLOBAL` in a given-back folder would avoid it. Windows has the same window until the
   restarted daemon's start sets the labels again (about a minute on LothDesktop).
 
@@ -515,6 +521,16 @@ fenced worker's `env -u GH_TOKEN gh auth status` said "Logged in to github.com a
     back needs nobody at the machine: set the read fence to `warn` (or `off`). To revert this code, set `warn` first and
     let the daemon start once: a build without `applyOwnerLabels` leaves the labels and the login where they are (gh
     still works from `hosts.yml`; only Low workers lose the folders).
+  - **BEAST's go** (w6569; lothsahn, 2026-11-27: "File it: move BEAST's gh login out of Credential Manager, as w5749 did
+    on LothDesktop"; "Write only inside F:\ffw, except for the gh login move itself"). Measured from a Low sandbox worker
+    on BEAST (w5932, again by w6569): `GH_CONFIG_DIR` at an empty folder whose `hosts.yml` names bryding with no token,
+    `GH_TOKEN` unset, `gh auth status` said `bryding (keyring)` and `gh api user` answered. BEAST is in
+    `OWNER_LABEL_GH_ONLY`: its plan is the gh folder alone (`~\.ssh` left open as outside the go, never looked at; browsers
+    never looked at). Warn stage: BEAST's fence is already `on`, so it sits in `OWNER_LABEL_WARN_ONLY`, where
+    `ownerLabelMode` holds `on` at `warn` for the owner labels only: the probe line says `would label (warn only: no label
+    set (held at warn on this machine ...))` and `applyOwnerLabels` runs the warn branch (the way back, a no-op with no
+    label and no note). The enforce stage moves `beast` into `OWNER_LABEL_ON_SYSTEM_DRIVE`; its way back is the same:
+    the read fence to `warn`, or a revert of the enforce change (BEAST back in the warn-only set runs the way back).
   - Runs with no vault token get the machine login's token as `GH_TOKEN` (`machineGh`, read by the Medium daemon from
     `hosts.yml` once moved), never the labelled folder. `lowGhSelfTest` now tests that same route at Low.
   - **Browser profiles stay open, even on LothDesktop**: Chrome and Edge grant their network service's AppContainer
@@ -560,16 +576,18 @@ rules, so `read-fence-off` takes them off live. While a socket answers, `on` log
 | Option | Closes | Cost |
 |---|---|---|
 | Deny the sockets to fenced runs | All of them, where the kernel can: only Landlock ABI 9 | On ABI 8 nothing unprivileged can. seccomp cannot tell one socket path from another. A mount namespace to hide them is refused (`unshare -Urm true`: "write failed /proc/self/uid_map: Operation not permitted"; `kernel.apparmor_restrict_unprivileged_userns = 1`). Unsetting `DBUS_SESSION_BUS_ADDRESS` is no fence: the worker sets it back, and `systemd-run --user` reaches `$XDG_RUNTIME_DIR/systemd/private` without it. Where it works, workers lose nothing they need. With the bus pointed at nothing and `SSH_AUTH_SOCK` empty, these all passed: `gh api user` (token and an empty gh folder, as fenced runs get), `git ls-remote` over HTTPS, Node and Python HTTPS, and `claude --version`. The bus deny has shipped in `writeLockArgs` since w5562. |
-| Refuse to enforce owner secrets below ABI 9 | Nothing on biscuit. It stops `on` from claiming the gh login is closed while the keyring hands it out | No worker loses anything; Linux below 7.1 keeps no read rules (it already has none: B4 refuses `on` on Linux) |
+| Refuse to enforce owner secrets below ABI 9 | Nothing on biscuit. It stops `on` from claiming the gh login is closed while the keyring hands it out | No worker loses anything; Linux below 7.1 keeps no read rules (the pick) |
 | Move the daemon's gh login off the keyring (`gh auth login --insecure-storage`, into `~/.config/gh/hosts.yml`, which the fence closes) | The gh token only | Changes the machine's own setup (a person's step). Leaves 8 other keyring items, the ssh and gpg agents and the systemd escape open, so the route to `org.freedesktop.secrets` stays |
 
-**The pick: deny the sockets where the kernel can, and refuse `on` where it cannot.** A run in `on` mode denies the
-bus, keyring and agent sockets (`--deny-unix`; the bus and systemd were already denied to every locked run since w5562),
-and `on` takes effect on Linux only once this probe finds every owner socket refused. A kernel below ABI 9 never passes, so biscuit stays unenforced until it runs Linux 7.1 or
-newer. That is the kernel's limit, not a setting. Lothsahn's call (w5562, 2026-11-25: "Leave it until Ubuntu's normal updates bring
-7.1"): no kernel upgrade by hand (not the 7.3 OEM kernel the archive offers, not unprivileged user namespaces), so Linux
-stays warn-only until Ubuntu's normal kernel reaches 7.1. Moving the gh login alone would not meet "cannot reach
-org.freedesktop.secrets", so it is not handed up.
+**The pick: deny the sockets where the kernel can, and refuse `on` where it cannot** (w5748, kept by w6443's review of
+#1478). A run in `on` mode denies the bus, keyring and agent sockets (`--deny-unix`; the bus and systemd's were already
+denied to every locked run since w5562), which takes effect from ABI 9. Below it `on` enforces nothing and logs `read
+fence (on): not enforced here, warn only: a fenced run still reaches N owner socket(s) ...`. w6434 first lifted this so
+biscuit would enforce the file rules alone; the review found that an empty claim. `systemd-run --user` starts a job
+outside the lock and every read rule (w5463), from which `~/.claude/.credentials.json`, `~/.config/gh/hosts.yml` and the
+daemon's secrets are one `cat` away, against lothsahn's w5559 rule ("fenced workers can't read the machine's own Claude
+login anywhere"). The probe now counts systemd's folder too (`ownerSocketPaths`), so the line names that route.
+lothsahn's call (w5562, 2026-11-25: "Leave it until Ubuntu's normal updates bring 7.1") holds: no upgrade by hand.
 
 **The READ_DIR limit** (#1193's documented limit, kept): Landlock rights are inherited down the tree, and every parent on
 the chain to a closed path keeps READ_DIR so its other children stay listable. That READ_DIR reaches the closed folder
@@ -658,14 +676,14 @@ commands that read a temp folder through the parser. All 13 writes were seen and
 
 ## Known limits
 
-- **Linux is warn-only until its kernel has Landlock ABI 9 (Linux 7.1)** (w5748; lothsahn: "Leave it until Ubuntu's
-  normal updates bring 7.1"). Below it a fenced run still reaches the session bus (the Secret Service, where the gh login
-  is kept), GNOME keyring and the ssh and gpg agents, and `on` keeps no read rules: biscuit (Ubuntu 26.04, 7.0.0-38, ABI 8)
-  measured all 12 owner sockets reachable. A newer kernel alone does not turn `on` on: `readFenceOnRefusal`
-  (machine/readFence.ts) still refuses `read-fence-on` on every Linux kernel for the self-update lockout (B4 of #1193).
-  Once Ubuntu ships 7.1, the owner-socket probe can pass by itself; `on` then still needs B4 fixed and a person's switch.
-  `live w5748 enforce` (server/w5748OwnerSockets.test.ts) is the check to run there first: it skips below ABI 9 and has
-  never run.
+- **Linux is warn-only until its kernel has Landlock ABI 9 (Linux 7.1)** (w5748, w6443). Below it a fenced run reaches
+  systemd's own sockets (`systemd-run --user` runs a job outside the lock), the session bus (the Secret Service, where
+  the gh login is kept), GNOME keyring and the ssh and gpg agents: biscuit (Ubuntu 26.04, 7.0.0-38, ABI 8) measured all
+  12 reachable. So `on` enforces nothing there and says why. Once Ubuntu ships 7.1 the denies take effect and `on` with
+  them. `live w5748 enforce` (server/w5748OwnerSockets.test.ts) is the check to run there first: it skips below ABI 9
+  and has never run.
+- **Linux without Landlock**: the write lock's probe fails and sandbox workers are held (w5555), and the read probe has
+  no fence to run under, so it logs `no worker fence runs here ...` and `on` enforces nothing (a warn, never a lockout).
 - **Preferences through cfprefsd** (EditorPrefs, PlayerPrefs, `defaults write`) are written by cfprefsd, outside the
   sandbox, so the file rules never see them: from inside the fence a `defaults write` of a new domain made its plist in
   `~/Library/Preferences` (measured on m5). daemon.json `"workerPrefFence": true` adds `(deny user-preference-write)`

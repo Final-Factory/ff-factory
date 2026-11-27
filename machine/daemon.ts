@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
@@ -30,10 +30,10 @@ import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
 import { StallProfiler } from '../server/stallProfile.ts';
 import { freezeWatchSettings, startFreezeWatch, type FreezeWatch } from './freezeWatch.ts';
-import { useSpawnThread } from '../server/spawnThread.ts';
+import { execFileOffThread, useSpawnThread } from '../server/spawnThread.ts';
 import { warmScopeProbes } from './linuxScope.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
-import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnRefusal, readFenceProbeTargets, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
+import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnHeld, readFenceProbeTargets, readRulesForNewRun, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
@@ -111,7 +111,7 @@ import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim, readFfuSlotsReport, runFfuSlotSweep } from './ffuSlots.ts';
 import { FfuSlotAutoSweep } from './ffuSlotAutoSweep.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
-import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, sayOwnerLabels, ownerLabelTargets, ghLoginStorage, machineGhStatusEnv, ghLoginToFile, ghLoginToKeyring, realGhRun, OWNER_GH_MOVED_NOTE, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
+import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, sayOwnerLabels, ownerLabelTargets, ownerLabelMode, ghLoginStorage, machineGhStatusEnv, ghLoginToFile, ghLoginToKeyring, realGhRun, OWNER_GH_MOVED_NOTE, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { installPythonShim, trustedGh } from './evidenceGate.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
@@ -155,6 +155,7 @@ import { BenchProxy } from './benchProxy.ts';
 import { MEDIUM_AGENT_VAR, fixUserPath, planMediumCaches, planMediumFolders, type MediumCaches, type MediumCachesMode, type MediumFolders, type MediumFoldersMode } from './mediumFolders.ts';
 import { UvCachePruner, applyMediumUvToolDir, findUv, mediumUvCacheDir, mediumUvCacheFor, runQuiet, runQuietEnv, sandboxUvEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
 import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type FfuSlotsReport, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
+import { isMainModule } from './isMain.ts';
 
 export interface DaemonConfig {
   /**
@@ -844,7 +845,7 @@ export class Daemon {
   private ffuReport?: FfuSlotsReport;
   private ffuReportAt = 0;
   private ffuReporting = false;
-  /** w6484: frees the stale slots each report names (warn-only unless staleOutput.ffuSlotSweep is on). */
+  /** w6484: frees the stale slots each report names (staleOutput.ffuSlotSweep: on by default, warn or off from the portal). */
   private readonly ffuAutoSweep = new FfuSlotAutoSweep({
     mode: () => staleOutputSettings(this.cleanupSettings.staleOutput).ffuSlotSweep,
     sweep: () => runFfuSlotSweep({ root: this.cfg.root!, factsFile: cleanupFactsFile(appDirOfConfig(this.cfg)), max: FFU_SLOTS_DEFAULT_MAX }),
@@ -1212,7 +1213,7 @@ export class Daemon {
         ? {
             start: async (root: string) => {
               const r = await new Promise<{ code: number; out: string; err: string }>((resolve) =>
-                execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', runnerRestartScript(root)], { timeout: 60_000 }, (e, out, err) => resolve({ code: e ? ((e as { code?: number }).code ?? 1) : 0, out: String(out), err: String(err) })),
+                execFileOffThread('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', runnerRestartScript(root)], { timeout: 60_000 }, (e, out, err) => resolve({ code: e ? ((e as { code?: number }).code ?? 1) : 0, out: String(out), err: String(err) })),
               );
               if (r.code !== 0) throw new Error((r.err || r.out || `exit ${r.code}`).trim());
               return r.out.trim() || 'started';
@@ -1256,7 +1257,7 @@ export class Daemon {
       },
       systemctl: (args) =>
         new Promise((resolve, reject) =>
-          execFile('systemctl', ['--user', ...args], { timeout: 60_000 }, (err, stdout, stderr) => (err ? reject(new Error(`systemctl --user ${args.join(' ')}: ${(stderr || err.message).trim()}`)) : resolve(stdout))),
+          execFileOffThread('systemctl', ['--user', ...args], { timeout: 60_000 }, (err, stdout, stderr) => (err ? reject(new Error(`systemctl --user ${args.join(' ')}: ${(stderr || err.message).trim()}`)) : resolve(stdout))),
         ),
       freeBytes: async (p) => (await volumeStat(p))?.free,
       floorGB: () => this.currentPool()?.diskCriticalGB ?? DISK_CRITICAL_GB_DEFAULT,
@@ -1278,9 +1279,11 @@ export class Daemon {
           workerRoot: cfg.root,
           home: os.homedir(),
           uid: process.getuid?.() ?? 0,
+          // w6554: started (and, past its timeout, ended) from the spawn thread: on 2026-11-27 BEAST's loop was held 24.5 s
+          // in a kill under RunnerEnv's step, the timeout of one of these PowerShell runs ending it on the loop
           exec: (runnerEnvCmd, args) =>
             new Promise((resolve, reject) =>
-              execFile(runnerEnvCmd, args, { timeout: 120_000, windowsHide: true, maxBuffer: 8 << 20 }, (err, stdout, stderr) => (err ? reject(new Error(`${runnerEnvCmd} ${args[0] ?? ''}: ${(String(stderr) || err.message).trim().slice(0, 400)}`)) : resolve(String(stdout)))),
+              execFileOffThread(runnerEnvCmd, args, { timeout: 120_000, windowsHide: true, maxBuffer: 8 << 20 }, (err, stdout, stderr) => (err ? reject(new Error(`${runnerEnvCmd} ${args[0] ?? ''}: ${(String(stderr) || err.message).trim().slice(0, 400)}`)) : resolve(String(stdout)))),
             ),
         }),
         held: (r) => {
@@ -1298,7 +1301,7 @@ export class Daemon {
     // w5322: on a CI-first machine (CI_FIRST: biscuit) FF Factory's own scopes run below its CI runners (machine/ciFirst.ts)
     const userctl = (args: string[]) =>
       new Promise<string>((resolve, reject) =>
-        execFile('systemctl', ['--user', ...args], { timeout: 60_000 }, (err, stdout, stderr) => (err ? reject(new Error(`systemctl --user ${args.join(' ')}: ${(stderr || err.message).trim()}`)) : resolve(stdout))),
+        execFileOffThread('systemctl', ['--user', ...args], { timeout: 60_000 }, (err, stdout, stderr) => (err ? reject(new Error(`systemctl --user ${args.join(' ')}: ${(stderr || err.message).trim()}`)) : resolve(stdout))),
       );
     this.ciFirst = new CiFirst({
       settings: real && process.platform === 'linux' ? CI_FIRST[cfg.id.toLowerCase()] : undefined,
@@ -4636,9 +4639,12 @@ export class Daemon {
    * refused (lothsahn's rule for this work: warn-only first, enforce only after measured zero failures).
    */
   private readFenceEnforced(): boolean {
-    // w5748: on Linux also only once the probe found every owner socket (the Secret Service, the ssh and gpg agents) refused.
+    // w6434: on Linux only once the daemon's code sits behind the code link (scripts/worker/linuxCode.ts), so an update leaves
+    // runs already going their code. w5748: and only once the probe found every owner socket refused. Below Landlock ABI 9
+    // a run reaches systemd's (`systemd-run --user` starts a job outside every rule, w5463) and the Secret Service, so the
+    // file rules would claim the Claude and gh logins closed while one command reads them (w6443's review, B1).
     const sockets = process.platform !== 'linux' || this.ownerSocketsOpen.length === 0;
-    return !!this.cfg.root && readFenceMode(appDirOfConfig(this.cfg)) === 'on' && !this.readProbeBlocks && sockets && !readFenceOnRefusal();
+    return !!this.cfg.root && sockets && readRulesForNewRun(appDirOfConfig(this.cfg), !this.readProbeBlocks);
   }
 
   /**
@@ -4726,8 +4732,9 @@ export class Daemon {
         return;
       }
       this.readProbeBlocks = v.wronglyRefused.length > 0 || v.unknown.length > 0 || tools.blocks;
-      if (mode === 'on' && readFenceOnRefusal()) log(`read fence (on): not enforced here, warn only: ${readFenceOnRefusal()}`);
-      else if (mode === 'on' && process.platform === 'linux' && this.ownerSocketsOpen.length) log('read fence (on): a fenced run still reaches an owner socket (the line above says which); runs start without read rules until a probe finds every one refused, which needs Landlock ABI 9, Linux 7.1 (w5748; warn, not a lockout)');
+      if (mode === 'on' && readFenceOnHeld(appDir)) log(`read fence (on): not enforced here, warn only: ${readFenceOnHeld(appDir)}`);
+      else if (mode === 'on' && process.platform === 'linux' && this.ownerSocketsOpen.length)
+        log(`read fence (on): not enforced here, warn only: a fenced run still reaches ${this.ownerSocketsOpen.length} owner socket(s) (the line above says which; systemd's starts a job outside the lock), which only Landlock ABI 9 (Linux 7.1) can refuse; runs start without read rules until a probe finds every one refused (w5748, w6443)`);
       else if (mode === 'on' && this.readProbeBlocks) log('read fence (on): the probe found a path workers need refused, could not judge one, or a tool leg failed; runs start without read rules until a probe passes (warn, not a lockout)');
     } catch (e) {
       this.readProbeBlocks = true;
@@ -4808,9 +4815,11 @@ export class Daemon {
    * (unlabelNoReadUp: no explicit label, as before) and, when the note says the daemon moved it, the login goes back into
    * Credential Manager. Other machines: nothing, and nothing on their system drive is looked at.
    */
-  private async applyOwnerLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
+  private async applyOwnerLabels(fenceMode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
     const plan = ownerLabelTargets({ platform: process.platform, home: os.homedir(), env: process.env, machineId: this.cfg.id });
     if (!plan.label.length) return;
+    // w6569: a warn-only machine (BEAST's warn stage) runs the warn branch, the way back, in on too: nothing is labelled or moved.
+    const mode = ownerLabelMode(fenceMode, plan);
     const note = path.join(appDirOfConfig(this.cfg), OWNER_GH_MOVED_NOTE);
     const tell = (l: string) => say(`worker integrity: owner secrets: ${l}`);
     if (mode === 'on') {
@@ -4956,8 +4965,6 @@ export class Daemon {
    * 60 s wait. Until it passes, runs start without read rules (readProbeBlocks), as at start.
    */
   async setReadFence(mode: ReadFenceMode): Promise<void> {
-    const refused = mode === 'on' ? readFenceOnRefusal() : undefined;
-    if (refused) throw new Error(refused);
     const appDir = appDirOfConfig(this.cfg);
     writeReadFenceMode(appDir, mode);
     this.readProbeBlocks = true;
@@ -5855,7 +5862,7 @@ export function githubNetEnv(token: string | undefined): NodeJS.ProcessEnv | und
 }
 
 // Run when started directly (not when imported by the tests).
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+if (isMainModule(import.meta.filename)) {
   const file = process.argv[2] ?? path.join(HOME, '.ff-factory', 'daemon.json');
   const text = fs.readFileSync(file, 'utf8');
   // configFile: where a relocate keeps the portal's new URL (w466). A BOM (an editor's) is not JSON.

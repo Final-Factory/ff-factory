@@ -367,6 +367,7 @@ test('lockout re-review B5 of #1193: the gh helper never picks a shim as the rea
   assert.equal(ghShimSkipDir({ FF_GH_APP_BIN: '/x/bin' }), '/x/bin');
   assert.equal(ghShimSkipDir({ FF_GH_APP_FILE: path.join(p.dir, 'tokens.json') }), p.bin);
   assert.equal(ghShimSkipDir({}, path.join(appDir, 'app', 'machine', 'ghApp.ts')), p.bin);
+  assert.equal(ghShimSkipDir({}, path.join(appDir, 'code', 'app', 'machine', 'ghApp.ts')), p.bin, 'behind the Linux code link (w6434)');
   // An old shim (no FF_GH_APP_BIN) with a skip that misses it: the shim is still not taken (the measured loop of the re-review).
   assert.equal(findRealGh([p.bin, real].join(path.delimiter), undefined), path.join(real, exe));
   assert.equal(findRealGh([p.bin, real].join(path.delimiter), path.join(dir, 'elsewhere')), path.join(real, exe));

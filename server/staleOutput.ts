@@ -51,7 +51,8 @@ export interface StaleOutputSettings {
   /**
    * w6484: a stale ffu slot (its holder finished, stopped or idle past its limit; machine/ffuSlots.ts slotFree) is freed by the
    * daemon's own `ffu-slot sweep` after the slot report names it (machine/ffuSlotAutoSweep.ts), not only by the next take.
-   * warn: log what it would free, free nothing (docs/worker-fence.md: warn-only first); on: sweep; off: nothing.
+   * on (the default since w6484's enforce step; lothsahn: "Turn it on everywhere: free stale slots by themselves."): sweep;
+   * warn: log what it would free, free nothing; off: nothing.
    */
   ffuSlotSweep: 'off' | 'warn' | 'on';
 }
@@ -67,7 +68,7 @@ export const STALE_OUTPUT_DEFAULTS: StaleOutputSettings = {
   nightlyKeep: 2,
   ffuBusyRetry: 'on',
   ffuBusyRetryMinutes: 5,
-  ffuSlotSweep: 'warn',
+  ffuSlotSweep: 'on',
 };
 
 /** The settings in force: the defaults under whatever config gave (unknown or ill-typed values ignored). */
