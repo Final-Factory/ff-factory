@@ -22,7 +22,8 @@ import { checkArray, readJsonDurable, writeJsonDurable } from '../server/durable
 import { armScriptReimport } from './scriptReimport.ts';
 import { daemonGit } from './storeLock.ts';
 import { borrowsFrom, convertToSlotRepo, finishConversion, guardStorePrune, isSlotRepo, isWorktree, keepSlotBranches, makeSlotRepo, storeGitDir, takeStoreBranch } from './slotRepo.ts';
-import { MacUnity, MacUnityWatch, realDeps, type EditorFence, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
+import { isLowFence, MacUnity, MacUnityWatch, realDeps, type EditorFence, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
+import { GitPackages, type GitPackagesMode } from './gitPackages.ts';
 import type { DaemonSandbox } from '../server/machineProtocol.ts';
 import type { BenchTicket } from './benchQueue.ts';
 import type { IdleCloseResult } from './liveIdle.ts';
@@ -91,6 +92,8 @@ export interface SandboxEditor {
 
 export interface PoolDeps {
   git(args: string[], opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<RunResult>;
+  /** w6412: after a switch, what to say about git packages the cache lacks (and, editorGitPackages on, their mirrors begun). */
+  gitPackagesAfterSwitch?(dir: string): string | undefined;
   copyTree(src: string, dst: string, signal?: AbortSignal, mode?: 'robocopy' | 'clone', exclude?: string[]): Promise<void>;
   /**
    * Bytes a Library copy writes up front: the source's size when it is a full copy (robocopy on Windows), undefined
@@ -348,7 +351,16 @@ export function editorLaunchEnv(env: Record<string, string>, f: { mkdirSync: typ
 }
 
 /** The real machine: git in the main clone, robocopy/cp for the Library, the daemon's Unity code. */
-export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined, fence?: () => EditorFence | undefined, root?: string, editorTmpdir = false, sharedLock: () => SharedLockSetting = () => 'off'): PoolDeps {
+export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined, fence?: () => EditorFence | undefined, root?: string, editorTmpdir = false, sharedLock: () => SharedLockSetting = () => 'off', gitPackagesMode: () => GitPackagesMode = () => 'warn'): PoolDeps {
+  // w6412: one mirror set for every sandbox, fetched with the daemon's own git and credential (outside the worker fence).
+  const gitPackages = new GitPackages({
+    mode: gitPackagesMode,
+    root,
+    platform,
+    log,
+    git: (args, opts = {}) => daemonGit(run('git', args, { timeoutMs: opts.timeoutMs ?? 120_000, env: ENV })),
+  });
+  const lowFenced = () => platform === 'win32' && isLowFence(fence?.());
   // One process listing serves every sandbox's watch in a look (a CIM query costs seconds on Windows).
   const base = realDeps(platform, log);
   let cached: { at: number; p: Promise<Proc[]> } | undefined;
@@ -360,6 +372,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
   return {
     // w5614: daemonGit marks the daemon's own git calls, which the store lock's warning leaves out (machine/storeLock.ts).
     git: (args, opts = {}) => daemonGit(run('git', ['-C', repoPath, ...args], { timeoutMs: opts.timeoutMs ?? 120_000, signal: opts.signal, env: ENV })),
+    gitPackagesAfterSwitch: (dir) => gitPackages.afterSwitch(dir, lowFenced()),
     copyTree: (src, dst, signal, mode, exclude) => copyTree(src, dst, { signal, mode, exclude }),
     libraryCopyBytes: async (src, mode) => (platform === 'win32' && mode !== 'clone' ? treeBytes(src) : undefined),
     removeTree,
@@ -375,7 +388,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
     editor: (sb, logFile, report) => {
       const env = sandboxEditorEnv(process.env, sb.id, root, editorTmpdir, platform, sharedLock());
       if (editorTmpdir && platform !== 'win32' && !editorTmpdirEnv(root, sb.id, true, platform).TMPDIR) log(`sandbox ${sb.id}: editorTmpdir is on but ${root ?? 'no root'} is too long for it (or unset): the editor keeps the system temp folder`);
-      const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence, env: () => editorLaunchEnv(env, fs, (line) => log(`sandbox ${sb.id}: ${line}`)) });
+      const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence, env: () => editorLaunchEnv(env, fs, (line) => log(`sandbox ${sb.id}: ${line}`)), gitPackages });
       return { unity, watch: new MacUnityWatch(unity, report, { log }) };
     },
     bridgeUp: (project, since) => bridgeUpSince(project, since),
@@ -1611,6 +1624,8 @@ export class SandboxPool {
       if (foreign.length) res.notes.push(`${foreign.length} untracked file(s) were already here from before, not yours, and a save of ${res.to} leaves them uncommitted (w2988): ${someFiles(foreign)}`);
     }
     if (took) res.notes.unshift(took);
+    const gp = this.d.gitPackagesAfterSwitch?.(r.path);
+    if (gp) res.notes.push(gp);
     if (slot && res.from && res.from !== res.to) await this.keepInStore(r, res.from);
     this.git.set(id, await this.d.gitStatus(r.path));
     this.changed(r, { branch: res.to });
