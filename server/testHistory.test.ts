@@ -295,13 +295,13 @@ test('the ready-made queries: slowest, false positives, detections and never_cau
   h.applyBatchVerdict(2, { culprits: [{ sha: 'c', pr: 5, tests: ['A.Catch.it'] }] });
   h.setCoverage('t5', { 'A.Slow': ['Belt', 'Splitter'] });
   const now = T0 + 86_400_000;
-  assert.equal(readyQuery(h, { query: 'slowest', limit: 1 }, now).rows[0]!.test, 'A.Slow.big');
-  assert.equal(readyQuery(h, { query: 'slowest', limit: 1, performance: true }, now).rows[0]!.test, 'A.Perf.timed');
-  const fp = readyQuery(h, { query: 'false_positives', byRate: true, minRuns: 5 }, now).rows;
+  assert.equal((await readyQuery(h, { query: 'slowest', limit: 1 }, now)).rows[0]!.test, 'A.Slow.big');
+  assert.equal((await readyQuery(h, { query: 'slowest', limit: 1, performance: true }, now)).rows[0]!.test, 'A.Perf.timed');
+  const fp = (await readyQuery(h, { query: 'false_positives', byRate: true, minRuns: 5 }, now)).rows;
   assert.equal(fp[0]!.test, 'A.Fast.small');
   assert.equal(fp[0]!.runs, 6);
-  assert.equal(readyQuery(h, { query: 'detections' }, now).rows[0]!.test, 'A.Catch.it');
-  const never = readyQuery(h, { query: 'never_caught' }, now).rows;
+  assert.equal((await readyQuery(h, { query: 'detections' }, now)).rows[0]!.test, 'A.Catch.it');
+  const never = (await readyQuery(h, { query: 'never_caught' }, now)).rows;
   assert.deepEqual(never.map((r) => r.test), ['A.Slow.big', 'A.Fast.small']);
   assert.equal(never[0]!.covers, 'Belt Splitter');
   assert.match(await queryTestHistory(h, { query: 'summary' }, now), /master-batch \| 6/);
@@ -433,7 +433,7 @@ test('hand labels are recorded as whose they are: a worker replaces the labeller
       ['A.T.two', 'detect', 'person:lothsahn (personal 1234abcd)'],
     ],
   );
-  const det = readyQuery(h, { query: 'detections' }, T0 + 86_400_000).rows;
+  const det = (await readyQuery(h, { query: 'detections' }, T0 + 86_400_000)).rows;
   assert.deepEqual(
     det.map((r) => [r.test, r.by_worker, r.by_person]),
     [
@@ -469,7 +469,7 @@ test("a local run is tagged by the session in its record, else by its sandbox's 
   const h = history(T0 + 86_400_000);
   h.addRun({ ...running.info, source: 'local', key: 'local:beast/slot4/a.json', machine: 'beast', sandbox: 'slot4', ...localRunTags(src, 'beast', 'slot4', running.session) }, running.tests);
   h.addRun({ source: 'local', key: 'local:beast//b.json', machine: 'beast', finished: iso(6), ...localRunTags(src, 'beast', '') }, []);
-  const all = readyQuery(h, { query: 'local_runs' }, T0 + 86_400_000).rows;
+  const all = (await readyQuery(h, { query: 'local_runs' }, T0 + 86_400_000)).rows;
   assert.deepEqual(
     all.map((r) => [r.tagged, r.requests, r.tests]),
     [
@@ -477,9 +477,9 @@ test("a local run is tagged by the session in its record, else by its sandbox's 
       ['session', 'w4922', 1],
     ],
   );
-  assert.equal(readyQuery(h, { query: 'local_runs', untagged: true }, T0 + 86_400_000).rows.length, 1);
+  assert.equal((await readyQuery(h, { query: 'local_runs', untagged: true }, T0 + 86_400_000)).rows.length, 1);
   assert.deepEqual(
-    readyQuery(h, { query: 'local_runs', request: 'w4922' }, T0 + 86_400_000).rows.map((r) => r.verdict),
+    (await readyQuery(h, { query: 'local_runs', request: 'w4922' }, T0 + 86_400_000)).rows.map((r) => r.verdict),
     [running.info.verdict],
   );
 });
