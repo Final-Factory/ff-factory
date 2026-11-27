@@ -30,6 +30,19 @@ import { run as runAsync } from '../server/proc.ts';
 import { fencedPlayer, playerFenceFor, playerWritable, type PlayerFence } from './playerFence.ts';
 
 
+/**
+ * Removes a turn's player-slot leases as the daemon's write to those slots (w6314). The mark ends in a finally (review
+ * w6322 finding A): an rm that throws must not leave the slots the daemon's, which would hide workers' writes there.
+ */
+export function releaseLeases(leases: string[], slots: string[], daemonWrites?: (folders: string[]) => () => void, rm: (f: string) => void = (f) => fs.rmSync(f, { force: true })): void {
+  const end = daemonWrites?.(slots);
+  try {
+    for (const f of leases) rm(f);
+  } finally {
+    end?.();
+  }
+}
+
 export interface TimedRunnerDeps {
   root: string;
   portalUrl: string;
@@ -959,10 +972,11 @@ export class TimedRunner {
             }
           }
         } finally {
-          const end = this.d.daemonWrites?.(pair?.slots ?? []);
-          for (const f of pair?.leases ?? []) fs.rmSync(f, { force: true });
-          end?.();
-          ticket.release();
+          try {
+            releaseLeases(pair?.leases ?? [], pair?.slots ?? [], this.d.daemonWrites);
+          } finally {
+            ticket.release();
+          }
         }
         if (next < order.length) this.status(o.id, 'waiting', `turn ${turn} gave its ticket back after ${next} of ${order.length} legs (a turn is at most 30 minutes, w1832); queued again for the rest`);
       }

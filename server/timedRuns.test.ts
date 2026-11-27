@@ -10,7 +10,7 @@ import { AttachmentStore, machineAttachment, machineUploadHttp } from './attachm
 import { agentCap, poolSettingsOf } from './machines.ts';
 import { TimedRuns, variantProblem } from './timedRuns.ts';
 import { GROUP_MAX_BYTES, legArgs, legOrder, legTimeoutS, perfSummaryOf, PIECE_MAX_BYTES, planPieces, runBoundMinutes, runTurns, SMALL_FILE_BYTES, timedArgsProblem, timedSettingsOf, TIMED_DEFAULTS, TURN_PLAN_MS, type TimedRunOrder, type TimedSettings } from '../shared/timedRun.ts';
-import { foreignTicket, releaseTicket, takeTicket, TimedRunner, writeTarGz } from '../machine/timedRunner.ts';
+import { foreignTicket, releaseLeases, releaseTicket, takeTicket, TimedRunner, writeTarGz } from '../machine/timedRunner.ts';
 import { TIMED_SLOTS } from '../shared/timedRun.ts';
 import { readBenchLock } from '../machine/benchLock.ts';
 import { insideRoots, scanBuild, timedRunFromMachine } from '../machine/timedRunPack.ts';
@@ -408,4 +408,22 @@ test("w5973: a leg past its bound is 'timeout' even when the player's exit comes
   const err = legExit(c4 as never, 60_000, async () => assert.fail('stopped'));
   c4.emit('error', new Error('ENOENT'));
   assert.equal(await err, 'error: ENOENT');
+});
+
+// w6322 finding A: the lease release's daemon-write mark ends even when an rm throws.
+test('releaseLeases ends its daemon-write mark when removing a lease throws', () => {
+  const marks: { folders: string[]; ended: boolean }[] = [];
+  const daemonWrites = (folders: string[]) => {
+    const m = { folders, ended: false };
+    marks.push(m);
+    return () => void (m.ended = true);
+  };
+  assert.throws(() => releaseLeases(['a.lease', 'b.lease'], ['slotA', 'slotB'], daemonWrites, () => {
+    throw new Error('EBUSY');
+  }), /EBUSY/);
+  assert.deepEqual(marks, [{ folders: ['slotA', 'slotB'], ended: true }]);
+  const gone: string[] = [];
+  releaseLeases(['c.lease'], ['slotC'], daemonWrites, (f) => gone.push(f));
+  assert.deepEqual(gone, ['c.lease']);
+  assert.equal(marks[1].ended, true);
 });

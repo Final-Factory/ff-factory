@@ -34,6 +34,7 @@ import {
   type SharedLockSetting,
 } from "./slotCaches.ts";
 import { UvCachePruner } from "./sharedCaches.ts";
+import { dropOldToolsShims, lowToolsDir } from "./lowIntegrity.ts";
 
 /**
  * w5615: per-slot tool caches and the shared-cache lock (machine/slotCaches.ts). Real folders under a temp root; copyTree and
@@ -1122,4 +1123,38 @@ test("asDaemonWrite for a clean-up batch marks only the batch's items inside the
     assert.ok(!w.owns(path.join(root, "players", "x")));
   });
   assert.ok(ran);
+});
+
+// w6322: on Windows the daemon writes under <root>/tools (the Low copies in tools/low, the drop of tools/shims); marked,
+// those events are its own, and a worker's write to another tools child at the same time is still logged.
+test("a daemon write under tools marks only that child: the old shims' drop and a Low copy, not tools/node", async (t) => {
+  const root = tmp(t);
+  const w = new DaemonWrites();
+  const lines: string[] = [];
+  const tools = path.join(root, "tools");
+  const on = sharedEventHandler((l) => lines.push(l), { daemonOwns: (f, tt) => w.owns(f, tt) });
+  const shims = path.join(tools, "shims");
+  fs.mkdirSync(shims, { recursive: true });
+  const removed: string[] = [];
+  const timer = dropOldToolsShims(root, {
+    waits: () => [],
+    log: () => undefined,
+    remove: (p) => {
+      const end = w.begin([p]);
+      try {
+        on(tools, tools, "shims");
+        on(path.join(tools, "node"), tools, "node.exe");
+        removed.push(p);
+      } finally {
+        end();
+      }
+    },
+  });
+  if (timer) clearInterval(timer);
+  assert.deepEqual(removed, [shims]);
+  const end = w.begin([lowToolsDir(root)]);
+  on(lowToolsDir(root), tools, "claude-1.exe");
+  end();
+  assert.equal(lines.length, 1, lines.join("\n"));
+  assert.match(lines[0], /node\.exe/);
 });

@@ -20,7 +20,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, windowsShims, windowsShimsDir, dropOldToolsShims, quarantineStrayShims, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, windowsShims, windowsShimsDir, dropOldToolsShims, lowToolsDir, quarantineStrayShims, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -731,6 +731,21 @@ export class Daemon {
   private slotBin?: string;
   /** w5838: the Low copies of claude, node and gh, checked against their sources before each run (lowIntegrity.ts LowCopies). */
   private lowCopies?: LowCopies;
+  /** w6322: a Low copy made or checked (it may make one again) writes <root>/tools/low, the daemon's write there. */
+  private asLowWrite<T>(folders: string[], f: () => T): T {
+    const end = this.cfg.root ? this.sharedWrites.begin(folders) : undefined;
+    try {
+      return f();
+    } finally {
+      end?.();
+    }
+  }
+  private lowMake(exe: string): string | undefined {
+    return this.lowCopies && this.cfg.root ? this.asLowWrite([lowToolsDir(this.cfg.root)], () => this.lowCopies!.make(exe)) : undefined;
+  }
+  private lowCheck(copy: string): string | undefined {
+    return this.lowCopies && this.cfg.root ? this.asLowWrite([lowToolsDir(this.cfg.root)], () => this.lowCopies!.check(copy)) : undefined;
+  }
   /** The GitHub App shims and tokens' file (w1519, machine/ghApp.ts), once written. */
   private ghApp?: GhAppSetup;
   private lastSlotTick = 0;
@@ -2045,7 +2060,8 @@ export class Daemon {
         // w6101: once no agent started before the move runs it, <root>/tools/shims goes; files in the new folder the
         // daemon does not write are moved out, now and again once the fence has labelled tools-medium Medium.
         if (w.bin === windowsShimsDir(root)) {
-          const t = dropOldToolsShims(root, { waits, log });
+          // w6322: its removal of <root>/tools/shims is the daemon's write to a shared-lock folder.
+          const t = dropOldToolsShims(root, { waits, log, remove: (p) => this.asLowWrite([p], () => removeEntry(p)) });
           if (t) this.timers.push(t);
           quarantineStrayShims(root, { log });
           void this.fenceReady?.then(() => quarantineStrayShims(root, { log })).catch(() => undefined);
@@ -3704,7 +3720,7 @@ export class Daemon {
    * none, so the run is held, never started unfenced (as runSpec's fence gate does).
    */
   private checkedLowClaude(low: { claude: string }): string {
-    const ok = this.lowCopies?.check(low.claude);
+    const ok = this.lowCheck(low.claude);
     if (!ok) throw new Error(`worker integrity: the Low claude copy ${low.claude} could not be checked or made again; sandbox runs are held (w5838)`);
     low.claude = ok;
     return ok;
@@ -3877,7 +3893,7 @@ export class Daemon {
     return workerCopier({
       macFence: () => this.workerFence,
       linuxLock: () => this.writeLock && [...this.writeLock, ...this.readLock],
-      lowNode: () => this.lowCopies?.make(process.execPath),
+      lowNode: () => this.lowMake(process.execPath),
       // Its callers mark their own folders (the slot caches tick its seeds, the broker's calls players; w6314).
       run: (cmd, argv) => run(cmd, argv, { timeoutMs: 30 * 60_000 }),
       removeTree: async (dir) => {
@@ -3902,7 +3918,7 @@ export class Daemon {
       removeTree: async (dir) => {
         await this.sharedWrite(() => removeTree(dir), [dir]);
       },
-      launch: brokerLauncher({ root, playerFence: () => (fence ??= playerFenceFor()), lowNode: () => this.lowCopies?.make(process.execPath) }),
+      launch: brokerLauncher({ root, playerFence: () => (fence ??= playerFenceFor()), lowNode: () => this.lowMake(process.execPath) }),
       log: (l) => log(l),
     });
     return Object.fromEntries(Object.entries(handlers).map(([k, h]): [string, RpcHandler] => [k, (c, b) => this.sharedWrite(() => h(c, b), [path.join(root, 'players')])]));
@@ -3969,7 +3985,9 @@ export class Daemon {
     try {
       // w5614: the store lock is decided before any sandbox is made, so one made after it is a slot repo when it holds.
       void this.storeLock;
-      if (process.platform === 'win32') await this.lowSetup();
+      // w6322: the Low setup labels the root's worker folders (cache, players, seed, tools among them) and makes the
+      // copies and junctions under <root>/tools, once per daemon run: all of it is the daemon's write.
+      if (process.platform === 'win32') await (this.cfg.root ? this.sharedWrite(() => this.lowSetup(), sharedLockedFolders(this.cfg.root)) : this.lowSetup());
       // w5630: a fenced editor that ran through this daemon's restart writes its bridge status only under <root>/home; read
       // that folder from the start, whatever the fence switches say now (an extra folder is harmless: the newest status wins).
       if (process.platform === 'darwin' && this.cfg.root) addMcpStatusDir(macEditorStatusDir(this.cfg.root));
@@ -4028,7 +4046,7 @@ export class Daemon {
     if (!ed) return undefined;
     // w5838: the launcher is checked against the daemon's node before each editor start; one that cannot be checked or made
     // again leaves that editor Medium, as before the fence (warn-only), and never runs the replaced program.
-    const launcher = this.lowCopies?.check(ed.launcher);
+    const launcher = this.lowCheck(ed.launcher);
     if (!launcher) {
       log(`worker integrity: WARNING: the Low node launcher ${ed.launcher} could not be checked or made again; this editor starts Medium (w5838)`);
       return undefined;
@@ -4157,7 +4175,7 @@ export class Daemon {
         this.slotCaches.retryNow();
         void this.sharedWrite(() => this.slotCaches?.tick(), this.cacheSeeds());
       }
-      const claude = this.lowCopies.make(sdkClaude);
+      const claude = this.lowMake(sdkClaude);
       if (!claude) {
         return this.lowFail('no Low claude copy');
       }
@@ -4241,7 +4259,7 @@ export class Daemon {
       return false;
     }
     if (!(await lockTranscripts(projects, exec, say, { live: await liveSessionIds(exec), pins }))) return false;
-    const node = this.lowCopies?.make(process.execPath);
+    const node = this.lowMake(process.execPath);
     const probe = node ? probeTranscriptLock(node, projects, undefined, bareEnv()) : 'no Low node copy';
     log(/WRITTEN|failed|no Low/.test(probe) ? `worker integrity: WARNING: transcript lock self-test: ${probe}; Low workers may still write other conversations' transcripts (w5703)` : `transcript labels: self-test at Low: ${probe}`);
     return true;
@@ -4253,7 +4271,7 @@ export class Daemon {
    * run. Its bridge status folder is read by the daemon from now on (addMcpStatusDir).
    */
   private async lowEditorFence(root: string, exec: (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<{ code: number | null; stdout: string; stderr: string }>, say: (l: string) => void): Promise<LowEditorFence | undefined> {
-    const launcher = this.lowCopies?.make(process.execPath);
+    const launcher = this.lowMake(process.execPath);
     if (!launcher) return undefined;
     const probe = this.bareProbe([launcher, '-e', '0'], 'the Low node launcher');
     if (!probe.ok) {
@@ -4281,7 +4299,7 @@ export class Daemon {
       const where = await exec('where.exe', ['gh'], { timeoutMs: 30_000 });
       const exe = where.code === 0 ? where.stdout.split(/\r?\n/).map((l) => l.trim()).find((l) => /\.exe$/i.test(l)) : undefined;
       if (!exe) return loud("gh is not on the daemon's PATH");
-      const copy = this.lowCopies?.make(exe);
+      const copy = this.lowMake(exe);
       if (!copy) return loud('no Low copy of gh to test with');
       // w5838: nothing of the daemon's environment but the system's folders and the Low worker's gh login (bareEnv).
       // w5749: test the route a run with no vault token takes (ownerRunWiring): the machine login's token as GH_TOKEN when
@@ -4399,7 +4417,7 @@ export class Daemon {
           mode,
           labels,
           t,
-          lowNode: this.lowCopies?.make(process.execPath),
+          lowNode: this.lowMake(process.execPath),
           mirrorDir: path.join(appDir, 'read-fence-precheck'),
           skip: this.labelSystemDrive,
           run: exec,
