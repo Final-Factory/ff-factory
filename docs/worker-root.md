@@ -1145,6 +1145,49 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   - A `sandbox-exec` that fails at launch is not retried unfenced: the start reports the pid and the editor never comes
     up (the hang watch then restarts it). The probe at the daemon's start runs the same profile, so it would fail there
     first and the editors would start unfenced.
+- **Linux: sandbox editors start under the workers' Landlock write rules** (w5631, stage 3 of w5540). When the workers'
+  write lock is on (`"writeLock": true`), `MacUnity.start` (`machine/unity.ts`) starts a Linux sandbox editor through
+  `launchFenced` as `python3 ff-landlock.py <rules> -- <Unity> -projectPath <sandbox>`, inside its systemd scope as
+  before (`scoped`, `machine/linuxScope.ts`). ff-landlock execs Unity, so the pid is the editor's and its children
+  (compiler server, Burst, shader compiler, UPM, import workers) inherit the rules. The rules are the workers' own
+  (`writeLockArgs`, `machine/writeLock.ts`, through the daemon's `lockRules`) with `<root>/home` as the home
+  (`linuxEditorFenceFor`); the environment adds `HOME=<root>/home` and `UNITY_MCP_STATUS_DIR=<root>/home/.unity-mcp`.
+  - **Why the home moves.** Workers write only inside the root (lothsahn). Unity's Linux editor writes its EditorPrefs to
+    `~/.local/share/unity3d/prefs`, its global prefs, layouts and `upm.log` to `~/.config/unity3d`, and the bridge's port
+    file to `~/.unity-mcp`; all follow HOME. Unity makes a prefs folder without its parents, so the daemon makes
+    `<root>/home/.local/share/unity3d` and `.config/unity3d` before each fenced start, and seeds each `prefs` file it lacks
+    from the person's home once (`seedLinuxEditorHome`): EditorPrefs hold the bridge's tool switches
+    (`MCPForUnity.ToolEnabled.*`) and `BurstCompilation`. Without the folders Unity logged "Editor preferences folder ...
+    does not exist and could not be created. Preferences won't be saved" (measured, biscuit, w5631). The Burst check
+    (`ensureBurstPrefOn`) runs on the moved home's prefs too. Changes a person makes later in their own prefs do not
+    reach the editors' copy; deleting `<root>/home/.local/share/unity3d/prefs` seeds it again at the next start.
+  - **Licensing** goes through the user's running client (the Hub's `Unity.Licensing.Client --namedPipe
+    Unity-LicenseClient-<user>`, socket in `/tmp`). With none running, a fenced editor would start one under the moved
+    home, which holds no licence, so the editor starts unfenced and the start message says "unfenced (no Unity licensing
+    client runs for this user ...)" (`licensingClient`, `linuxLicensingClientRunning`). Unity logs "LicensingClient has
+    failed validation; ignoring" under the rules: Landlock refuses the editor `readlink /proc/<client pid>/exe` of a
+    process outside its domain, and Unity then uses the client anyway ("Successfully resolved entitlement details").
+  - **Warn-only first** (lothsahn's lockout rule). Landlock has no report-only mode, so with `editorFence` unset the rules
+    get `--rw /` and lose `--deny-unix`: nothing is refused, and warn proves the launch path (the scope, the moved home,
+    licensing, the bridge) only. Signals stay scoped to the editor's own domain in both modes (ABI 6+). `"editorFence":
+    true` enforces; `false` starts editors unfenced. Read once per daemon run; the log says `editor fence: ...`.
+  - **The kernel hold** (w5748/w5562: Linux fences stay warn-only until kernel 7.1) covers the read fence and the
+    owner-socket denies, not the write lock, which agents already run enforced on ABI 8 (biscuit's daemon log,
+    2026-11-27T06:55Z: "write lock: landlock is on for sandbox agents"). The editor's rules are
+    write rules, so enforcing them is not held by it. As for agents, `--deny-unix` is a no-op below ABI 9, so an editor
+    (and `execute_code` in it) could still reach `systemd-run --user` and start a job outside the rules until 7.1. The
+    read rules (`readLockArgs`) are not given to editors yet: agents get them only once the read fence enforces.
+  - **What enforce would refuse, measured with strace** (biscuit, 2026-11-27, Unity 6000.3.19f1, the enforced rules, HOME
+    and TMPDIR moved as the daemon does, `-batchmode -nographics -runTests`, warm Library): EditMode
+    `Tests.Core.SimulationRateConstantsTest` 31 of 31 and PlayMode `SaveLoadFailureReturnsToMenuTest` 5 of 5 passed,
+    licensed, compiled and imported only changed assets. The only refused calls were `access("/etc/localtime", W_OK)`
+    (a check, nothing written) and the licensing readlink above. `/tmp` gained only Unity's own `Unity-Upm-<pid>.sock`
+    and `ilpp.sock-<hash>` (create-only there).
+  - **Recovery, nobody at the machine:** `ops_worker machine_update worker_fence off` (4.3) turns off the agents' write
+    lock and the editors' rules with it; or the ops worker sets `"editorFence": false` in daemon.json over ssh and
+    restarts the daemon. Then `mcp__machine__unity restart` starts the editor unfenced.
+  - **Batch runs and builds** are not started by the daemon: `unity-slot run` from a worker's shell already runs inside
+    the agents' write lock, with the person's home.
 
 **What a Low worker meets** (LothDesktop's trial, w5377, 2026-11-24; all measured from a Low agent):
 - **Works at Low:**

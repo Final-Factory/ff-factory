@@ -111,7 +111,7 @@ const KNOWN: Record<string, [number, string]> = {
   'machine/osJob.ts': [1, 'exception: the OS job (LaunchAgent plist, scheduled task)'],
   'machine/sharedCaches.ts': [3, 'reads: where uv is installed'],
   'machine/steamClient.ts': [1, 'reads Steam\'s install'],
-  'machine/unity.ts': [7, 'reads Unity\'s default log and install paths'],
+  'machine/unity.ts': [9, 'reads Unity\'s default log and install paths, and the person\'s Unity prefs to seed a fenced Linux editor\'s home (w5631: it reads them, the copy is written under <root>/home)'],
   'machine/unityMcp.ts': [2, 'reads ~/.unity-mcp and ~/.claude.json'],
   'machine/unitySlots.ts': [3, 'exception: the Unity slots mailbox ~/.ff-factory/unity-slots (w469)'],
   'server/agentAccount.ts': [2, "reads: Claude Code's folder (CLAUDE_CONFIG_DIR, else ~/.claude) named to the agents' launcher (w5598), and the VM's switch file FFF_AGENT_SWITCH names (w5651); writes nothing"],

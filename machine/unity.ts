@@ -7,6 +7,7 @@ import { DEFAULT_HANG, bridgeInfo, bridgePing, editorVerdict, restartAllowed, ty
 import { closeWindow, decide, decideClose, describeDialog, findClosable, findDialogs, listWindows, mainWindow, parsePsJson, pressButton, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
 import { ensureBurstPrefOn, realBurstPrefDeps } from './burstPref.ts';
 import { scoped } from './linuxScope.ts';
+import { DOTNET_DIR, FF_LANDLOCK, makeDotnetShm } from './writeLock.ts';
 import { fencedEditorEnv, fencedEditorEnvWarning } from './editorEnv.ts';
 import { editorTempEnv } from './sharedCaches.ts';
 import { SANDBOX_EXEC, seatbeltProfile, type WorkerFence } from '../server/workerFence.ts';
@@ -123,7 +124,32 @@ export interface SeatbeltEditorFence {
   env: Record<string, string>;
 }
 
-export type EditorFence = LowEditorFence | SeatbeltEditorFence;
+/**
+ * w5631 (w5540 stage 3): how a sandbox editor starts inside the Linux worker lock, from the daemon (machine/daemon.ts
+ * linuxEditorFence): `python3 ff-landlock.py <args> -- <Unity> ...` inside the editor's own systemd scope. ff-landlock execs
+ * the editor, so the pid is Unity's own and every child (the compiler server, Burst, the shader compiler, UPM) inherits the
+ * rules.
+ * - `args`: the workers' write rules (machine/writeLock.ts writeLockArgs) with `<root>/home` as the home, so the editor's
+ *   Unity prefs folders are granted there, not in the person's home.
+ * - `warn`: true while the rules refuse nothing: Landlock has no report-only mode, so warn adds `--rw /` and drops
+ *   `--deny-unix`. It proves the launch path, the moved home and the bridge only; what enforce would refuse was measured
+ *   with strace on biscuit (w5631: an EditMode and a PlayMode batch run under the enforced rules, both green, refused only
+ *   `access("/etc/localtime", W_OK)` and the readlink of the Hub's licensing client's /proc/<pid>/exe). Signals stay
+ *   scoped to the editor's own Landlock domain in both modes (ABI 6+, ff-landlock.py). daemon.json `editorFence: true`
+ *   enforces.
+ * - `env`: HOME at `<root>/home`: Unity's EditorPrefs (`~/.local/share/unity3d/prefs`, the bridge's tool switches among
+ *   them), its global prefs and window layouts (`~/.config/unity3d`) and the bridge's port file (`~/.unity-mcp`) follow
+ *   HOME. The prefs files are seeded once from the real home before the start (seedLinuxEditorHome).
+ *   UNITY_MCP_STATUS_DIR is `<root>/home/.unity-mcp`, read by the daemon as on macOS (addMcpStatusDir).
+ */
+export interface LandlockEditorFence {
+  kind: 'landlock';
+  args: string[];
+  warn: boolean;
+  env: Record<string, string>;
+}
+
+export type EditorFence = LowEditorFence | SeatbeltEditorFence | LandlockEditorFence;
 
 /**
  * w5630: this install's licensing client runs: a `ps -axo command=` line whose program is exactly `lc` (w5712's review: a
@@ -135,6 +161,48 @@ export const licensingClientRunning = (psCommands: string, lc: string) =>
   psCommands.split('\n').some((l) => { const t = l.trim(); return t === lc || t.startsWith(lc + ' '); });
 
 export const isSeatbeltFence = (f: EditorFence | undefined): f is SeatbeltEditorFence => f?.kind === 'seatbelt';
+export const isLandlockFence = (f: EditorFence | undefined): f is LandlockEditorFence => f?.kind === 'landlock';
+export const isLowFence = (f: EditorFence | undefined): f is LowEditorFence => !!f && (f.kind === undefined || f.kind === 'low');
+
+/**
+ * w5631: the Linux editor fence from the workers' write rules for `<root>/home` (writeLockArgs), or undefined when the
+ * workers' lock is off. Warn-only unless `mode` is enforce (LandlockEditorFence).
+ */
+export function linuxEditorFenceFor(write: string[] | undefined, root: string, mode: 'warn' | 'enforce'): LandlockEditorFence | undefined {
+  if (!write) return undefined;
+  const args = mode === 'enforce' ? write : [...write.filter((a, i) => a !== '--deny-unix' && write[i - 1] !== '--deny-unix'), '--rw', '/'];
+  return { kind: 'landlock', args, warn: mode === 'warn', env: { HOME: path.posix.join(root, 'home'), UNITY_MCP_STATUS_DIR: macEditorStatusDir(root) } };
+}
+
+/** w5631: the folders, under a home, of Unity's EditorPrefs and of its global prefs (each holds a `prefs` file). */
+const LINUX_PREFS_DIRS = [['.local', 'share', 'unity3d'], ['.config', 'unity3d']];
+
+/**
+ * w5631: makes the moved home's Unity folders before a fenced Linux editor starts and seeds each `prefs` file it lacks from
+ * the real home; answers the files seeded. Unity makes a prefs folder without its parents, so with no `.local/share` it
+ * logged "Editor preferences folder ... does not exist and could not be created. Preferences won't be saved" (measured on
+ * biscuit, w5631); with fresh prefs the bridge's tool switches and the Burst pref would be the defaults, not the person's.
+ * A file already there is the editors' own and is kept.
+ */
+export function seedLinuxEditorHome(home: string, realHome: string, f: Pick<typeof fs, 'mkdirSync' | 'existsSync' | 'copyFileSync'> = fs): string[] {
+  const seeded: string[] = [];
+  for (const rel of LINUX_PREFS_DIRS) {
+    const dir = path.posix.join(home, ...rel);
+    f.mkdirSync(dir, { recursive: true });
+    const to = path.posix.join(dir, 'prefs');
+    const from = path.posix.join(realHome, ...rel, 'prefs');
+    if (!f.existsSync(to) && f.existsSync(from)) {
+      f.copyFileSync(from, to);
+      seeded.push(to);
+    }
+  }
+  f.mkdirSync(path.posix.join(home, '.unity-mcp'), { recursive: true });
+  return seeded;
+}
+
+/** w5631: a Unity licensing client (the Hub's or an editor's) is among `ps -o command=` lines (this user's). */
+export const linuxLicensingClientRunning = (psCommands: string) =>
+  psCommands.split('\n').some((l) => path.posix.basename(l.trim().split(/\s+/)[0] ?? '') === 'Unity.Licensing.Client');
 
 /**
  * w5630: the macOS editor fence from the workers' (server/workerFence.ts fenceFor), or undefined when theirs is off: their
@@ -518,7 +586,8 @@ export class MacUnity {
     const args = ['-projectPath', this.repo, ...(this.logFile ? ['-logFile', this.logFile] : [])];
     const wanted = this.fence?.();
     const seatbelt = this.platform === 'darwin' && isSeatbeltFence(wanted) ? wanted : undefined;
-    const fence = this.platform === 'win32' && wanted && !isSeatbeltFence(wanted) ? wanted : undefined;
+    const landlock = this.platform === 'linux' && isLandlockFence(wanted) ? wanted : undefined;
+    const fence = this.platform === 'win32' && isLowFence(wanted) ? wanted : undefined;
     const fencedBin = fence ? fencedEditorBin(bin, fence.unityDir, (p) => this.d.exists(p)) : undefined;
     let pid: number;
     if (seatbelt) {
@@ -530,6 +599,17 @@ export class MacUnity {
         this.fenced = { on: true, ...(seatbelt.warn ? { warn: true } : {}) };
       } else {
         this.fenced = { on: false, why: 'no fenced launcher here' };
+        pid = await this.d.launch(bin, args, this.repo, env);
+      }
+    } else if (landlock) {
+      // w5631: the Linux editor under the workers' Landlock write rules. Its home is moved, so with no licensing client
+      // running it would start its own under that home, where no entitlement is: it starts unfenced then, and says why.
+      const lc = this.d.launchFenced ? await this.d.licensingClient?.(bin).catch((e: Error) => `could not look for Unity's licensing client: ${e.message}`) : 'no fenced launcher here';
+      if (this.d.launchFenced && !lc) {
+        pid = await this.d.launchFenced(landlock, bin, args, this.repo, env);
+        this.fenced = { on: true, ...(landlock.warn ? { warn: true } : {}) };
+      } else {
+        this.fenced = { on: false, why: lc ?? 'no fenced launcher here' };
         pid = await this.d.launch(bin, args, this.repo, env);
       }
     } else if (fence && fencedBin && this.d.launchFenced) {
@@ -550,7 +630,11 @@ export class MacUnity {
       ? this.fenced?.warn
         ? " under the workers' Seatbelt profile, warn-only (it refuses nothing)"
         : " inside the workers' Seatbelt profile (the worker fence)"
-      : ' at Low integrity (the worker fence)';
+      : landlock
+        ? this.fenced?.warn
+          ? " under the workers' Landlock write rules, warn-only (it refuses nothing)"
+          : " inside the workers' Landlock write rules (the worker fence)"
+        : ' at Low integrity (the worker fence)';
     const fenceNote = this.fenced ? (this.fenced.on ? onNote : ` unfenced (${this.fenced.why})`) : '';
     return `${aside ? `${aside}. ` : ''}${this.burstNote ? `${this.burstNote}. ` : ''}Started ${bin}${fenceNote} (pid ${pid}). The Unity MCP bridge comes up once the project has loaded (a minute or more); wait for it before Unity MCP calls.`;
   }
@@ -623,12 +707,40 @@ export function winLaunchScript(bin: string, args: string[], cwd: string): strin
 export function realDeps(platform: UnityPlatform = 'darwin', log: (line: string) => void = () => undefined): UnityDeps {
   const base: UnityDeps = { ...realDepsMac(), burstPrefOn: () => ensureBurstPrefOn(realBurstPrefDeps(platform)) };
   if (platform === 'linux') {
-    const { noAppNap: _n, launchFenced: _f, ...linux } = base;
+    const { noAppNap: _n, launchFenced: _f, licensingClient: _l, ...linux } = base;
     // Each editor in a systemd scope of its own, out of the daemon's cgroup (machine/linuxScope.ts, w2474).
-    return { ...linux, launch: (bin, args, cwd, env) => {
+    const launch = (bin: string, args: string[], cwd: string, env?: Record<string, string>) => {
       const cmd = scoped('unity', path.basename(cwd), bin, args, { platform: 'linux' });
       return base.launch(cmd.bin, cmd.args, cwd, env);
-    } };
+    };
+    return {
+      ...linux,
+      launch,
+      // w5631: the editor under `python3 ff-landlock.py <rules> --`, which execs it in the scope (the pid is Unity's own).
+      // Its moved home is made and seeded here, outside the fence, and the Burst pref is checked there too: that home's
+      // prefs are the ones the editor reads (machine/burstPref.ts).
+      launchFenced: async (fence, bin, args, cwd, env) => {
+        if (!isLandlockFence(fence)) throw new Error('only a Landlock fence applies on Linux');
+        const home = fence.env.HOME;
+        if (home) {
+          const seeded = seedLinuxEditorHome(home, os.homedir());
+          if (seeded.length) log(`editor fence: seeded ${seeded.join(', ')} from the person's home before the first fenced start (w5631)`);
+          const burst = await ensureBurstPrefOn({ ...realBurstPrefDeps('linux'), home });
+          if (burst) log(burst);
+        }
+        if (fence.env.UNITY_MCP_STATUS_DIR) fs.mkdirSync(fence.env.UNITY_MCP_STATUS_DIR, { recursive: true });
+        // The .NET runtime's IPC folder the rules grant; the agents' spawner makes it too (writeLock.ts).
+        const dotnet = fence.args.find((a, i) => fence.args[i - 1] === '--rw' && path.posix.basename(a) === DOTNET_DIR);
+        if (dotnet) makeDotnetShm(dotnet);
+        return launch('python3', [FF_LANDLOCK, ...fence.args, '--', bin, ...args], cwd, { ...fence.env, ...env });
+      },
+      // w5631: a client of this user already up (the Hub's or an editor's) serves a fenced editor; none, and the fenced
+      // editor would start one under its moved home, unlicensed (as on macOS, w5630), so it starts unfenced.
+      licensingClient: async () => {
+        const r = await run('ps', ['-o', 'command=', '-u', String(process.getuid?.() ?? '')], { timeoutMs: 15_000 });
+        return linuxLicensingClientRunning(r.stdout) ? undefined : "no Unity licensing client runs for this user (a fenced editor's moved home holds no licence)";
+      },
+    };
   }
   if (platform !== 'win32') return base;
   const ps = (script: string, timeoutMs: number) => run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs });
@@ -658,7 +770,7 @@ export function realDeps(platform: UnityPlatform = 'darwin', log: (line: string)
       return pid;
     },
     launchFenced: async (fence, bin, args, cwd, env) => {
-      if (isSeatbeltFence(fence)) throw new Error('a Seatbelt fence is macOS only');
+      if (!isLowFence(fence)) throw new Error('only a Low fence applies on Windows');
       const temp = editorTempEnv(process.env, 'win32');
       if (temp.TEMP) fs.mkdirSync(temp.TEMP, { recursive: true });
       for (const k of ['APPDATA', 'LOCALAPPDATA', 'UNITY_MCP_STATUS_DIR']) if (fence.env[k]) fs.mkdirSync(fence.env[k], { recursive: true });
@@ -706,7 +818,7 @@ function realDepsMac(): UnityDeps {
     // w5630: the editor under `sandbox-exec -p <profile>`, which execs it (the pid is Unity's own). Its home is made here,
     // outside the fence, before it starts.
     launchFenced: async (fence, bin, args, cwd, env) => {
-      if (!isSeatbeltFence(fence)) throw new Error('a Low fence is Windows only');
+      if (!isSeatbeltFence(fence)) throw new Error('only a Seatbelt fence applies on macOS');
       for (const k of ['HOME', 'UNITY_MCP_STATUS_DIR']) if (fence.env[k]) fs.mkdirSync(fence.env[k], { recursive: true });
       const child = spawn(SANDBOX_EXEC, ['-p', fence.profile, bin, ...args], { cwd, detached: true, stdio: 'ignore', env: { ...process.env, ...fence.env, ...env } });
       child.unref();
