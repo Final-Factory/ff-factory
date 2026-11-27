@@ -152,6 +152,8 @@ export interface LinkUpdateFlags {
   runnerPriority?: 'off' | 'warn' | 'enforce';
   /** What an idle agent adopted across a sharedLock switch gets, warn or on (w6305, w6287), any OS: daemon.json `hostRestage`; unset: carried. A daemon that predates it ignores it. */
   hostRestage?: 'warn' | 'on';
+  /** The long-run route (w6367, machine/longRuns.ts), off, warn or on, any OS: daemon.json `longRuns`; unset: carried. A daemon that predates it ignores it. */
+  longRuns?: 'off' | 'warn' | 'on';
 }
 
 /**

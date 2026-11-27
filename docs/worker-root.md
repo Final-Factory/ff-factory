@@ -1502,6 +1502,12 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
     `warn`, `slotCacheEnv` names a clone only once it exists); `on` then restages that agent once, which picks up the clone.
     Turning it on, by default or per machine, is a separate change with its own independent review and a person's go,
     after the warn lines of a real switch were read and named exactly the adopted hosts.
+- **Long runs** (w6367, daemon.json `longRuns` off|warn|on, default warn): the daemon starts a sanctioned long run (the
+  nightly) for a sandbox worker outside that worker's agent host, so a host swap or a stopped claude no longer ends it.
+  [worker-fence.md](worker-fence.md) "Long runs the daemon starts for a worker" covers the design and the fence it keeps.
+  To set it, send `ops_worker machine_update long_runs off|warn|on` over the daemon link, or use the installer
+  (`--long-runs`, `-LongRuns`); the update restarts the daemon with it. `warn` and `off` are the way back, since the game's
+  client then starts the run itself as before. Turning it on is a separate change with its own independent review.
 - **Mailboxes per slot**: the procs broker (machine/procsBroker.ts) reads `unity-slots/procs/<sandbox>/` and the shared
   mailbox, answering each ask in the folder it came from; `ff-leftovers` writes into its own sandbox's folder. The unity-slots
   queue itself needs no per-slot folder: it already goes through the daemon's RPC into the daemon's own folder (w5545).
