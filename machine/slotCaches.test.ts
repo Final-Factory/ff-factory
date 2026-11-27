@@ -9,6 +9,7 @@ import {
   REFRESH_MS,
   SLOT_CACHE_TOOLS,
   SlotCaches,
+  idleForRefresh,
   mergeBack,
   missingSlotCaches,
   RETRY_MS,
@@ -228,6 +229,8 @@ function pool(
     copy?: typeof copyTree;
     refreshMs?: number;
     setting?: SharedLockSetting;
+    sandboxes?: () => Promise<{ id: string; idle: boolean }[]>;
+    sandboxesMs?: number;
   } = {},
 ) {
   const root = tmp(t);
@@ -238,7 +241,9 @@ function pool(
   const caches = new SlotCaches({
     root,
     setting: o.setting ?? "warn",
-    sandboxes: () => sandboxes,
+    // Async, as the daemon's is (it asks switchHold per sandbox: review w6212 L4).
+    sandboxes: o.sandboxes ?? (async () => sandboxes),
+    sandboxesMs: o.sandboxesMs,
     copy: o.copy ?? copyTree,
     removeTree,
     log: (l) => log.push(l),
@@ -331,6 +336,41 @@ test("tick: a busy sandbox is not refreshed; one with no clone yet is cloned bus
   p.sandboxes[0].idle = true;
   assert.match((await p.caches.tick())!, /made again/);
   assert.equal(readMarker(slotCacheDir(p.root, "slot1"))!.made, p.clock.t);
+});
+
+test("idleForRefresh: holds read once; a rejecting or never-answering holds() counts every sandbox busy (review w6281)", async () => {
+  const list = [{ id: "slot1" }, { id: "slot2" }];
+  let reads = 0;
+  const quiet = (s: { id: string }, h: string[]) => !h.includes(s.id);
+  assert.deepEqual(
+    await idleForRefresh(list, async () => (reads++, ["slot2"]), quiet),
+    [
+      { id: "slot1", idle: true },
+      { id: "slot2", idle: false },
+    ],
+  );
+  assert.equal(reads, 1);
+  // Windows' process listing throws on a non-zero exit or its 60 s timeout (machine/unity.ts): busy, not idle.
+  const busy = [
+    { id: "slot1", idle: false },
+    { id: "slot2", idle: false },
+  ];
+  assert.deepEqual(await idleForRefresh(list, () => Promise.reject(new Error("listing timed out")), quiet), busy);
+  assert.deepEqual(await idleForRefresh(list, () => new Promise<string[]>(() => {}), quiet, 20), busy);
+});
+
+test("tick: a sandboxes() that never answers gives up, clears busy, and the next tick runs (review w6281)", async (t) => {
+  let hang = true;
+  const list = [{ id: "slot1", idle: true }];
+  const p = pool(t, list, {
+    sandboxesMs: 20,
+    sandboxes: () => (hang ? new Promise(() => {}) : Promise.resolve(list)),
+  });
+  assert.match((await p.caches.tick())!, /did not answer/);
+  assert.equal(readMarker(slotCacheDir(p.root, "slot1")), undefined);
+  hang = false;
+  assert.ok(await p.caches.tick());
+  assert.ok(readMarker(slotCacheDir(p.root, "slot1")));
 });
 
 test("tick: a clone younger than refreshMs is left, an older idle one is made again", async (t) => {
