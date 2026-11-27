@@ -24,6 +24,27 @@ export function isLink(p: string): boolean {
 }
 
 /**
+ * Review w6380: a name ending in a dot or a space. Windows drops those from a path it opens without the \\?\ prefix, so
+ * icacls handed `cache\evil.` opens `cache\evil`, a junction beside it, while Node lists `evil.` as a plain folder and every
+ * link check passes (measured on BEAST). A Low worker can make such a name (through \\?\); none of the folders we lock
+ * holds one of ours (Node itself can make one, review w6452).
+ *
+ * Review w6452: a Windows device name too (NUL, CON, PRN, AUX, COM0-9, LPT0-9, COM and LPT with a superscript 1-3,
+ * CONIN$, CONOUT$; any case, with or without an extension or spaces before it): icacls on `<dir>\NUL`, or `<dir>\*` with a
+ * NUL in it, fails with exit 87 (measured on Windows 11), which failed the whole pass, on and off alike; older Windows opens
+ * the others as devices as well. On Linux and macOS such a name is just a name, and skipping it there too keeps the tests
+ * one on every OS.
+ */
+export const isTrickName = (name: string) => name !== '.' && name !== '..' && (/[. ]$/.test(name) || DEVICE_NAME.test(name));
+const DEVICE_NAME = /^(con|prn|aux|nul|com[0-9\u00b9\u00b2\u00b3]|lpt[0-9\u00b9\u00b2\u00b3]|conin\$|conout\$) *(\..*)?$/i;
+
+/** What a trick name is, for the lines that say one was skipped. */
+export const TRICK_WHY = 'a name ending in a dot or a space, or a device name such as NUL, which icacls would open as another path or fail on';
+
+/** Whether any part of path `p` is a trick name (isTrickName). A drive (`V:`) is not one. */
+export const hasTrickName = (p: string) => p.split(/[\\/]/).some((s) => s !== '' && isTrickName(s));
+
+/**
  * Take link `p` away, never what it leads to. rmSync refuses a junction lstat calls a folder (ERR_FS_EISDIR, and unlink
  * EPERM, measured on BEAST, w5915); rmdir removes the junction only, and refuses a real folder with anything in it.
  */
