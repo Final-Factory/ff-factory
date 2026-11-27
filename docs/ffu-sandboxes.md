@@ -289,7 +289,9 @@ slot is kept again and stays watched. Once idle, the re-check plans what the pas
 `staleOutput.ffuBusyRetry` sets the mode. `on` is the default: it removes, and only while the stale-output mode is `on`
 too. It shipped as `warn` first (docs/worker-fence.md): on LothDesktop on 2026-11-27, 05:00 to 21:36 UTC, the warn mode logged
 3 plans (3.1, 4.9 and 10.3 GB), each made after the build had stopped and each the same unit-graph sweep an idle pass makes,
-so zero bad plans. `warn` logs `would remove` lines to the clean-up history (`portal_logs cleanup`, trigger `ffu-busy-retry`)
+so zero bad plans. BEAST and biscuit ran warn the same day and logged 5 more plans by the idle-pass rules (read by w6537's
+review); one of them, biscuit slot4 at 08:47, was a whole-target take of 27.5 GB, by the rule that removes a target still
+over the cap after its stale units and incremental cache once nothing was written in it for the settle time. `warn` logs `would remove` lines to the clean-up history (`portal_logs cleanup`, trigger `ffu-busy-retry`)
 and removes nothing. `off` stops the re-check. Planning can take minutes, so right before it removes, the re-check asks again
 whether a pass has started; if one has, it removes nothing and the slot stays watched (w6304's review, point 4). Pruning by age inside a busy target was rejected
 because a running rustc or test run can need any file in `deps/` whatever its age. The age window that is safe is the
