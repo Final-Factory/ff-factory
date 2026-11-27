@@ -16,7 +16,9 @@ const REPORT: FfuSlotsReport = {
     { id: 'slot1', branch: 'w5512-turret-power', free: true, stale: false, why: 'released' },
     { id: 'slot2', holder: 'fba87b86', holderIs: 'live', branch: 'w6270-g6a-rerun', free: false, stale: false, why: 'held by fba87b86, which runs, used 29 min ago' },
     { id: 'slot3', holder: '49495827', holderIs: 'stopped', branch: 'w5479-m6-4b-ballista-suture', free: true, stale: true, why: 'held by 49495827, which no longer runs, unused for 255 min; its checkout has 10 uncommitted change(s), saved on a rescue branch first' },
-    { id: 'slot4', holder: '5493f091', holderIs: 'live', branch: 'w6097-ff1-body-look', free: true, stale: true, why: 'held by 5493f091, which is on no open request, and its work is pushed' },
+    { id: 'slot4', holder: '5493f091', holderIs: 'gone', branch: 'w6097-ff1-body-look', free: true, stale: true, why: 'held by 5493f091, which is on no open request, and its work is pushed' },
+    // w6495's review: a holder that still runs is left to a take, though the rule calls its slot stale
+    { id: 'slot5', holder: 'cf8b12cb', holderIs: 'live', branch: 'w6295-newgame-hash', free: true, stale: true, why: 'held by cf8b12cb, which is on no open request, and its work is pushed' },
   ],
 };
 
@@ -27,9 +29,11 @@ function rig(mode: FfuSlotSweepMode, sweep: () => Promise<{ ok: boolean; out: st
   return { a, logs, sweeps: () => sweeps };
 }
 
-test('w6484: the stale slots of a report are the free ones a session still holds', () => {
+test('w6484: the stale slots of a report are the free ones a holder that no longer runs still holds', () => {
   assert.deepEqual(staleSlotsOf(REPORT).map((s) => s.id), ['slot3', 'slot4']);
   assert.deepEqual(staleSlotsOf(undefined), []);
+  const running = { ...REPORT, slots: REPORT.slots.filter((s) => s.id === 'slot5') };
+  assert.deepEqual(staleSlotsOf(running), [], 'a running holder is left to a take');
 });
 
 test('w6484: warn-only (the default) says each stale hold once and frees nothing', async () => {
@@ -45,7 +49,7 @@ test('w6484: warn-only (the default) says each stale hold once and frees nothing
   await r.a.onReport(REPORT);
   assert.equal(r.logs.length, 2, 'the next report of the same holds says nothing again');
   // slot4 taken by a new holder that then goes stale: said again
-  const next = { ...REPORT, slots: REPORT.slots.map((s) => (s.id === 'slot4' ? { ...s, holder: 'cf8b12cb' } : s)) };
+  const next = { ...REPORT, slots: REPORT.slots.map((s) => (s.id === 'slot4' ? { ...s, holder: 'ab12cd34' } : s)) };
   await r.a.onReport(next);
   assert.equal(r.logs.length, 3);
   assert.match(r.logs[2], /would free slot4/);
@@ -61,6 +65,9 @@ test('w6484: on runs one sweep per report with stale holds and logs what it free
   const none = { ...REPORT, slots: REPORT.slots.filter((s) => !s.stale) };
   assert.deepEqual(await on.a.onReport(none), []);
   assert.equal(on.sweeps(), 1, 'nothing stale: no sweep');
+  const live = rig('on', async () => ({ ok: true, out }));
+  assert.deepEqual(await live.a.onReport({ ...REPORT, slots: REPORT.slots.filter((s) => s.id !== 'slot3' && s.id !== 'slot4') }), []);
+  assert.equal(live.sweeps(), 0, 'only a running holder is stale: no sweep');
   const off = rig('off');
   assert.deepEqual(await off.a.onReport(REPORT), []);
   assert.equal(off.sweeps() + off.logs.length, 0);

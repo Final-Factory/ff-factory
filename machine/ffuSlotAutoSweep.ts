@@ -11,7 +11,8 @@
  *   on: run `ffu-slot sweep` as its own process (the same rule, lock and rescue a worker's sweep runs: unpushed work is saved
  *       on a rescue branch first, the target stays warm), and log what it printed;
  *   off: nothing.
- * The sweep runs in a child process with a timeout, so a failure is a log line and never stops the daemon; the portal's
+ * Only holders that no longer run are freed (sweepSlots skips running ones when it has no session); a running holder's stale
+ * slot is left to the next take. The sweep runs in a child process, so a failure is a log line and never stops the daemon; the portal's
  * cleanup.staleOutput.ffuSlotSweep turns it off again with nobody at the machine.
  */
 import type { FfuSlotsReport } from '../shared/types.ts';
@@ -27,7 +28,9 @@ export interface FfuSlotAutoSweepDeps {
 
 /** The slots a sweep would free now: free by w5885's rule, and held by a session (a released slot needs nothing). */
 export function staleSlotsOf(r: FfuSlotsReport | undefined): FfuSlotsReport['slots'] {
-  return (r?.slots ?? []).filter((s) => s.stale && s.free && !!s.holder);
+  // Review of #1500: only holders that no longer run (stopped or gone). A running holder's slot freed with no take behind it
+  // would lose what that holder writes next to the next take's reset; a take frees and hands it over in one locked step.
+  return (r?.slots ?? []).filter((s) => s.stale && s.free && !!s.holder && (s.holderIs === 'stopped' || s.holderIs === 'gone'));
 }
 
 export class FfuSlotAutoSweep {

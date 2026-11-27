@@ -831,29 +831,31 @@ function age(root: string, id: string, when: number) {
   for (const prof of ['debug', 'release', 'bench']) for (const sub of ['', '.fingerprint', 'deps']) if (fs.existsSync(path.join(slotTarget(root, id), prof, sub))) fs.utimesSync(path.join(slotTarget(root, id), prof, sub), t, t);
 }
 
-test("w6484: the daemon's report frees 2026-11-27's stale holds by itself (a finished holder's pushed slot, a stopped one's 10 uncommitted changes rescued); a live one stays", async (t) => {
+test("w6484: the daemon's report frees 2026-11-27's stale holds by itself (a finished holder's pushed slot, a stopped one's 10 uncommitted changes rescued); a live one stays, and a running holder's stale slot is left to a take", async (t) => {
   const { root, remote } = world(t);
   const OLD = NOW - 255 * 60_000;
   // BEAST slot4 / m5 slot1: on no open request, its work pushed
-  assert.equal(takeSlot(at(root, 'aaaa1111', OLD, { max: 3 }), { branch: 'feat', remote }), 'slot1');
+  assert.equal(takeSlot(at(root, 'aaaa1111', OLD, { max: 4 }), { branch: 'feat', remote }), 'slot1');
   // BEAST slot3: stopped, unused 255 min, 10 uncommitted changes
-  assert.equal(takeSlot(at(root, 'bbbb2222', OLD, { live: ['aaaa1111', 'bbbb2222'], max: 3 }), { remote }), 'slot2');
+  assert.equal(takeSlot(at(root, 'bbbb2222', OLD, { live: ['aaaa1111', 'bbbb2222'], max: 4 }), { remote }), 'slot2');
   for (let i = 0; i < 10; i++) fs.writeFileSync(path.join(slotCheckout(root, 'slot2'), `wip${i}.rs`), `// ${i}\n`);
   // a live holder working in its slot now
-  assert.equal(takeSlot(at(root, 'cccc3333', NOW, { live: ['aaaa1111', 'bbbb2222', 'cccc3333'], max: 3 }), { branch: 'feat', remote }), 'slot3');
+  assert.equal(takeSlot(at(root, 'cccc3333', NOW, { live: ['aaaa1111', 'bbbb2222', 'cccc3333'], max: 4 }), { branch: 'feat', remote }), 'slot3');
+  // w6495's review: a holder that still runs but is on no open request (BEAST slot4's 5493f091 ran so), writing in its slot
+  assert.equal(takeSlot(at(root, 'dddd4444', NOW, { live: ['aaaa1111', 'bbbb2222', 'cccc3333', 'dddd4444'], max: 4 }), { branch: 'feat', remote }), 'slot4');
   for (const id of ['slot1', 'slot2', 'slot3']) fs.mkdirSync(path.join(slotTarget(root, id), 'debug'), { recursive: true });
   age(root, 'slot1', OLD);
   age(root, 'slot2', OLD);
   const owners = { bbbb2222: own('blocked'), cccc3333: own('active') };
   const judge = () => {
-    const d = at(root, '', NOW, { live: ['cccc3333'], owners, max: 3 });
+    const d = at(root, '', NOW, { live: ['cccc3333', 'dddd4444'], owners, max: 4 });
     Object.assign(d.facts!, { resumable: ['bbbb2222'] });
     return d;
   };
   const report = slotsReport(judge());
-  assert.deepEqual(report.slots.map((s) => [s.id, s.stale]), [['slot1', true], ['slot2', true], ['slot3', false]], JSON.stringify(report.slots.map((s) => s.why)));
+  assert.deepEqual(report.slots.map((s) => [s.id, s.stale, s.holderIs]), [['slot1', true, 'gone'], ['slot2', true, 'stopped'], ['slot3', false, 'live'], ['slot4', true, 'live']], JSON.stringify(report.slots.map((s) => s.why)));
   const holders = () => readSlotState(root).slots.map((s) => s.holder ?? '-');
-  assert.deepEqual(holders(), ['aaaa1111', 'bbbb2222', 'cccc3333'], 'reading the slots frees nothing: before w6484 only a take or a hand-run sweep did');
+  assert.deepEqual(holders(), ['aaaa1111', 'bbbb2222', 'cccc3333', 'dddd4444'], 'reading the slots frees nothing: before w6484 only a take or a hand-run sweep did');
   const logs: string[] = [];
   let mode: 'warn' | 'on' = 'warn';
   const sweep = async () => {
@@ -863,11 +865,11 @@ test("w6484: the daemon's report frees 2026-11-27's stale holds by itself (a fin
   };
   const auto = new FfuSlotAutoSweep({ mode: () => mode, sweep, log: (s) => void logs.push(s) });
   assert.deepEqual(await auto.onReport(report), ['slot1', 'slot2']);
-  assert.deepEqual(holders(), ['aaaa1111', 'bbbb2222', 'cccc3333'], 'warn-only frees nothing');
+  assert.deepEqual(holders(), ['aaaa1111', 'bbbb2222', 'cccc3333', 'dddd4444'], 'warn-only frees nothing');
   assert.equal(logs.filter((l) => /would free/.test(l)).length, 2);
   mode = 'on';
   assert.deepEqual(await auto.onReport(report), ['slot1', 'slot2'], logs.join('\n'));
-  assert.deepEqual(holders(), ['-', '-', 'cccc3333'], 'both stale holds freed, the live one kept');
+  assert.deepEqual(holders(), ['-', '-', 'cccc3333', 'dddd4444'], 'both stale holds freed; the live one and the running stale one kept');
   const r = readSlotState(root).rescues ?? [];
   assert.equal(r.length, 1, 'only the stopped holder had work to save');
   assert.ok(r[0].holder === 'bbbb2222' && r[0].pushed, JSON.stringify(r[0]));
@@ -875,15 +877,28 @@ test("w6484: the daemon's report frees 2026-11-27's stale holds by itself (a fin
   assert.equal(files.length, 10, 'all 10 uncommitted changes are on the pushed rescue branch');
   assert.ok(logs.some((l) => l.startsWith("ffu slots: auto sweep: saved bbbb2222's work in slot2") && l.includes(`on branch ${r[0].branch}, pushed to origin`)), logs.join('\n'));
   for (const id of ['slot1', 'slot2', 'slot3']) assert.ok(fs.existsSync(path.join(slotTarget(root, id), 'debug')), `${id}'s target stays warm`);
+  // The running holder writes on after the sweep; the next take that needs its slot saves that work before it resets it.
+  fs.writeFileSync(path.join(slotCheckout(root, 'slot4'), 'after-sweep.rs'), '// written after the sweep\n');
+  const busy = { ...owners, eeee5551: own('active'), eeee5552: own('active') };
+  // The first take on feat gets released slot1; the next prefers slot4, already on feat, to slot2 and frees it.
+  const taker = (h: string) => at(root, h, NOW, { live: ['cccc3333', 'dddd4444', 'eeee5551', 'eeee5552'], owners: busy, max: 4 });
+  assert.equal(takeSlot(taker('eeee5551'), { branch: 'feat', remote }), 'slot1');
+  assert.equal(takeSlot(taker('eeee5552'), { branch: 'feat', remote }), 'slot4');
+  const saved = (readSlotState(root).rescues ?? []).find((x) => x.holder === 'dddd4444');
+  assert.ok(saved?.pushed, JSON.stringify(readSlotState(root).rescues));
+  assert.ok(git(['ls-tree', '--name-only', saved!.branch], remote).split('\n').includes('after-sweep.rs'), 'what the running holder wrote after the sweep is on its rescue branch');
 });
 
 test("w6484: the daemon's sweep process (runFfuSlotSweep, no session) frees a finished holder's pushed slot from cleanup-facts.json", async (t) => {
   const { root, remote } = world(t);
   assert.equal(takeSlot(at(root, 'aaaa1111', NOW, { max: 3 }), { branch: 'feat', remote }), 'slot1');
+  assert.equal(takeSlot(at(root, 'bbbb2222', NOW, { live: ['aaaa1111', 'bbbb2222'], max: 3 }), { branch: 'feat', remote }), 'slot2');
   const factsFile = path.join(root, 'cleanup-facts.json');
-  fs.writeFileSync(factsFile, JSON.stringify({ at: new Date().toISOString(), connected: true, root, tempRoot: path.join(root, 'tmp'), sandboxes: [], live: ['aaaa1111'], resumable: [], open: [], closed: [], owners: {} }));
+  // aaaa1111 has gone; bbbb2222 still runs, though on no open request: the sessionless sweep leaves it to a take (w6495)
+  fs.writeFileSync(factsFile, JSON.stringify({ at: new Date().toISOString(), connected: true, root, tempRoot: path.join(root, 'tmp'), sandboxes: [], live: ['bbbb2222'], resumable: [], open: [], closed: [], owners: {} }));
   const r = await runFfuSlotSweep({ root, factsFile, max: 3 });
   assert.equal(r.ok, true, r.out);
   assert.match(r.out, /ffu-slot: freed slot1: held by aaaa1111, which is on no open request, and its work is pushed/);
-  assert.equal(readSlotState(root).slots[0].holder, undefined);
+  assert.doesNotMatch(r.out, /freed slot2/);
+  assert.deepEqual(readSlotState(root).slots.map((s) => s.holder), [undefined, 'bbbb2222']);
 });

@@ -143,9 +143,15 @@ every 2 min, `FFU_REPORT_MS`): when it names a stale slot, the stale-output sett
 
 - `warn` (the default, warn-only first): daemon.log says `ffu slots: auto sweep (warn-only, ffuSlotSweep warn): would free
   <slot> on <branch>: <why>`, once per slot and holder; nothing is freed.
-- `on`: the daemon runs `ffu-slot sweep` as its own process (`runFfuSlotSweep`, no session, 5 min timeout), the same rule,
-  lock and rescue as a worker's sweep, and logs each line it printed as `ffu slots: auto sweep: ...`. A failure is one log
-  line (`auto sweep failed: ...`) and never stops the daemon.
+- `on`: the daemon runs `ffu-slot sweep` as its own process (`runFfuSlotSweep`, no session), the same rule, lock and rescue
+  as a worker's sweep, and logs each line it printed as `ffu slots: auto sweep: ...`. A failure is one log line
+  (`auto sweep failed: ...`) and never stops the daemon. It is not killed on a timer: killed inside the lock it would leave
+  the lock held for 15 min and its git running in the checkout; its lock wait (10 min) and each git call (20 min) end it.
+
+Both modes act only on a holder that no longer runs (`holderIs` stopped or gone; a sessionless sweep skips running
+holders). A running holder's stale slot (on no open request, or idle past 2 h) is left to the next `take`, which frees it
+and hands it over in one locked step: freed with no take behind it, the holder would go on writing in a released slot, and
+the next take's reset would drop that work with nothing to rescue (w6495's review of #1500, reproduced by a test).
 - `off`: nothing.
 
 The portal sets it, so turning it back off needs nobody at the machine. `ffu-slot sweep` no longer needs FF_SESSION_ID
