@@ -1576,7 +1576,7 @@ export class Daemon {
     return plan;
   }
 
-  /** w6290: the busy ffu slots' re-check (machine/ffuBusyRetry.ts), every ffuBusyRetryMinutes, warn-only unless ffuBusyRetry is on. */
+  /** w6290: the busy ffu slots' re-check (machine/ffuBusyRetry.ts), every ffuBusyRetryMinutes; removes when ffuBusyRetry and the stale-output mode are on. */
   private makeFfuRetry(): FfuBusyRetry | undefined {
     if (!this.cfg.root) return undefined;
     const roots = [this.cfg.root, ...(this.cfg.extraRoots ?? [])];
