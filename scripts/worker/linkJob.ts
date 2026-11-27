@@ -234,6 +234,7 @@ export function updateFlagsOf(source: string, f: LinkUpdateFlags): UpdateFlags {
     ...(f.winCiFirst === 'off' || f.winCiFirst === 'warn' || f.winCiFirst === 'enforce' ? { winCiFirst: f.winCiFirst } : {}),
     ...(f.sharedLock === 'off' || f.sharedLock === 'warn' || f.sharedLock === 'on' ? { sharedLock: f.sharedLock } : {}),
     ...(f.runnerPriority === 'off' || f.runnerPriority === 'warn' || f.runnerPriority === 'enforce' ? { runnerPriority: f.runnerPriority } : {}),
+    ...(f.hostRestage === 'warn' || f.hostRestage === 'on' ? { hostRestage: f.hostRestage } : {}),
   };
 }
 

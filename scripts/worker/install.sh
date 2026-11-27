@@ -21,6 +21,7 @@
 # --transcript-lock on|off (Linux, w5702) lets each locked worker write only its own conversation's transcript;
 # --store-lock off|warn|on (w5614) makes the main clone read-only to fenced workers once every sandbox is a slot repo;
 # --shared-lock off|warn|on (w5615) clones the tool caches per slot and has the daemon install and launch players; on makes the shared ones read-only to workers;
+# --host-restage warn|on (w6305) has the daemon end an idle agent adopted across a sharedLock switch between turns (on) or only log it (warn);
 # --editor-tmpdir on|off (macOS and Linux, w5833) gives each sandbox's Unity editor its own temp folder under the root;
 # --path-fence on|off|warn (macOS and Linux, w5863) sets the watch of the unity-slot shims folder on every agent's PATH (off stops it);
 # --medium-agent-folders warn|on (w5862, w5869) moves Medium agents' temp root and cargo home to <root>/tmp-medium and <root>/cache-medium/cargo (on) or only logs the exposure (warn);
@@ -60,6 +61,7 @@ while [ $# -gt 0 ]; do
     --transcript-lock) case "${2:-}" in on|off) TLOCK=$2 ;; *) echo "--transcript-lock is on or off, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --store-lock) case "${2:-}" in off|warn|on) SLOCK=$2 ;; *) echo "--store-lock is off, warn or on, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --shared-lock) case "${2:-}" in off|warn|on) SHLOCK=$2 ;; *) echo "--shared-lock is off, warn or on, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
+    --host-restage) case "${2:-}" in warn|on) HRESTAGE=$2 ;; *) echo "--host-restage is warn or on, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --editor-tmpdir) case "${2:-}" in on|off) ETMP=$2 ;; *) echo "--editor-tmpdir is on or off, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --path-fence) case "${2:-}" in on|off|warn) PFENCE=$2 ;; *) echo "--path-fence is on, warn or off, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --daemon-tmpdir) case "${2:-}" in on|off) DTMP=$2 ;; *) echo "--daemon-tmpdir is on or off, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
@@ -178,6 +180,7 @@ if [ "$UPDATE" = 1 ]; then
   [ -z "${TLOCK:-}" ] || UARGS+=(--transcript-lock "$TLOCK")
   [ -z "${SLOCK:-}" ] || UARGS+=(--store-lock "$SLOCK")
   [ -z "${SHLOCK:-}" ] || UARGS+=(--shared-lock "$SHLOCK")
+  [ -z "${HRESTAGE:-}" ] || UARGS+=(--host-restage "$HRESTAGE")
   [ -z "${ETMP:-}" ] || UARGS+=(--editor-tmpdir "$ETMP")
   [ -z "${PFENCE:-}" ] || UARGS+=(--path-fence "$PFENCE")
   [ -z "${MFOLDERS:-}" ] || UARGS+=(--medium-agent-folders "$MFOLDERS")

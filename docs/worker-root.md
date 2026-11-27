@@ -1430,8 +1430,14 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
     never cut. The next message starts a new host on the new environment, in the same conversation (the path the idle reap
     takes). A host from before w6287 has no `lockenv.sha` and is left alone (a code update restarts it anyway).
   - Not covered: a Unity editor running across the switch keeps its old environment until it is started again, and so does
-    a CI runner's job (neither is ever restarted mid-run). `hostRestage` has no `machine_update` key yet, and turning it on is
-    a separate, reviewed step.
+    a CI runner's job (neither is ever restarted mid-run).
+  - Setting it (w6305): `ops_worker machine_update host_restage warn|on` writes daemon.json `hostRestage` with nobody at
+    the machine, over the daemon link or the installer (`--host-restage`, `-HostRestage`), and the update restarts the
+    daemon with it. `host_restage warn` is the way back. A sharedLock switch and `host_restage on` can be sent in the
+    same update. The hash also changes, with no switch, when a slot's cache clone is made after its host started (under
+    `warn`, `slotCacheEnv` names a clone only once it exists); `on` then restages that agent once, which picks up the clone.
+    Turning it on, by default or per machine, is a separate change with its own independent review and a person's go,
+    after the warn lines of a real switch were read and named exactly the adopted hosts.
 - **Mailboxes per slot**: the procs broker (machine/procsBroker.ts) reads `unity-slots/procs/<sandbox>/` and the shared
   mailbox, answering each ask in the folder it came from; `ff-leftovers` writes into its own sandbox's folder. The unity-slots
   queue itself needs no per-slot folder: it already goes through the daemon's RPC into the daemon's own folder (w5545).
