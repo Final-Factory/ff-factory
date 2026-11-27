@@ -96,12 +96,23 @@ export function writeNew(file: string, data: string): void {
   fs.writeFileSync(file, data, { flag: 'wx' });
 }
 
-/** writeNew beside it under a fresh name, then renamed over `file` (a rename replaces a link at `file`, never follows it). */
+/**
+ * writeNew beside it under a fresh name, then renamed over `file` (a rename replaces a link at `file`, never follows it).
+ * On Windows a rename never replaces a junction (EPERM, measured on BEAST with Node 24.22.1), and a worker makes one with
+ * no privilege (a file symlink needs one it lacks): the junction itself is removed (rmdir takes the reparse point, never
+ * its target's files) and the rename made again (w6475).
+ */
 export function writeFileSafe(file: string, data: string): void {
   const tmp = `${file}.${process.pid}-${randomBytes(4).toString('hex')}.tmp`;
   writeNew(tmp, data);
   try {
-    fs.renameSync(tmp, file);
+    try {
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      if (process.platform !== 'win32' || !isLinkAt(file)) throw e;
+      fs.rmdirSync(file);
+      fs.renameSync(tmp, file);
+    }
   } catch (e) {
     fs.rmSync(tmp, { force: true });
     throw e;
