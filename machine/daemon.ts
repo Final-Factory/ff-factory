@@ -40,7 +40,7 @@ import { brokerLauncher } from './playersLaunch.ts';
 import { playerFenceFor, type PlayerFence } from './playerFence.ts';
 import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, unlinkShimBinLink, watchShimBin, retryShimWrite, type ShimModeGuard } from './pathFence.ts';
 import { isSlotRepo } from './slotRepo.ts';
-import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
+import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState, restageModeOf } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
@@ -332,6 +332,11 @@ export interface DaemonConfig {
    * unset; decided once per daemon process; set remotely by `ops_worker machine_update shared_lock`.
    */
   sharedLock?: 'off' | 'warn' | 'on';
+  /**
+   * w6287: an idle agent whose host was adopted across a sharedLock switch (it keeps the old cache paths and
+   * FF_PLAYER_BROKER): "warn" (default) logs it; "on" ends its agent between turns so its next message starts a new host.
+   */
+  hostRestage?: 'warn' | 'on';
   /** The sandbox pool (add_machine sandbox_root and limits; docs/machines.md "Machine sandboxes"); the portal's welcome overrides it. */
   sandboxes?: SandboxPoolSettings;
   /** Stop a sandbox editor after this long without agent activity there (default 120; 0: never). */
@@ -3626,8 +3631,16 @@ export class Daemon {
     // w5565: a sandbox agent keeps the workers' uv cache; the daemon's own (Medium) one is read-only to it. w5693: and its uv tool folder.
     const uv = spec.sandbox ? sandboxUvEnv({ ...process.env, ...spec.env }, this.cfg.root) : {};
     // w5615: with the shared lock, its own clones of the tool caches and audit folder, and player_slots.py asks the broker.
-    const slotOwn = spec.sandbox && this.sharedLock !== 'off' ? { ...slotCacheEnv(this.cfg.root, spec.sandbox, this.sharedLock), FF_PLAYER_BROKER: '1' } : {};
+    const slotOwn = this.lockEnvFor(spec.sandbox);
     return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), ...(low?.transcripts ? { transcriptLabels: true } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...slotOwn, ...this.agentTempEnv(info.id, !!spec.sandbox), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
+  }
+
+  /**
+   * w5615: what daemon.json `sharedLock` gives a sandbox run (its slot's cache clones, audit folder, FF_PLAYER_BROKER);
+   * none when off or outside a sandbox. w6287: an adopted host started on another one is restaged (agentHost.ts).
+   */
+  private lockEnvFor(sandbox: string | undefined): Record<string, string> {
+    return sandbox && this.sharedLock !== 'off' ? { ...slotCacheEnv(this.cfg.root, sandbox, this.sharedLock), FF_PLAYER_BROKER: '1' } : {};
   }
 
   /**
@@ -4738,6 +4751,9 @@ export class Daemon {
       events: this.events,
       handlers: () => this.handlers(info.id),
       spec: () => this.runSpec(info, holder.e!.spec!),
+      // w6287: an adopted host's agent keeps the sharedLock environment it started on; restaged between turns when on.
+      lockEnv: () => this.lockEnvFor(holder.e?.spec?.sandbox),
+      restageMode: () => restageModeOf(this.cfg.hostRestage),
       editorUp: () => {
         const sb = holder.e?.spec?.sandbox;
         return sb ? this.pool.editorUp(sb) : undefined;

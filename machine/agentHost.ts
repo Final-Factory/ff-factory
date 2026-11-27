@@ -24,7 +24,7 @@ import { pathToFileURL } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { createHash, randomUUID } from 'node:crypto';
 import { inspect } from 'node:util';
-import { AgentSession, setQueryForTesting, type AutoCompaction, type SessionHandle, type SessionSink, type TurnEndMeta } from '../server/sessions.ts';
+import { AgentSession, isMidTurn, setQueryForTesting, type AutoCompaction, type SessionHandle, type SessionSink, type TurnEndMeta } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { TRANSCRIPTS } from './transcriptLock.ts';
@@ -140,7 +140,7 @@ export class LineTail {
 
 export function hostFiles(dir: string) {
   const f = (n: string) => path.join(dir, n);
-  return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), beat: f('beat'), log: f('host.log'), creds: f('creds.sha'), scope: f('scope'), progress: f('daemon.progress') };
+  return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), beat: f('beat'), log: f('host.log'), creds: f('creds.sha'), lockEnv: f('lockenv.sha'), scope: f('scope'), progress: f('daemon.progress') };
 }
 
 const CREDENTIAL_ENV = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'GH_TOKEN'] as const;
@@ -151,6 +151,20 @@ export function credsOf(env: Record<string, string | undefined> | undefined): st
   for (const k of CREDENTIAL_ENV) h.update(`${k}=${env?.[k] ?? ''};`);
   return h.digest('hex').slice(0, 32);
 }
+
+/**
+ * The shared-lock environment a run's host started with (w6287), as a hash: the variables daemon.json `sharedLock` decides
+ * for a sandbox agent (HostDeps.lockEnv: its slot's cache clones, audit folder and FF_PLAYER_BROKER; none when off).
+ */
+export function lockEnvOf(env: Record<string, string> | undefined): string {
+  const h = createHash('sha256');
+  for (const k of Object.keys(env ?? {}).sort()) h.update(`${k}=${env![k]};`);
+  return h.digest('hex').slice(0, 32);
+}
+
+/** w6287: what a stale shared-lock environment does to an idle adopted agent: warn logs it, on ends it between turns. */
+export type RestageMode = 'warn' | 'on';
+export const restageModeOf = (v: unknown): RestageMode => (v === 'on' ? 'on' : 'warn');
 
 /**
  * The FF Factory code this process loaded (w2625): the commit its install's machine/VERSION names, read once at load, so a
@@ -189,6 +203,11 @@ export type HostCommand = { n: number } & (
   | { op: 'clear_marks' }
   /** A daemon took the host back: the host says its state again and asks its unanswered tool calls again. */
   | { op: 'attach' }
+  /**
+   * w6287: its agent ends if it is idle when the host reads this (never mid-turn: a send read before it has started a
+   * turn, and then the host skips it), so its next message starts a new host on the daemon's current environment.
+   */
+  | { op: 'restage'; why: string }
 );
 
 /** What a host records, in order. */
@@ -288,6 +307,13 @@ export interface HostDeps {
   procs?: HostProcs;
   /** Its host's tree is being stopped (true) or is gone (false): its sandbox is not free meanwhile (w799). */
   stopping?: (s: HostedSession, on: boolean) => void;
+  /**
+   * w6287: the environment daemon.json `sharedLock` gives this run now (Daemon.lockEnvFor); unset: none is checked. A host
+   * records its hash at start (lockenv.sha); an idle agent whose host started on another one is restaged (restageMode).
+   */
+  lockEnv?: () => Record<string, string>;
+  /** w6287: daemon.json `hostRestage`; unset: warn (lothsahn's lockout rule: only a log line until a reviewed switch). */
+  restageMode?: () => RestageMode;
   /** How long a stale host may stay silent before it is stopped (HOST_WATCH.HUNG_MS); tests shorten it. */
   hungMs?: number;
   /** The worker caps' mode for a host about to start (daemon.json `workerCaps`, w5554); unset: warn. */
@@ -381,6 +407,8 @@ export class HostedSession implements SessionHandle {
   /** Its host's tree being stopped and its folder removed (w799); messages sent meanwhile wait in `waiting`. */
   private stoppingNow?: Promise<void>;
   private waiting: Omit<Extract<HostCommand, { op: 'send' }>, 'n'>[] = [];
+  /** w6287: a restage was sent or logged for its host's environment; cleared when a turn starts or a new host does. */
+  private restaged?: string;
   /** The credentials its running host started with (credsOf), so a message for other ones starts a new host (w1745). */
   private creds?: string;
   /** When its agent last did something (PROGRESS_OPS) or was given a turn: the hang watch's clock (w3673). */
@@ -614,6 +642,8 @@ export class HostedSession implements SessionHandle {
     fs.writeFileSync(f.place, JSON.stringify({ cwd: spec.cwd, ...(spec.sandbox ? { sandbox: spec.sandbox } : {}), ...(spec.writeLock ? { transcriptsHeld: holdsTranscripts(spec.writeLock, spec.writeLockTranscripts) } : {}), path: (pathKey && spec.env?.[pathKey]) || '' }));
     this.creds = credsOf(spec.env);
     fs.writeFileSync(f.creds, this.creds);
+    if (this.deps.lockEnv) fs.writeFileSync(f.lockEnv, lockEnvOf(this.deps.lockEnv()));
+    this.restaged = undefined;
     fs.writeFileSync(f.offset, '0');
     this.n = 0;
     this.savedOffset = 0;
@@ -916,7 +946,44 @@ export class HostedSession implements SessionHandle {
     if (forward) {
       this.deps.out({ type: 'session', info: this.info, live: this.liveNow });
       this.deps.changed();
+      this.restageIfOther();
     }
+  }
+
+  /**
+   * w6287: an idle agent whose host started on another shared-lock environment than the daemon gives now (a sharedLock
+   * switch restarts the daemon, which adopts the running hosts, w605, and a host keeps its environment) is ended between
+   * turns, so its next message starts a new host on the new mode's cache clones and FF_PLAYER_BROKER, in the same
+   * conversation (as the idle reap and the w1166 code move do). Mid-turn it waits for the turn's end; the host skips a
+   * restage it reads after a send (that turn has started), and the next idle state asks again. A host that recorded no
+   * lockenv.sha (started before w6287) is left alone. In warn (the default) it is only logged, once per host.
+   */
+  private restageIfOther() {
+    if (!this.deps.lockEnv || !this.running || !this.liveNow || this.stoppingNow || this.waiting.length) return;
+    if (isMidTurn(this.info)) {
+      // A restage the host skipped (a turn had started) is asked again at this turn's end; a warning is said once per host.
+      if (this.restaged !== 'warned') this.restaged = undefined;
+      return;
+    }
+    if (this.restaged) return;
+    const had = readFileOr(this.files.lockEnv, '').trim();
+    if (!had) return;
+    let now: string;
+    try {
+      now = lockEnvOf(this.deps.lockEnv());
+    } catch {
+      return;
+    }
+    if (had === now) return;
+    const mode = this.deps.restageMode?.() ?? 'warn';
+    const why = "its agent host started on another shared-lock environment (daemon.json sharedLock) than this daemon's (w6287)";
+    this.restaged = mode === 'on' ? now : 'warned';
+    if (mode !== 'on') {
+      this.deps.log(`agent host ${this.info.id}: ${why}; hostRestage warn: it keeps the old cache paths and FF_PLAYER_BROKER until its next host start`);
+      return;
+    }
+    this.deps.log(`agent host ${this.info.id}: ${why}; idle, so its agent ends now and its next message starts a new host on the new one`);
+    this.command({ op: 'restage', why });
   }
 
   /** Its host is gone: the session is not live. `why` (a host that did not close by itself) goes in its record. */
@@ -1241,6 +1308,16 @@ export async function runHost(dir: string, start: HostStart): Promise<void> {
         return;
       case 'stop':
         session.stop(c.onPurpose);
+        if (!session.live) close();
+        return;
+      case 'restage':
+        // w6287: never mid-turn. A send read before this one has started a turn: skip it, and the daemon asks again.
+        if (!session.live || isMidTurn(session.info)) {
+          console.log(new Date().toISOString(), `restage skipped: its agent is ${session.live ? session.info.status : 'not live'}`);
+          return;
+        }
+        console.log(new Date().toISOString(), `restage: ${c.why}; its agent ends between turns`);
+        session.stop(false);
         if (!session.live) close();
         return;
       case 'mode':
