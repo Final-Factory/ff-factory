@@ -45,13 +45,13 @@ export const TRICK_WHY = 'a name ending in a dot or a space, or a device name su
 export const hasTrickName = (p: string) => p.split(/[\\/]/).some((s) => s !== '' && isTrickName(s));
 
 /**
- * Whether anything (a link included) is at `p`, by its exact name: on Windows an absolute path is looked at by its `\\?\`
- * path, since the plain one drops a trailing dot or space (`x.` would answer for `x`; w6462).
+ * Whether anything (a link included) is at `p`. Node's fs already opens an absolute Windows path by its exact name (it
+ * hands the system the namespaced `\\?\` form), so `x.` answers for `x.`, never for `x` beside it (w6462: the test with
+ * `pkg.` beside `pkg` fails if it did not).
  */
 export function presentAt(p: string): boolean {
-  const exact = process.platform === 'win32' && path.isAbsolute(p) && !p.startsWith('\\\\') ? `\\\\?\\${path.resolve(p)}` : p;
   try {
-    return fs.lstatSync(exact, { throwIfNoEntry: false }) !== undefined;
+    return fs.lstatSync(p, { throwIfNoEntry: false }) !== undefined;
   } catch (e) {
     // Not to be read (EPERM, EBUSY): something is there.
     return (e as NodeJS.ErrnoException).code !== 'ENOTDIR';

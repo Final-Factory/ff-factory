@@ -468,6 +468,14 @@ test('lockIn removes an entry holding a name ending in a dot or a device name, a
     const exactly = `${prefix}${path.resolve(entry)}`;
     assert.deepEqual(removed, isTrickName(top) ? [exactly] : [entry, exactly], `${n}: by its \\\\?\\ path once rd left it, or at once`);
   }
+  // Still there after every try (rd by \\?\ leaving it too): lockIn says so with a WARNING, and the entry does not count.
+  const entry = path.join(tmp(t), 'pkg');
+  putTrick(path.join(entry, 'x.'), 'payload.dll');
+  const said: string[] = [];
+  const leave = async (p: string) => void (await removeTree(p, { run: fakeRd([], { leaveExact: true }), platform: 'win32' }));
+  assert.equal(await lockIn(entry, { platform: 'win32', exec: async () => ({ code: 0, stdout: '', stderr: '' }), removeTree: leave, log: (l) => void said.push(l) }), false);
+  assert.ok(fs.existsSync(long(entry)));
+  assert.ok(said.some((l) => l.includes('WARNING: could not remove') && l.includes('still there')), said.join('\n'));
 });
 
 test('Windows: under "on" a folder on the way that cannot turn Medium first leaves its children as they are (review w6377 A)', async (t) => {
