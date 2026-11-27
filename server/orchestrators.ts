@@ -4541,6 +4541,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (input.action === 'merge') {
       const t = into!;
       for (const r of w.requesters) if (!isFor(t, r.userId)) t.requesters.push(r);
+      // w6288: a worker moved off t that comes back with w is never shifted past t's hand-back below (w2079).
+      const offT = new Set(Object.keys(t.movedOff ?? {}).filter((sid) => !t.sessionIds.includes(sid)));
       t.sessionIds = [...new Set([...t.sessionIds, ...w.sessionIds])];
       // When each was given it travels with it, so its newest worker stays the newest (latestWorker, w1696).
       if (w.links) t.links = { ...w.links, ...t.links };
@@ -4551,7 +4553,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       // take an answer: the hand-off keeps it), only one whose link came with w (t's own stands), and one with no link keeps
       // none (it ranks last, as before) unless none of them has one.
       const hbAt = Date.parse(t.handedBack?.at ?? '') || 0;
-      const joined = hbAt ? w.sessionIds.filter((sid) => this.store.sessions.get(sid) && (!t.links?.[sid] || t.links[sid] === w.links?.[sid])) : [];
+      const joined = hbAt ? w.sessionIds.filter((sid) => !offT.has(sid) && this.store.sessions.get(sid) && (!t.links?.[sid] || t.links[sid] === w.links?.[sid])) : [];
       const linkAt = (sid: string) => Date.parse(t.links?.[sid]?.at ?? '');
       const timed = joined.filter((sid) => Number.isFinite(linkAt(sid)));
       const newest = timed.length ? Math.max(...timed.map(linkAt)) : -Infinity;
