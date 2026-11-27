@@ -5,8 +5,8 @@ import { tailnetOnly } from './remoteChat.ts';
 import { viaOf } from './pageSockets.ts';
 import { Auth } from './auth.ts';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { tmpDir } from './testTmp.ts';
 
 /** w5535 (finding 27 of the w5452 audit): one rule for the client address, the last X-Forwarded-For entry from a trusted proxy only. */
 
@@ -27,7 +27,7 @@ test('w5535: a spoofed leftmost X-Forwarded-For entry is never the address; the 
   assert.equal(clientAddress(spoof), '198.51.100.4');
   assert.match(tailnetOnly(spoof)!, /tailnet/, 'a spoofed tailnet address does not pass the tailnet-only check');
   assert.deepEqual(viaOf(spoof), { addr: '198.51.100.4', via: 'other' });
-  const auth = new Auth(fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-auth-')), { trustProxy: true });
+  const auth = new Auth(tmpDir('ffsb-auth-'), { trustProxy: true });
   assert.equal(auth.clientIp(spoof as never), '198.51.100.4', 'the login throttle counts the real address, not the one the client picked');
   // Several headers are one list; the last entry of the last header wins.
   assert.equal(clientAddress(req('::1', { 'x-forwarded-for': ['1.1.1.1', '2.2.2.2, 203.0.113.5'] })), '203.0.113.5');
@@ -60,7 +60,7 @@ test('w5535: an untrusted source is judged by its own address, and trustProxy of
     assert.match(tailnetOnly(proxied)!, /does not trust/, 'a proxied request is not let in as this machine when the proxy is not believed');
     assert.equal(tailnetOnly(req('127.0.0.1')), undefined, 'this machine itself still is');
   });
-  const strict = new Auth(fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-auth-')), { trustProxy: false });
+  const strict = new Auth(tmpDir('ffsb-auth-'), { trustProxy: false });
   assert.equal(strict.clientIp(req('127.0.0.1', { 'x-forwarded-for': '198.51.100.1' }) as never), '127.0.0.1', "an Auth's own trustProxy wins");
 });
 

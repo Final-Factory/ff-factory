@@ -1,11 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
+import { removeTmp, tmpDir } from './testTmp.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
 import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
@@ -44,7 +43,7 @@ async function until(what: string, cond: () => boolean, ms = 5000) {
 }
 
 async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ledger-'));
+  const dir = tmpDir('ffsb-ledger-');
   const token = mintProviderToken();
   const cfg = {
     dataDir: dir,
@@ -100,7 +99,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 60));
     store.flush();
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    removeTmp(dir);
   });
   const dispatcher = () => sessions.get(agents.dispatcherId);
   const call = async (info: SessionInfo, name: string, args: Record<string, unknown>) => {

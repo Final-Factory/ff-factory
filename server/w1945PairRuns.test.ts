@@ -8,6 +8,7 @@ import { pairRoom, pairText, repairText, unfitWhy } from '../shared/capacity.ts'
 import { workLive, type WorkLiveFacts } from '../shared/workState.ts';
 import type { Requester, WorkItem } from '../shared/types.ts';
 import { roomEnough, roomForWork, type RoomNow } from './placement.ts';
+import { tmpDir } from './testTmp.ts';
 
 const BEN: Requester = { userId: 'ben', displayName: 'Ben' };
 const NOW = Date.parse('2026-10-23T23:00:00.000Z');
@@ -149,12 +150,11 @@ test('w2282: a pair filed before it says the new rule once loaded; a cross-OS on
   assert.equal(repairText(item('w9', { pair: { legs: 2, crossOs: 'Burst' }, constraints: 'a pair run of 2 legs, cross-OS (Burst)' })), false);
 });
 
-test('w2282: a queued request_pair run loaded from an older ledger says the new rule and is no longer queued only for non-Macs', async () => {
+test('w2282: a queued request_pair run loaded from an older ledger says the new rule and is no longer queued only for non-Macs', async (t) => {
   const fs = await import('node:fs');
-  const os = await import('node:os');
   const path = await import('node:path');
   const { Store } = await import('./store.ts');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w2282-'));
+  const dir = tmpDir('w2282-', t);
   const old = 'a pair run of 2 legs, on computers that are not Macs';
   const items = [
     item('w10', { constraints: old, pair: { legs: 2, for: 'w2208' }, queuedFor: { at: '2026-10-26T05:01:00.000Z', needs: ['beast', 'lothdesktop', 'lothlaptop'] } }),

@@ -31,6 +31,7 @@ import {
   type UsageReply,
 } from './usage.ts';
 import { noSessionLimit, type PlanUsage } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 /** How the meters label a vault token (a vault entry's name and the last four characters; never the value). */
 const tokenLabel = (token: string) => `vault-ben-1 …${token.slice(-4)}`;
@@ -134,7 +135,7 @@ test('usage credential: the agents token and API keys are removed for the usage 
 });
 
 test('usage credential: only metadata is read from the stored login, never the token values', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-cred-'));
+  const dir = tmpDir('usage-cred-');
   const file = path.join(dir, '.credentials.json');
   assert.equal(readStoredLogin(file).present, false); // missing
   fs.writeFileSync(file, '{"claudeAiOauth":{"accessToken":"SECRET-A"'); // truncated
@@ -275,7 +276,7 @@ test('accounts: the system_status lines name each account, where it is used and 
 });
 
 test('accounts: the tracker reads a usage.json from before accounts, keeps Mac reports, and survives a failed fetch', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-accounts-'));
+  const dir = tmpDir('usage-accounts-');
   const cfg = { dataDir: dir } as never;
   fs.writeFileSync(path.join(dir, 'usage.json'), JSON.stringify(parseUsage(REAL, AS_OF)));
   let changes = 0;
@@ -362,7 +363,7 @@ function trackerWith(
     throw new UsageFetchError('no headers here');
   },
 ) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-creds-'));
+  const dir = tmpDir('usage-creds-');
   const calls = { login: [] as Record<string, string | undefined>[], token: [] as string[], limits: [] as string[] };
   const logs: string[] = [];
   const cfg = { dataDir: dir } as never;
@@ -516,7 +517,7 @@ test("token limits: read from the API reply's rate-limit headers, asked with tha
 });
 
 test("tracker: a token's numbers saved before it was asked directly (the login's) are dropped on load", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-old-'));
+  const dir = tmpDir('usage-old-');
   const entries: Record<string, UsageEntry> = {
     [HOST_LOGIN]: { kind: 'login', usage: usageOf(98) },
     [tokenKey(TOKEN)]: { kind: 'token', label: tokenLabel(TOKEN), usage: usageOf(98) },
@@ -532,7 +533,7 @@ test("tracker: a token's numbers saved before it was asked directly (the login's
 
 test('tracker: every token shows numbers or "usage unknown: <reason>" after one poll, even when a request never answers', async () => {
   const never = () => new Promise<never>(() => undefined);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-hang-'));
+  const dir = tmpDir('usage-hang-');
   const cfg = { dataDir: dir } as never;
   const summary = (t: UsageTracker) => accountLines(tokenOnly(t), new Map(), new Date(AS_OF)).find((l) => l.includes('vault-ben-1'))!;
   // The request that wedged BEAST's portal (2026-09-28): it never settles.
@@ -561,7 +562,7 @@ test('tracker: every token shows numbers or "usage unknown: <reason>" after one 
   assert.match(t.entries.get(tokenKey(TOKEN))!.usage!.why!, /^usage unknown: the usage endpoint rate-limits .*HTTP 429\); the API's rate-limit headers gave no answer/);
 
   // An answer nothing can read is a reason as well, never an exception that leaves the entry unset.
-  const odd = new UsageTracker({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'usage-odd-')) } as never, () => undefined, {
+  const odd = new UsageTracker({ dataDir: tmpDir('usage-odd-') } as never, () => undefined, {
     fetchToken: async () => ({ rate_limits_available: true, rate_limits: { limits: 7 as never } }),
     log: () => undefined,
     answerMs: 30,
@@ -574,7 +575,7 @@ test('tracker: every token shows numbers or "usage unknown: <reason>" after one 
 });
 
 test('tracker: a poll that has run longer than 5 minutes no longer blocks the next one', async (tc) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-stuck-'));
+  const dir = tmpDir('usage-stuck-');
   const logs: string[] = [];
   let calls = 0;
   // The token's request hangs until the first poll is let go, then answers: left hanging, its deadline kept this file's
@@ -603,8 +604,7 @@ test('tracker: a poll that has run longer than 5 minutes no longer blocks the ne
 
 test('tracker: one poll at start, then one every usagePollMinutes; Refresh polls at once and moves the next; system_status polls only when stale', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: Date.parse(AS_OF) });
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-every-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = tmpDir('usage-every-', t);
   let calls = 0;
   const cfg = { dataDir: dir, usagePollMinutes: 15 } as never as Config;
   const tr = new UsageTracker(cfg, () => undefined, {
@@ -908,7 +908,7 @@ test('no 5-hour window (w2709): the account line shows the weekly figure only; n
 });
 
 test('w3855: recordCost keeps its day totals in spend-days.json, saved in the background, and never touches spend.json', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-spend-'));
+  const dir = tmpDir('usage-spend-');
   // SpendStore's file (server/spend.ts): recordCost rewrote it on every cost increase, as it was at startup, on the main thread.
   const spendJson = JSON.stringify({ version: 1, requests: { w1: { usd: 5 } }, sessions: {} });
   fs.writeFileSync(path.join(dir, 'spend.json'), spendJson);

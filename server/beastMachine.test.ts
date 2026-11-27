@@ -3,7 +3,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
@@ -27,9 +26,10 @@ import { copyTree, removeTree, run } from './proc.ts';
 import { readGitStatus } from './gitStatus.ts';
 import type { Config } from './config.ts';
 import type { ImageInput, Machine, PermissionMode, Sandbox, SandboxPoolSettings, SessionInfo, SystemStats } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 // Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
-process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
+process.env.FF_UNITY_SLOTS = tmpDir('ff-slots-');
 
 const GB = 1024 ** 3;
 const T = '2026-09-29T10:00:00.000Z';
@@ -44,7 +44,7 @@ const until = async (what: string, cond: () => boolean, ms = 60_000) => {
 
 /** A bare origin, the base clone, and two worktrees made the way this host's own pool made them (git worktree add). */
 function hostRepos() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-beast-'));
+  const root = tmpDir('ff-beast-');
   const origin = path.join(root, 'origin.git');
   const base = path.join(root, '_base');
   const git = (dir: string, ...a: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { stdio: 'pipe' }).toString().trim();
@@ -305,7 +305,7 @@ test("beast machine: its agents run on the vault token of the person their work 
 });
 
 test('beast machine: add_machine local takes its settings from the config, deploys without ssh, and is the only one', async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-local-'));
+  const dir = tmpDir('ff-local-');
   let store: Store | undefined;
   t.after(() => {
     store?.flush();
@@ -418,7 +418,7 @@ test('beast machine: no agent ends the daemon\'s task; the reaper never touches 
 test('beast machine: a standing agent on it keeps the workers\' account; its daemon cleans nothing even before the first welcome', () => {
   const src = fs.readFileSync(path.join(import.meta.dirname, 'standing.ts'), 'utf8');
   assert.match(src, /machineRunEnv\(this\.cfg, m \?\? a\.machineId/, 'the machine record, so the local rule applies');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-dclean-'));
+  const dir = tmpDir('ff-dclean-');
   try {
     const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'beast', token: 't', repoPath: dir, appDir: dir, maxEventsFile: null, cleanup: { everyMinutes: 0, softFreeGB: 0 } }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
     assert.deepEqual((d as unknown as { cleanupSettings: unknown }).cleanupSettings, { everyMinutes: 0, softFreeGB: 0 });
@@ -430,7 +430,7 @@ test('beast machine: a standing agent on it keeps the workers\' account; its dae
 });
 
 test('w469: a daemon gives its agents the Unity slots mailbox, their holder and unity-slot first on their PATH', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-dslot-'));
+  const dir = tmpDir('ff-dslot-');
   try {
     const slots = path.join(dir, 'slots');
     const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'lothdesktop', token: 't', repoPath: path.join(dir, 'FinalFactory'), appDir: dir, maxEventsFile: null, unitySlotsDir: slots }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
@@ -458,7 +458,7 @@ test('w469: a daemon gives its agents the Unity slots mailbox, their holder and 
 });
 
 test('w536: a daemon manages nothing in its main clone: unity and switch there are refused, no git status, no slot place or holder, no Unity MCP outside a sandbox', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-dmain-'));
+  const dir = tmpDir('ff-dmain-');
   try {
     const d = new Daemon(
       { portalUrl: 'http://127.0.0.1:1', id: 'm5', token: 't', repoPath: path.join(dir, 'FinalFactory'), appDir: dir, maxEventsFile: null, unitySlotsDir: path.join(dir, 'slots'), unityMcpServer: { command: 'uvx', args: ['mcp-for-unity'] } },
@@ -490,7 +490,7 @@ test('w536: a daemon manages nothing in its main clone: unity and switch there a
 });
 
 test('w536: a daemon refuses every agent in its main clone, and checks a standing agent against the agent cap the portal sends', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-d0-'));
+  const dir = tmpDir('ff-d0-');
   try {
     type Inside = { startRefusal(s: unknown): string | undefined; onMessage(m: unknown): void; entries: Map<string, unknown> };
     const make = (id: string, extra: Record<string, unknown> = {}) =>
@@ -520,7 +520,7 @@ test('w536: a daemon refuses every agent in its main clone, and checks a standin
 });
 
 test('w3626: the daemon refuses a switch while a night runs in the sandbox or a unity-slot run holds its slot, and switches once neither does', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-dhold-'));
+  const dir = tmpDir('ff-dhold-');
   try {
     const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'lothdesktop', token: 't', repoPath: path.join(dir, 'FinalFactory'), appDir: path.join(dir, 'app'), root: dir, maxEventsFile: null, unitySlotsDir: path.join(dir, 'slots') }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
     const sbPath = path.join(dir, 'sandboxes', 'slot1');
@@ -561,7 +561,7 @@ test('w3626: the daemon refuses a switch while a night runs in the sandbox or a 
 });
 
 test('w5545: the daemon arbitrates slots in its own folder, not the workers\' mailbox, and gives each agent a token naming its session and sandbox', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-drpc-'));
+  const dir = tmpDir('ff-drpc-');
   try {
     const appDir = path.join(dir, 'daemon');
     const mailbox = path.join(dir, 'unity-slots');

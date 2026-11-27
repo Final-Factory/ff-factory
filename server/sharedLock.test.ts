@@ -6,7 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { SHARED_LOCK_TOOLS, SHARED_SEED_DIRS, WORKER_CACHE_CHILDREN, makeSharedLockDirs, sharedLockParents, sharedLockPaths } from '../machine/sharedLockPaths.ts';
 import { SLOT_CACHE_TOOLS, mergeBack } from '../machine/slotCaches.ts';
-import { MEDIUM_TOOLS, isExplicitMedium, isLabelledLow, labelLow, lowTargets, type Exec } from '../machine/lowIntegrity.ts';
+import { MEDIUM_TOOLS, isExplicitMedium, isLabelledLow, labelLow, lowTargets, trickWarning, type Exec } from '../machine/lowIntegrity.ts';
+import { hasTrickName, isTrickName } from './fsLink.ts';
 import { FF_LANDLOCK, writeLockArgs } from '../machine/writeLock.ts';
 import { fenceFor, seatbeltProfile } from './workerFence.ts';
 import { firstUnplain, lockIn } from '../machine/lockIn.ts';
@@ -269,6 +270,201 @@ test('Windows: "on" turns cache and cache/nuget Medium before their children go 
   assert.match(said.join('\n'), /cache.slots is \(or lies below\) a junction or symlink now, not labelled/);
   // The first of them refused, the other children of cache/nuget are labelled as before.
   assert.ok(set.includes(path.join(d, 'cache', 'uv')), JSON.stringify(set));
+});
+
+// Review w6380: `cache\evil.` beside a junction `cache\evil`. Node lists `evil.` as a plain folder, so every link check
+// passes, but Windows drops the trailing dot (or space) and icacls handed `cache\evil.` opens the junction. Such a name is
+// skipped with a WARNING and never reaches icacls; the pass does not fail, and the rest is labelled as before. Name-based,
+// so it runs on every OS.
+const long = (p: string) => (process.platform === 'win32' ? `\\\\?\\${p}` : p);
+const mkTrick = (p: string) => fs.mkdirSync(long(p), { recursive: true });
+const putTrick = (dir: string, file = 'f') => {
+  mkTrick(dir);
+  fs.writeFileSync(long(path.join(dir, file)), 'x');
+};
+
+test('names ending in a dot or a space are trick names; others, a drive and . and .. are not (review w6380)', () => {
+  assert.ok(isTrickName('evil.') && isTrickName('evil ') && isTrickName('...') && isTrickName('a. '));
+  assert.ok(!isTrickName('evil') && !isTrickName('a.b') && !isTrickName('.') && !isTrickName('..') && !isTrickName('.git'));
+  assert.ok(hasTrickName('V:\\ffw\\cache\\evil.') && hasTrickName('V:\\ffw\\cache\\evil \\f') && hasTrickName('/ffw/cache/evil./f'));
+  assert.ok(!hasTrickName('V:\\ffw\\cache\\evil') && !hasTrickName('V:\\') && !hasTrickName('/home/x/./y/../z') && !hasTrickName('\\\\server\\share\\a.b'));
+});
+
+test('Windows: under "on" a folder ending in a dot or a space beside a junction is skipped with a WARNING, and the rest is labelled as before (review w6380)', async (t) => {
+  const layout = (d: string, tricks: boolean) => {
+    put(path.join(d, 'daemon', 'src', 'main.ts'));
+    put(path.join(d, 'cache', 'slots', 'f'));
+    put(path.join(d, 'cache', 'uv', 'f'));
+    put(path.join(d, 'cache', 'nuget', 'mine', 'f'));
+    fs.symlinkSync(path.join(d, 'daemon', 'src'), path.join(d, 'cache', 'evil'), 'junction');
+    if (!tricks) return;
+    putTrick(path.join(d, 'cache', 'evil.'));
+    putTrick(path.join(d, 'cache', 'evil '));
+    putTrick(path.join(d, 'cache', 'nuget', 'evil.'));
+  };
+  const run = async (d: string) => {
+    const calls: string[][] = [];
+    const said: string[] = [];
+    const exec: Exec = async (_c, a) => {
+      calls.push(a);
+      return { code: 0, stdout: '', stderr: '' } as never;
+    };
+    const ok = await labelLow(realTargets(d, true), exec, (l) => void said.push(l), 'acct');
+    const rel = (p: string) => path.relative(d, p);
+    return { ok, said, calls: calls.map((a) => [rel(a[0]), ...a.slice(1)]) };
+  };
+  const plain = tmp(t);
+  layout(plain, false);
+  const before = await run(plain);
+  const d = tmp(t);
+  layout(d, true);
+  const tricks = [path.join(d, 'cache', 'evil.'), path.join(d, 'cache', 'evil '), path.join(d, 'cache', 'nuget', 'evil.')];
+  // Each is listed as a plain folder, so it reaches labelLow's list: the check there is what keeps it from icacls.
+  const tg = realTargets(d, true);
+  for (const p of tricks) assert.ok(tg.dirs.includes(p), `${JSON.stringify(p)} in ${JSON.stringify(tg.dirs)}`);
+  const after = await run(d);
+  assert.equal(after.ok, true, `the pass does not fail: ${after.said.join('\n')}`);
+  const odd = (a: string[]) => hasTrickName(a[0]);
+  assert.deepEqual(after.calls.filter(odd), [], 'no icacls call, read or write, names a trick path');
+  for (const p of tricks) assert.equal(after.said.filter((l) => l === trickWarning(p)).length, 1, `one WARNING for ${JSON.stringify(p)}: ${after.said.join('\n')}`);
+  // The rest: the same icacls calls, in the same order, as the same layout without them.
+  assert.deepEqual(after.calls, before.calls);
+  const lines = (r: typeof after, root: string) => r.said.filter((l) => !/w6380/.test(l)).map((l) => l.split(root).join('<root>'));
+  assert.deepEqual(lines(after, d), lines(before, plain));
+  assert.ok(after.calls.some((a) => a[0] === path.join('cache', 'uv') && a.includes('/setintegritylevel')), JSON.stringify(after.calls));
+});
+
+test('Windows: labelTree never hands icacls a name ending in a dot or a space, alone or by <dir>\\*, and names each in `odd` (review w6380)', async (t) => {
+  const { labelTree } = await import('./transcriptLabels.ts');
+  for (const level of ['medium', 'low'] as const) {
+    const d = tmp(t);
+    const seed = path.join(d, 'seed');
+    put(path.join(seed, 'sub', 'f'));
+    put(path.join(seed, 'top'));
+    put(path.join(d, 'outside', 's'));
+    fs.symlinkSync(path.join(d, 'outside'), path.join(seed, 'sub', 'j'), 'junction');
+    putTrick(path.join(seed, 'sub', 'j.'));
+    putTrick(path.join(seed, 'sub', 'j '));
+    putTrick(path.join(seed, 'odd.'));
+    const calls: string[][] = [];
+    const icacls = (a: string[]) => {
+      calls.push(a);
+      return { code: 0, out: '' };
+    };
+    const found: string[] = [];
+    const odd: string[] = [];
+    assert.equal(await labelTree(seed, level, icacls, 'acct', found, odd), 1, level);
+    assert.deepEqual(found, [path.join(seed, 'sub', 'j')], level);
+    assert.deepEqual(odd.sort(), [path.join(seed, 'odd.'), path.join(seed, 'sub', 'j '), path.join(seed, 'sub', 'j.')].sort(), level);
+    const named = calls.map((a) => a[0]);
+    assert.ok(!named.some((p) => hasTrickName(p) || p.startsWith(path.join(d, 'outside'))), `${level}: ${JSON.stringify(named)}`);
+    // A folder holding one is labelled entry by entry, never `<dir>\*`; the rest is labelled as before.
+    assert.ok(!named.includes(path.join(seed, '*')) && !named.includes(path.join(seed, 'sub', '*')), `${level}: ${JSON.stringify(named)}`);
+    for (const p of [path.join(seed, 'top'), path.join(seed, 'sub', 'f'), path.join(seed, 'sub'), seed]) assert.ok(named.includes(p), `${level}: ${p} in ${JSON.stringify(named)}`);
+  }
+  // A root with such a name is refused, as a link is.
+  const d = tmp(t);
+  putTrick(path.join(d, 'seed.'));
+  await assert.rejects(labelTree(path.join(d, 'seed.'), 'medium', () => ({ code: 0, out: '' }), 'acct'), /ending in a dot or a space/);
+});
+
+// Review w6452: icacls on `<dir>\NUL`, or `<dir>\*` with a NUL in it, fails with exit 87 (measured on Windows 11). This
+// fake fails the same way, so a pass that hands one to icacls fails here as it did on the machine.
+const nulIcacls = (calls: string[][]): Exec => async (_c, a) => {
+  calls.push(a);
+  const p = a[0];
+  const nul = (s: string) => /^nul$/i.test(s);
+  if (p.split(/[\\/]/).some(nul) || (path.basename(p) === '*' && fs.readdirSync(path.dirname(p)).some(nul))) return { code: 87, stdout: '', stderr: 'The parameter is incorrect.' } as never;
+  return { code: 0, stdout: '', stderr: '' } as never;
+};
+
+test('device names (NUL, CON, COM1, ...) are trick names in any case, with or without an extension; names that only begin so are not (review w6452)', () => {
+  for (const n of ['NUL', 'nul', 'Con', 'PRN', 'aux', 'COM0', 'com1', 'LPT9', 'COM\u00b9', 'lpt\u00b3', 'CONIN$', 'conout$', 'NUL.txt', 'nul .tar.gz', 'COM1.'])
+    assert.ok(isTrickName(n), n);
+  for (const n of ['null', 'nullish', 'console', 'com10', 'COM', 'xNUL', 'aux2', 'lpt', 'conin', 'nul_'])
+    assert.ok(!isTrickName(n), n);
+  assert.ok(hasTrickName('V:\\ffw\\cache\\seed\\NUL\\f') && !hasTrickName('V:\\ffw\\cache\\seed\\null\\f'));
+});
+
+test('Windows: a NUL planted in a locked folder and in cache neither fails "on" nor the way back to off (review w6452 M1)', async (t) => {
+  const d = tmp(t);
+  put(path.join(d, 'daemon', 'src', 'main.ts'));
+  put(path.join(d, 'cache', 'slots', 'f'));
+  put(path.join(d, 'cache', 'uv', 'f'));
+  put(path.join(d, 'cache', 'nuget', 'mine', 'f'));
+  const locked = realTargets(d, true).trees;
+  assert.ok(locked.length > 0, 'a locked folder in the layout');
+  const seed = locked[0];
+  put(path.join(seed, 'pkg', 'f'));
+  // What a worker can plant under warn or off, through \\?\.
+  const nuls = [path.join(seed, 'pkg', 'NUL'), path.join(d, 'cache', 'NUL'), path.join(d, 'cache', 'uv', 'nul')];
+  for (const p of nuls) putTrick(p);
+  for (const mode of [true, false]) {
+    const calls: string[][] = [];
+    const said: string[] = [];
+    const tg = realTargets(d, mode);
+    const ok = await labelLow(tg, nulIcacls(calls), (l) => void said.push(l), 'acct');
+    const name = mode ? 'on' : 'off';
+    assert.equal(ok, true, `${name}: the pass does not fail: ${said.join('\n')}`);
+    assert.ok(!said.some((l) => /exit 87|parameter is incorrect/i.test(l)), `${name}: ${said.join('\n')}`);
+    assert.deepEqual(calls.filter((a) => hasTrickName(a[0])), [], `${name}: no icacls call names a NUL`);
+    // Every locked folder is labelled, Medium under "on" and Low again under off.
+    for (const p of tg.trees.filter((x) => fs.existsSync(x))) assert.ok(calls.some((a) => a[0] === p && a.includes('/setintegritylevel') && a.some((x) => (mode ? /medium/ : /low/).test(x))), `${name}: ${p} labelled: ${JSON.stringify(calls)}`);
+    assert.ok(said.some((l) => l.includes(JSON.stringify(path.join(seed, 'pkg', 'NUL')))), `${name}: the NUL in the locked folder is said: ${said.join('\n')}`);
+  }
+});
+
+test('Windows: a root whose own name is a trick name is labelled nowhere: the guard and the medium passes skip it too (review w6452 L4)', async (t) => {
+  // Fixed names under the root, so neither check is reached unless the root itself is such a name; each is tested here.
+  const d = path.join(tmp(t), 'ffw.');
+  for (const p of [path.join(d, 'daemon', 'src', 'main.ts'), path.join(d, 'cache', 'slots', 'f'), path.join(d, 'cache', 'nuget', 'mine', 'f')]) {
+    mkTrick(path.dirname(p));
+    fs.writeFileSync(long(p), 'x');
+  }
+  const tg = realTargets(d, true);
+  assert.ok(tg.guard.length > 0 && tg.medium.length > 0, JSON.stringify(tg));
+  const calls: string[][] = [];
+  const said: string[] = [];
+  const ok = await labelLow(tg, nulIcacls(calls), (l) => void said.push(l), 'acct');
+  assert.equal(ok, true, said.join('\n'));
+  assert.deepEqual(calls, [], 'no icacls call at all: every path holds the trick name');
+  assert.ok(said.some((l) => /WARNING/.test(l) && /w6380/.test(l)), said.join('\n'));
+  // The medium pass checks a folder of its own list as well: the guard pass sends those above to `open`, which it skips, so
+  // hand it one straight (review w6452 L4).
+  const med = path.join(d, 'cache', 'nuget', 'mine');
+  const said2: string[] = [];
+  assert.equal(await labelLow({ dirs: [], files: [], guard: [], open: [], medium: [med] } as never, nulIcacls(calls), (l) => void said2.push(l), 'acct'), true, said2.join('\n'));
+  assert.deepEqual(calls, [], 'the medium pass labels nothing under the trick name either');
+  assert.ok(said2.some((l) => /WARNING/.test(l) && /w6380/.test(l)), said2.join('\n'));
+});
+
+test('lockIn removes an entry holding a name ending in a dot or a device name, and says it (review w6452 M2)', async (t) => {
+  const prefix = '\\\\?\\';
+  // As rd /s /q does (measured on LothDesktop): by a plain path it answers 0 and leaves `x.`, `y ` and NUL with all that is
+  // in them; by its \\?\ path it removes them too.
+  const rd = (removed: string[]) => async (p: string) => {
+    removed.push(p);
+    if (p.startsWith(prefix)) return fs.rmSync(process.platform === 'win32' ? p : p.slice(prefix.length), { recursive: true, force: true });
+    for (const e of fs.readdirSync(p)) if (!isTrickName(e)) fs.rmSync(path.join(p, e), { recursive: true, force: true });
+  };
+  for (const [n, top] of [['x.', 'pkg'], ['y ', 'pkg'], ['NUL', 'pkg'], ['f', 'pkg.']]) {
+    const d = tmp(t);
+    const entry = path.join(d, top);
+    mkTrick(path.join(entry, 'ok'));
+    fs.writeFileSync(long(path.join(entry, 'ok', 'f')), 'x');
+    putTrick(path.join(entry, n), 'payload.dll');
+    const bad = isTrickName(top) ? entry : path.join(entry, n);
+    assert.equal(firstUnplain(entry), bad, n);
+    const calls: string[][] = [];
+    const said: string[] = [];
+    const removed: string[] = [];
+    const deps = { platform: 'win32' as const, exec: async (_c: string, a: string[]) => (calls.push(a), { code: 0, stdout: '', stderr: '' }), removeTree: rd(removed), log: (l: string) => void said.push(l) };
+    assert.equal(await lockIn(entry, deps), false, n);
+    assert.deepEqual(calls, [], `${n}: nothing labelled`);
+    assert.ok(!fs.existsSync(long(entry)), `${n}: removed, ${JSON.stringify(removed)}: ${said.join('\n')}`);
+    assert.ok(said.some((l) => l.includes('removed') && l.includes(JSON.stringify(bad))), `${n}: ${said.join('\n')}`);
+    if (isTrickName(n)) assert.deepEqual(removed, [entry, `${prefix}${path.resolve(entry)}`], `${n}: by its \\\\?\\ path once rd left it`);
+  }
 });
 
 test('Windows: under "on" a folder on the way that cannot turn Medium first leaves its children as they are (review w6377 A)', async (t) => {

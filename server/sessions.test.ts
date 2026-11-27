@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { JOINED_MARK, RELAYED_MARK } from '../shared/conditional.ts';
 import { SessionManager, firstResultBase, seedSdkCost, setQueryForTesting, type TurnBudgetHit } from './sessions.ts';
@@ -9,9 +8,10 @@ import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { Store } from './store.ts';
 import type { Config } from './config.ts';
 import type { SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 test('after a portal restart a machine agent that was mid-turn shows stopped, saying it may still run there (w424)', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-sessions-'));
+  const dir = tmpDir('ffsb-sessions-', t);
   const store = new Store(dir);
   t.after(() => {
     store.flush();
@@ -30,7 +30,7 @@ test('after a portal restart a machine agent that was mid-turn shows stopped, sa
 });
 
 test('agent titles: one line, trimmed, at most 80 characters, and stored', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-sessions-'));
+  const dir = tmpDir('ffsb-sessions-', t);
   const store = new Store(dir);
   t.after(() => {
     store.flush();
@@ -67,7 +67,7 @@ test('turnFrom (w607): a message folded into a turn keeps its starter; a queued 
     })();
   }) as never);
   t.after(() => setQueryForTesting(fakeQuery() as never));
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-turnfrom-'));
+  const dir = tmpDir('ffsb-turnfrom-', t);
   const store = new Store(dir);
   const sessions = new SessionManager({} as Config, store);
   const s = sessions.create({ kind: 'orchestrator', title: 'Lothsahn', permissionMode: 'bypassPermissions', options: () => ({}) });
@@ -165,7 +165,7 @@ test("a resumed process's first turn after a portal restart costs only itself, n
     })();
   }) as never);
   t.after(() => setQueryForTesting(fakeQuery() as never));
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-resume-cost-'));
+  const dir = tmpDir('ffsb-resume-cost-', t);
   const store = new Store(dir);
   t.after(() => {
     store.flush();
@@ -233,7 +233,7 @@ function scriptedCli(t: { after: (fn: () => void) => void }) {
 }
 
 function budgetSession(t: { after: (fn: () => void) => void }, kind: SessionInfo['kind']) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-budget-'));
+  const dir = tmpDir('ffsb-budget-', t);
   const store = new Store(dir);
   const sessions = new SessionManager({} as Config, store);
   t.after(() => {

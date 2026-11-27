@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
@@ -30,6 +29,7 @@ import { BlockerWatch } from './blockerWatch.ts';
 import { HELD_MARK } from '../shared/conditional.ts';
 import { startTestMachine } from './testMachine.ts';
 import { useFakeVault } from './testVault.ts';
+import { removeTmp, tmpDir } from './testTmp.ts';
 
 // Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
 useFakeVault();
@@ -110,7 +110,7 @@ class FakeDiscord implements DiscordReader {
 }
 
 function setup(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg: Config['intake'] = {}, extra: Partial<Config> = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-intake-'));
+  const dir = tmpDir('ffsb-intake-');
   const cfg = {
     dataDir: dir,
     sandboxRoot: dir,
@@ -151,7 +151,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 60));
     store.flush();
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    removeTmp(dir);
   });
   const dispatcher = () => sessions.get(agents.dispatcherId);
   const call = async (info: SessionInfo, name: string, args: Record<string, unknown>) => {

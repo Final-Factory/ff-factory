@@ -5,7 +5,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +14,7 @@ import { saveWork } from '../server/saveWork.ts';
 import { fenceToRoot } from '../server/cleanup.ts';
 import { roomLevel } from '../server/hostHealth.ts';
 import { linkTarget } from '../server/fsLink.ts';
+import { tmpDir } from '../server/testTmp.ts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PWSH = process.env.FF_PWSH || 'pwsh';
@@ -24,7 +24,8 @@ const needPwsh = hasPwsh ? false : 'PowerShell 7 (pwsh) is not installed here';
 // of daemon.json, the pool's record, the junctions and a worktree) runs against a real VHDX in scripts/worker/test/devdrive-e2e.ts, where
 // the Storage cmdlets are the real ones and no stub can stand in for them reliably (the stubbed Set-Partition was bypassed on the runner).
 const needFake = process.platform === 'win32' ? 'covered by devdrive-e2e.ts on a real Windows' : needPwsh;
-const tmp = (name: string) => fs.mkdtempSync(path.join(os.tmpdir(), `w900-${name}-`));
+// w6476: removed when this file's process exits, whatever a test did or did not remove itself.
+const tmp = (name: string) => tmpDir(`w900-${name}-`);
 
 // ---------------------------------------------------------------- the letter
 

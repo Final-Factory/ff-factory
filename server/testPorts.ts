@@ -45,7 +45,14 @@ const alive = (pid: number) => {
 function lock(port: number): boolean {
   const file = path.join(LOCKS, String(port));
   try {
-    fs.writeFileSync(file, String(process.pid), { flag: 'wx' });
+    try {
+      fs.writeFileSync(file, String(process.pid), { flag: 'wx' });
+    } catch (e) {
+      // w6476: another process removed the emptied folder (its exit hook, below) between our mkdir and this write
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      fs.mkdirSync(LOCKS, { recursive: true });
+      fs.writeFileSync(file, String(process.pid), { flag: 'wx' });
+    }
     return true;
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
@@ -102,6 +109,12 @@ export async function reservePort(): Promise<number> {
     hooked = true;
     process.once('exit', () => {
       for (const p of [...mine]) releasePort(p);
+      // w6476: the folder goes with its last lock; rmdir refuses one that still holds another process's lock
+      try {
+        fs.rmdirSync(LOCKS);
+      } catch {
+        // not empty, or already gone
+      }
     });
   }
   const { low, high } = portRange();

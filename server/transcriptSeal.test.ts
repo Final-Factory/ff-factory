@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +11,7 @@ import { ThreadGone, askThread, pendingForTests, stopThreadForTests, threadGenFo
 import { AgentSession, setQueryForTesting } from './sessions.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { Store } from './store.ts';
+import { tmpDir } from './testTmp.ts';
 import { projectSlug } from './claudeHome.ts';
 import type { SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
@@ -21,11 +21,9 @@ import type { SessionInfo, TranscriptEvent } from '../shared/types.ts';
  * through a resume and a /compact).
  */
 
-const tmp = (t: { after: (f: () => void) => void }, name: string) => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), `ffsb-seal-${name}-`));
-  t.after(() => fs.rmSync(d, { recursive: true, force: true }));
-  return d;
-};
+// w6476: removed when the file's process exits, not in t.after: those hooks run in the order registered, so a folder removed
+// there is written to again by the store.flush() a test registers after it (ffsb-seal-session-*/data came back).
+const tmp = (_t: unknown, name: string) => tmpDir(`ffsb-seal-${name}-`);
 const line = (n: number) => `${JSON.stringify({ type: 'user', uuid: `u${n}`, message: { role: 'user', content: `message ${n}` } })}\n`;
 
 test('w5563: sealStore keeps one seal per conversation, refuses ids that are no file name, junk and old seals', (t) => {

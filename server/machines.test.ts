@@ -23,9 +23,10 @@ import { ROOM_WAIT } from './resumeMove.ts';
 import { agentPath, macReloadLines, nodeSupport, plist } from './machineDeploy.ts';
 import type { Config } from './config.ts';
 import type { HostStats, ImageInput, MachineSandbox, PermissionMode, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 // Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
-process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
+process.env.FF_UNITY_SLOTS = tmpDir('ff-slots-');
 
 /** Stands in for AgentSession on the daemon: answers every message with "echo <text>". */
 class FakeAgent implements SessionHandle {
@@ -116,7 +117,7 @@ const until = async (what: string, cond: () => boolean, ms = 5000) => {
 };
 
 async function setup() {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-machines-'));
+  const tmp = tmpDir('ffsb-machines-');
   const cfg = { dataDir: tmp, limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' } } as unknown as Config;
   const store = new Store(tmp);
   const sessions = new SessionManager(cfg, store);
@@ -158,8 +159,7 @@ async function setup() {
 }
 
 test('w536: a machine record that still has max_agents loses it on load, said once for all of them', async (t) => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-maxagents-'));
-  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const tmp = tmpDir('ffsb-maxagents-', t);
   const cfg = { dataDir: tmp, limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' } } as unknown as Config;
   const old = new Store(tmp);
   for (const [id, n] of [['m5', 3], ['lothdesktop', 0]] as const) old.putMachine({ id, host: id, purpose: 'unused', status: 'ready', online: false, repoPath: '/r', home: '/h', portalUrl: 'http://x', maxSessions: n, sessionIds: [], createdAt: '' } as never);
@@ -185,6 +185,13 @@ test('w3337: a daemon that has shut down starts no keep-awake holder, though its
   const { daemon, cleanup } = await setup();
   t.after(cleanup);
   const d = daemon() as unknown as { liveCount: () => number; awake: () => void; caffeinate?: unknown; shutdown: () => void };
+  // The tests start no holder (scripts/testEnv.ts, w6476); this one checks the real rule.
+  const was = process.env.FF_KEEP_AWAKE;
+  process.env.FF_KEEP_AWAKE = 'on';
+  t.after(() => {
+    if (was === undefined) delete process.env.FF_KEEP_AWAKE;
+    else process.env.FF_KEEP_AWAKE = was;
+  });
   d.liveCount = () => 1;
   d.shutdown();
   d.awake();
@@ -462,7 +469,7 @@ test('daemon: a portal answering 502 (restarting behind the proxy) is retried at
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-502-'));
+  const tmp = tmpDir('daemon-502-');
   const d = new Daemon(
     { portalUrl: url, id: 'mx', token: 't', repoPath: tmp, appDir: tmp, claude: 'definitely-not-a-claude-binary', maxEventsFile: null },
     () => {
@@ -1301,7 +1308,7 @@ const posixSh = process.platform !== 'win32' && fs.existsSync('/bin/sh');
 
 test('machine deploy (mac): the LaunchAgent reload waits for bootout and retries bootstrap (m3 "Bootstrap failed: 5", 2026-09-29)', { skip: !posixSh && 'needs a POSIX sh' }, async () => {
   const { execFileSync, spawnSync } = await import('node:child_process');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-launchctl-'));
+  const dir = tmpDir('ffsb-launchctl-');
   try {
     // A launchctl whose old service lingers for `linger` prints after bootout, and whose bootstrap fails with 5
     // while it is loaded, and `failFirst` more times after; sleep returns at once.
@@ -1429,7 +1436,7 @@ test("w496: a worker started while its machine's daemon is outdated gets its bri
 });
 
 test('w496: a queued message that cannot be delivered for a day is given up, with an error naming it; never silently', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-hold-'));
+  const tmp = tmpDir('ffsb-hold-');
   const store = new Store(tmp);
   const sessions = new SessionManager({ dataDir: tmp, limits: { maxSessions: 6 } } as unknown as Config, store);
   const failing = { info: { id: 'gone1', kind: 'worker', status: 'idle', machineId: 'mx', title: 'x', lastActivityAt: new Date().toISOString() }, live: false, send: () => { throw new Error("mx's daemon is outdated"); } };

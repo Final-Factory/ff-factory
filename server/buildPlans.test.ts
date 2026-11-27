@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { BuildPlans, PLAN_MAX_MS, pauseNotice, type BuildDeps, type SeatResult } from './buildPlans.ts';
 import type { BenchLock, SessionInfo, WorkItem } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * Builds first on BEAST (w1606). Ben, 2026-10-20: "when you know builds are coming up, we also prioritize using beast for
@@ -215,8 +215,8 @@ test('w1606: the dispatcher declares a build for a request; its worker is the bu
   assert.match(t.notes.at(-1)!, /not ended 180 min after it was due, so FF Factory ended it/);
 });
 
-test('w1606: a plan survives a portal restart (data/builds.json), so paused work is still resumed', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w1606-'));
+test('w1606: a plan survives a portal restart (data/builds.json), so paused work is still resumed', (t) => {
+  const dir = tmpDir('w1606-', t);
   const file = path.join(dir, 'builds.json');
   const a = world([{ id: 'b', machine: 'beast', requests: ['w1'] }], { file });
   a.plans.declare({ machine: 'beast', minutes: 30, what: 'a player', builder: 'b', requests: ['w1'], by: 'worker b' });

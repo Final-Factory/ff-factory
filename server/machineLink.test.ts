@@ -8,7 +8,6 @@ import { Worker } from 'node:worker_threads';
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
@@ -20,6 +19,7 @@ import { Daemon, RECONNECT_MS, REOFFER_MS, type DaemonConfig, type Probes } from
 import { ANSWERS, SelfUpdater, alive, checkPublished, checkoutFromBundle, downloadBundle, fetchError, inFlightRefusal, JOB_LIMIT, jobToEnd, keepRootJson, processCommand, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
 import type { JobSpec } from '../machine/osJob.ts';
 import type { Config } from './config.ts';
+import { tmpDir } from './testTmp.ts';
 
 const PROBES: Probes = {
   stats: async () => ({ hostname: 'mx', platform: 'darwin', cpuCount: 1, cpuModel: 'x', loadPct: 0, memTotalBytes: 2 ** 30, memFreeBytes: 2 ** 30 }),
@@ -47,7 +47,7 @@ function portalRepo(dir: string, text = 'one'): { root: string; commit: string }
 }
 
 async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: boolean; record?: 'file' | 'spare' | 'none'; outside?: { kind: string; name: string }[]; detached?: boolean } = {}) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-link-'));
+  const tmp = tmpDir('ffsb-link-');
   const cfg = { dataDir: path.join(tmp, 'data'), limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' } } as unknown as Config;
   fs.mkdirSync(cfg.dataDir);
   const store = new Store(cfg.dataDir);
@@ -234,7 +234,7 @@ test('w5593: any other refusal (a job still running) is not mended by the full b
 });
 
 test('w5593: the incremental base: a merge HEAD leaves out every parent; a short id is resolved; a bad, unknown or diverged one, or a root HEAD, gets none', async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-thin-'));
+  const tmp = tmpDir('ffsb-thin-');
   try {
     const repo = path.join(tmp, 'repo');
     fs.mkdirSync(repo);
@@ -418,7 +418,7 @@ test("w4674: a daemon whose install joined with -NoSsh says so in its hello: the
 });
 
 test('w1918: keepRootJson keeps the spare copy fresh and puts root.json back only for a root on its Dev Drive, never throwing', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-rootjson-'));
+  const tmp = tmpDir('ffsb-rootjson-');
   try {
     const root = path.join(tmp, 'V', 'ffw');
     const appDir = path.join(tmp, 'D', 'daemon');
@@ -515,8 +515,7 @@ async function bundleServer(t: { after: (f: () => void) => void }, body: Buffer,
 test('w1641: a bundle download that stalls or is cut resumes where it stopped, each retry logged with its reason', async (t) => {
   const body = Buffer.from(Array.from({ length: 200_000 }, (_, i) => (i * 7) % 251));
   const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffdl-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = tmpDir('ffdl-', t);
 
   // beast's case: the stream stops sending and stays open. Before w1641 nothing noticed for 300 s (undici's body timeout).
   const stall = await bundleServer(t, body, (n) => (n === 1 ? 'stall' : 'serve'));
@@ -554,8 +553,7 @@ test('w1641: a bundle download that stalls or is cut resumes where it stopped, e
 test('w5898: a cut download keeps its part and the next call resumes it; a bad part falls back to a full download from 0', async (t) => {
   const body = Buffer.from(Array.from({ length: 200_000 }, (_, i) => (i * 13) % 251));
   const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffdl-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = tmpDir('ffdl-', t);
   const name = `${b.sha256.slice(0, 16)}.bundle.part`;
 
   // beast's case: one call runs out (here: its one attempt stalls at half); the next call asks only for the rest.
@@ -625,7 +623,7 @@ test('w5898: a cut download keeps its part and the next call resumes it; a bad p
 test('w5938: a stall check that comes late (the daemon blocked its own loop) is not a stall; the bytes that came meanwhile are read', async (t) => {
   const body = Buffer.from(Array.from({ length: 20_000 }, (_, i) => (i * 11) % 251));
   const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffdl-'));
+  const dir = tmpDir('ffdl-');
   // The portal in a thread of its own, so it sends while this thread's loop is blocked. w6057: the order is set by these
   // flags, not by timers, which a loaded machine (biscuit at load 55-70) ran late enough to make a real stall or a retry:
   // flag[1] = 1 holds the next request at 1000 bytes until this thread says 'send' (from inside its block), and flag[0]
@@ -700,8 +698,7 @@ test('w5938: a stall check that comes late (the daemon blocked its own loop) is 
 test('w5987: on a loop that keeps blocking, totalMs still ends the download, and late checks in a row with nothing read are a stall', async (t) => {
   const body = Buffer.from(Array.from({ length: 200_000 }, (_, i) => (i * 7) % 251));
   const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffdl-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = tmpDir('ffdl-', t);
   // Half the bundle, then nothing (the w1641 stall), served while this thread's loop blocks 300 ms at a time outside a
   // timer, so every 100 ms stall check comes about 200 ms late.
   const held = await bundleServer(t, body, () => 'stall');
@@ -748,8 +745,7 @@ test('w5987: on a loop that keeps blocking, totalMs still ends the download, and
 test('w5987: a chunk read between late checks starts their count again, so more than lateRow late checks in all are no stall', async (t) => {
   const body = Buffer.from(Array.from({ length: 5000 }, (_, i) => (i * 13) % 251));
   const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffdl-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = tmpDir('ffdl-', t);
   const part = path.join(dir, `${b.sha256.slice(0, 16)}.bundle.part`);
   // The order is set by the part on disk, not by timers (w6057): 1000 bytes, then 4 times over the loop blocks 1.2 s
   // outside a timer, so the 500 ms check comes late with nothing new read, and the next 1000 bytes come only after it (a
@@ -823,8 +819,7 @@ function overdueFixture(
   job: Partial<UpdateJob>,
   o: { command?: (pid: number) => Promise<string | undefined>; stop?: (pid: number, sig: NodeJS.Signals) => void } = {},
 ) {
-  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffjob-'));
-  t.after(() => fs.rmSync(appDir, { recursive: true, force: true }));
+  const appDir = tmpDir('ffjob-', t);
   const f = updateFiles(appDir);
   const full = { id: '977d56f7-1030-442b-bcad-bd6ac62ab798', form: 'update', root: 'r', appDir, service: 's', createdAt: new Date().toISOString(), phase: 'running', commit: 'c'.repeat(40), before: 'b'.repeat(40), ...job } as UpdateJob;
   writeJson(f.job, full);
@@ -1057,7 +1052,7 @@ test('w1641: an answer the link could not carry goes again when it is back; one 
   const sent: { id: string; ok: boolean }[] = [];
   const logs: string[] = [];
   const u = new SelfUpdater({
-    appDir: fs.mkdtempSync(path.join(os.tmpdir(), 'ffans-')),
+    appDir: tmpDir('ffans-'),
     portalUrl: () => 'http://127.0.0.1:1',
     token: 'tok',
     send: (m) => {
@@ -1138,7 +1133,7 @@ test('w5546: the read fence goes to warn, on and off again over the link with no
   assert.equal(s.launched.length, 0, 'nothing was unloaded');
   // This daemon's own answer to an action it does not know.
   const sent: { ok: boolean; error?: string }[] = [];
-  const u = new SelfUpdater({ appDir: fs.mkdtempSync(path.join(os.tmpdir(), 'ffrf-')), portalUrl: () => 'http://127.0.0.1:1', token: 'tok', send: (m) => (sent.push(m as { ok: boolean }), true), exit: () => assert.fail('no exit'), log: () => undefined });
+  const u = new SelfUpdater({ appDir: tmpDir('ffrf-'), portalUrl: () => 'http://127.0.0.1:1', token: 'tok', send: (m) => (sent.push(m as { ok: boolean }), true), exit: () => assert.fail('no exit'), log: () => undefined });
   await u.onControl({ type: 'daemon_control', id: 'c1', action: 'something-new' as 'restart' });
   await u.onControl({ type: 'daemon_control', id: 'c2', action: 'read-fence-off' });
   assert.deepEqual(sent.map((m) => m.ok), [false, false]);

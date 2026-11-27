@@ -399,7 +399,10 @@ export async function fetchHudData(repo: string, pr: number | string, run: GitRu
     const r = await run('gh', ['api', '-H', 'Accept: application/vnd.github.raw+json', `repos/${repo}/contents/${HUD_DATA_DIR}/${f}?ref=${encodeURIComponent(base)}`], opts);
     if (r.code !== 0 || !r.stdout.trim()) {
       // Only the pins are needed (pr_evidence.py pins()); a missing clusters file leaves the script to say so if it reads it.
-      if (f === 'hud-pins.json') return { error: `${HUD_DATA_DIR}/${f} cannot be read from ${repo} at ${base}: ${said(r)}` };
+      if (f === 'hud-pins.json') {
+        fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 }); // w6476: no folder left when the pins cannot be read
+        return { error: `${HUD_DATA_DIR}/${f} cannot be read from ${repo} at ${base}: ${said(r)}` };
+      }
       continue;
     }
     fs.writeFileSync(path.join(dir, f), r.stdout);

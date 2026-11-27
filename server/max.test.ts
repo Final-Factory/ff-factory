@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { MaxManager, allowedApi, snowflakeTime } from './max.ts';
 import { FileTail, cleanLine, maxEnv, parseEventLine } from './maxEvents.ts';
 import { readDiscordConfig, readSecret } from './discordConfig.ts';
 import type { Config } from './config.ts';
 import type { SessionInfo } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 // A Discord bot token's shape, assembled at runtime so secret scanners leave a test value alone.
 const TOKEN = ['MTQ0NDQ0NDQ0NDQ0NDQ0NDQ0NA', 'GAbCdE', 'thisIsNotARealTokenJustTheShapeOfOne00'].join('.');
@@ -15,7 +15,7 @@ const GUILD = '530867164866150410';
 const DEV_CHAT = '1012843817981976686';
 const BUGS = '1069745561672106015';
 
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-max-'));
+const tmp = () => tmpDir('ffsb-max-');
 
 /** An ffbox config dir with a discord section whose token is a secrets.env variable. */
 function ffboxDir(opts: { token?: string | null; literal?: boolean } = {}) {

@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { alreadySent, needsYouDigestText, needsYouRecord, needsYouText, previewLine, previewsIn, prsIn, reportTail, whoOf, workersNamedBy, NEEDS_YOU_REPORT_CHARS } from './needsYou.ts';
 import type { UserInfo, WorkItem } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 /** The pure parts of w1378's [needs you] routing: what a question carries, whom it goes to, and that it goes once. */
 
@@ -105,8 +106,8 @@ test('the digest: one message with every question, each with its files and PRs',
   assert.match(text, /record it with update_work on that request, their answer as the note/);
 });
 
-test('w2478: the relay lists the request’s own review stills and clips the words did not name, newest first, to inline', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w2478-review-'));
+test('w2478: the relay lists the request’s own review stills and clips the words did not name, newest first, to inline', (t) => {
+  const root = tmpDir('w2478-review-', t);
   const mk = (topic: string, name: string, agoS: number) => {
     fs.mkdirSync(path.join(root, topic), { recursive: true });
     const f = path.join(root, topic, name);

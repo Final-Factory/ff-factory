@@ -4,17 +4,18 @@ import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
+import { tmpDir } from './testTmp.ts';
 import { backupMemory, healMemory, memoryBackupRoot } from './orchestratorMemory.ts';
 import { dataRecoveries, generationPath } from './durable.ts';
 import type { SessionInfo } from '../shared/types.ts';
 
-function tmp(t: { after: (fn: () => void) => void }, prefix: string) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 }));
-  return dir;
+// w6476: removed when the file's process exits, after every t.after hook has run. Removed in t.after ahead of the server's
+// kill hook (they run in the order registered), the rm threw EBUSY (the live server holds its folder), the kill never ran,
+// and the server child kept running for 30 minutes and hung the suite.
+function tmp(_t: unknown, prefix: string) {
+  return tmpDir(prefix);
 }
 
 const session = (id: string, title: string): SessionInfo => ({
@@ -187,11 +188,14 @@ test('the real server comes back by itself from a zeroed state.json and users.js
   const env: NodeJS.ProcessEnv = { ...process.env, FFSB_CONFIG: path.join(base, 'config.json'), HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: path.join(home, '.claude') };
   for (const k of ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'DISCORD_TOKEN']) delete env[k];
   const child = spawn(process.execPath, [path.join(import.meta.dirname, 'index.ts')], { cwd: path.join(import.meta.dirname, '..'), env, stdio: ['ignore', 'pipe', 'pipe'] });
-  t.after(() => child.kill());
+  const exited = new Promise<number | null>((r) => child.once('exit', (code) => r(code)));
+  t.after(async () => {
+    child.kill();
+    await exited;
+  });
   let log = '';
   child.stdout.on('data', (d) => (log += d));
   child.stderr.on('data', (d) => (log += d));
-  const exited = new Promise<number | null>((r) => child.once('exit', (code) => r(code)));
   const until = async (what: RegExp, ms: number) => {
     const end = Date.now() + ms;
     while (!what.test(log)) {

@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { EXIT, checkoutProblem, formatVersions, installedVersions, marketplaceVersions, parseVersions, legacyToolsCheckout, prependPath, publishAgentTools, REPAIR_AFTER, checkoutBackup, checkoutStaging, repairStateFile, readableToolsCheckout, staleAfter, toolsCheckout, type Ran } from './agentTools.ts';
 import { toolsResult } from './machineRollout.ts';
+import { tmpDir } from './testTmp.ts';
 
 /** The agent tools publish on a machine (w1476, server/agentTools.ts; docs/worker-install.md "The agent tools"). */
 
@@ -53,7 +54,7 @@ interface Machine {
 }
 
 function machine(o: Machine = {}) {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-tools-'));
+  const base = tmpDir('agent-tools-');
   const home = path.join(base, 'home');
   const root = path.join(base, 'ffw');
   const claudeDir = o.claudeConfigDir ? path.join(root, 'claude') : path.join(home, '.claude');
@@ -128,7 +129,7 @@ const ran = (m: ReturnType<typeof machine>, what: string) => m.calls.filter((c) 
 
 /** A person's own final-factory-agents checkout (BEAST's ~/final-factory-agents), which the marker may name. */
 function personCheckout(): string {
-  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'person-')), 'final-factory-agents');
+  const dir = path.join(tmpDir('person-'), 'final-factory-agents');
   fs.mkdirSync(path.join(dir, '.claude-plugin'), { recursive: true });
   fs.writeFileSync(path.join(dir, '.claude-plugin', 'marketplace.json'), JSON.stringify(marketplaceJson(LATEST)));
   return dir;
@@ -310,7 +311,7 @@ test('w5776 follow-up: a backup that is a link (a junction on Windows) is remove
   // w5787's review measured this on beast; the test holds the line on NTFS, APFS and ext4 (Node's rmSync went native in 23).
   const m = machine({ existing: true, plantedOnly: true, branch: 'leg' });
   fs.writeFileSync(path.join(m.co, '.git', 'PLANTED'), '');
-  const target = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-tools-target-'));
+  const target = tmpDir('agent-tools-target-');
   fs.writeFileSync(path.join(target, 'precious.txt'), 'x');
   fs.symlinkSync(target, checkoutBackup(m.root), process.platform === 'win32' ? 'junction' : 'dir');
   for (let i = 0; i < REPAIR_AFTER; i++) assert.equal(await m.run(), EXIT.ok);

@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp } from '../machine/unityMcp.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
@@ -15,12 +14,13 @@ import { Identity } from './identity.ts';
 import type { Config } from './config.ts';
 import type { MachineSandbox, SessionInfo } from '../shared/types.ts';
 import { useFakeVault } from './testVault.ts';
+import { tmpDir } from './testTmp.ts';
 
 // Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
 useFakeVault();
 
 // Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
-process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
+process.env.FF_UNITY_SLOTS = tmpDir('ff-slots-');
 
 /**
  * The Unity MCP bridge for machine agents (docs/machines.md, "Unity MCP"): which server the daemon runs, each place's
@@ -28,9 +28,7 @@ process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'))
  */
 
 const tmpdir = (t: { after: (fn: () => void) => void }, name: string) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `ffsb-${name}-`));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 }));
-  return dir;
+  return tmpDir(`ffsb-${name}-`, t);
 };
 
 const UVX = { command: 'C:\\Users\\u\\.local\\bin\\uvx.exe', args: ['--offline', '--from', 'mcpforunityserver==10.0.0', 'mcp-for-unity'] };
@@ -155,7 +153,7 @@ test('machine unity mcp: the daemon gives an agent that asks for it the bridge o
 });
 
 test('machine unity mcp: the portal asks for it for sandbox agents on a machine; no worker runs in its main clone (w536)', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-mcpportal-'));
+  const dir = tmpDir('ffsb-mcpportal-');
   const cfg = {
     dataDir: dir,
     sandboxRoot: dir,

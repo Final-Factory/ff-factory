@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { checkoutScript, findPrEvidence, refreshTrustedCheckout, resolveTrusted, trustedAgentsCheckout, trustedEvidenceRun, trustedPathValue } from '../machine/evidenceGate.ts';
 import { makeGhEvidence } from './guard.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * w5542 (w5451 item 4): the guard's Evidence check runs in the agent host, above the worker fence, and picked the newest
@@ -32,8 +32,8 @@ const plugin = (dir: string, version: string, script: string) => {
   put(path.join(dir, 'skills', 'evidence-gate', 'pr_evidence.py'), script);
 };
 
-test('w5542: a planted 999 pr_evidence.py in the plugin cache, the tools checkout or FF_SKILLS is never run; the trusted copy is', { skip: !hasPython && `no ${PY}` }, async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w5542-root-'));
+test('w5542: a planted 999 pr_evidence.py in the plugin cache, the tools checkout or FF_SKILLS is never run; the trusted copy is', { skip: !hasPython && `no ${PY}` }, async (t) => {
+  const root = tmpDir('w5542-root-', t);
   const marks = path.join(root, 'tmp', 'marks');
   fs.mkdirSync(marks, { recursive: true });
   const appDir = path.join(root, 'daemon');
@@ -69,8 +69,8 @@ test('w5542: a planted 999 pr_evidence.py in the plugin cache, the tools checkou
   assert.doesNotMatch(lines.join('\n'), new RegExp(path.join(root, 'unity-slots').replace(/[\\.]/g, '\\$&')), 'not the planted python');
 });
 
-test('w5542: with no trusted copy the merge is refused, even when planted copies are there', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w5542-none-'));
+test('w5542: with no trusted copy the merge is refused, even when planted copies are there', async (t) => {
+  const root = tmpDir('w5542-none-', t);
   plugin(path.join(root, 'tools', 'final-factory-agents', 'plugins', 'ff-agents'), '999.0.0', 'print("PASS")');
   let ran = 0;
   const ev = makeGhEvidence({ prUrl: () => 'https://github.com/Final-Factory/FinalFactory/pull/1', appDir: path.join(root, 'daemon'), refresh: () => 'git clone: network unreachable', run: () => (ran++, { status: 0, stdout: 'PASS', stderr: '' }), log: () => undefined });
@@ -80,8 +80,8 @@ test('w5542: with no trusted copy the merge is refused, even when planted copies
   assert.equal(await makeGhEvidence({ prUrl: () => 'https://github.com/Final-Factory/ff-factory/pull/2', appDir: root, refresh: () => { throw new Error('not asked'); } })('2', undefined, root, {}), undefined);
 });
 
-test('w5542: a stale trusted copy is fetched again once and run again; a real FAIL still refuses', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w5542-stale-'));
+test('w5542: a stale trusted copy is fetched again once and run again; a real FAIL still refuses', async (t) => {
+  const root = tmpDir('w5542-stale-', t);
   const appDir = path.join(root, 'daemon');
   put(checkoutScript(trustedAgentsCheckout(appDir)), '');
   const STALE = 'evidence-gate: FAIL\n- this pr_evidence.py is ff-agents 1.37.22, but 1.37.23 is released: update it\n';
@@ -133,8 +133,8 @@ test('w5542: the run has no PYTHON* setting, -s, the checkout as cwd, and the sa
   assert.match('error' in bad ? bad.error : '', /workers can write/);
 });
 
-test('w5542: the trusted checkout is cloned aside and renamed into place, fetched when old or forced, kept when a fetch fails', async () => {
-  const app = fs.mkdtempSync(path.join(os.tmpdir(), 'w5542-co-'));
+test('w5542: the trusted checkout is cloned aside and renamed into place, fetched when old or forced, kept when a fetch fails', async (tc) => {
+  const app = tmpDir('w5542-co-', tc);
   const co = trustedAgentsCheckout(app);
   const calls: string[][] = [];
   let fetchWorks = true;

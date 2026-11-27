@@ -20,7 +20,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { sharedLockParents, sharedLockRel } from './sharedLockPaths.ts';
-import { isLink as isLinkFs, removeLink } from '../server/fsLink.ts';
+import { hasTrickName, isLink as isLinkFs, removeLink } from '../server/fsLink.ts';
 import { execFileOffThread } from '../server/spawnThread.ts';
 import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN, STEAM_CHILD, STEAM_SECRET_FILES, TOOLS_MEDIUM_CHILD } from '../server/claudeHome.ts';
 
@@ -446,9 +446,18 @@ export const isExplicitLow = (icaclsOut: string) => /Mandatory Label\\Low Mandat
 export const isExplicitMedium = (icaclsOut: string) => /Mandatory Label\\Medium Mandatory Level:(?!\(I\))/i.test(icaclsOut);
 
 /**
+ * Review w6380: the WARNING for a path labelLow leaves alone because a name in it ends in a dot or a space (fsLink.ts
+ * isTrickName): Windows would open the path without it, perhaps a junction beside it. Quoted, so a trailing space shows.
+ * Exported for tests.
+ */
+export const trickWarning = (p: string) =>
+  `worker integrity: WARNING: ${JSON.stringify(p)} has a name ending in a dot or a space, or a device name such as NUL, skipped: not labelled, since icacls would open another path (perhaps a junction beside it) or fail on it (w6380, w6452)`;
+
+/**
  * Labels each target Low unless it is already, and says what it did. icacls' label on a folder with (OI)(CI) reaches
  * the files already in it (measured, w5333). Never throws: a target it cannot label is reported, and the caller runs its
- * agents unfenced when any failed.
+ * agents unfenced when any failed. A target with a name ending in a dot or a space is skipped with a WARNING, not a
+ * failure (review w6380), as a link is.
  *
  * Setting a mandatory label needs WRITE_OWNER on the path. An owner has only READ_CONTROL and WRITE_DAC by right, so where
  * the account's write comes from a group ACE (BEAST's F:\ffw inherits Authenticated Users:(M) from the drive, and the
@@ -479,8 +488,10 @@ export async function labelLow(t: LowTargets, exec: Exec, say: (line: string) =>
       // Imported here: transcriptLabels.ts imports this file.
       const { icaclsOf, labelTree } = await import('../server/transcriptLabels.ts');
       const found: string[] = [];
+      const odd: string[] = [];
       const low = label === LOW_LABEL;
-      const links = await labelTree(p, low ? 'low' : 'medium', icaclsOf(exec), account, found);
+      const links = await labelTree(p, low ? 'low' : 'medium', icaclsOf(exec), account, found, odd);
+      for (const o of odd) say(trickWarning(o));
       if (!links) return;
       if (low) {
         say(`worker integrity: WARNING: ${p} holds ${links} link${links === 1 ? '' : 's'} (a junction or symlink), skipped: not followed, not labelled (w5615)`);
@@ -509,7 +520,15 @@ export async function labelLow(t: LowTargets, exec: Exec, say: (line: string) =>
   // Medium with its parent.
   const own = (p: string) => (t.medium ?? []).some((m) => same(path.dirname(p), m));
   const failed: string[] = [];
+  const tricked = new Set<string>();
   const one = async (p: string, label: string) => {
+    if (hasTrickName(p)) {
+      // Review w6380: not a failure either, or a worker could turn the fence off by planting such a name. Said once, though
+      // a child of a folder kept Medium comes here twice.
+      if (!tricked.has(p)) say(trickWarning(p));
+      tricked.add(p);
+      return;
+    }
     if (linkedOnTheWay(p)) {
       // Not a failure: a worker could otherwise turn the fence off by planting a link. Its own folder is not labelled.
       say(`worker integrity: WARNING: ${p} is (or lies below) a junction or symlink now, not labelled: icacls would label where it leads (w6377)`);
@@ -554,6 +573,7 @@ export async function labelLow(t: LowTargets, exec: Exec, say: (line: string) =>
       }
       try {
         if (!fs.existsSync(g)) continue;
+        if (hasTrickName(g)) throw new Error('its name, or a name on the way to it, ends in a dot or a space or is a device name such as NUL, so icacls would open another path or fail on it (w6380, w6452)');
         if (isLink(g) || linkedOnTheWay(path.dirname(g))) throw new Error('it is (or lies below) a junction or symlink now');
         const now = await exec('icacls', [g], { timeoutMs: 60_000 });
         if (now.code === 0 && isExplicitMedium(now.stdout)) continue;
@@ -573,6 +593,7 @@ export async function labelLow(t: LowTargets, exec: Exec, say: (line: string) =>
   for (const p of t.medium ?? []) {
     try {
       if (!fs.existsSync(p) || open.some((o) => inside(p, o))) continue;
+      if (hasTrickName(p)) throw new Error('its name, or a name on the way to it, ends in a dot or a space or is a device name such as NUL, so icacls would open another path or fail on it (w6380, w6452)');
       if (linkedOnTheWay(p)) throw new Error('it is (or lies below) a junction or symlink now (w6377)');
       const now = await exec('icacls', [p], { timeoutMs: 60_000 });
       // w5615: a shared-lock folder until it carries Medium of its own (its parent's Medium reaches it inherited, not its files).
