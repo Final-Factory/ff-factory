@@ -149,7 +149,7 @@ test('w5630 (w5712 review): after a daemon restart, a running fenced editor\'s b
   // fenceSetup adds it on macOS before its early return, so with every switch off (or a fence that failed) too.
   const src = fs.readFileSync(new URL('../machine/daemon.ts', import.meta.url), 'utf8');
   const setup = src.slice(src.indexOf('private async fenceSetup()'), src.indexOf('private editorFence()'));
-  const add = setup.indexOf("if (process.platform === 'darwin' && this.cfg.root) addMcpStatusDir(macEditorStatusDir(this.cfg.root));");
+  const add = setup.indexOf("if (process.platform !== 'win32' && this.cfg.root) addMcpStatusDir(macEditorStatusDir(this.cfg.root));");
   assert.ok(add > 0 && add < setup.indexOf("if (this.fence.state.state !== 'setting_up') return;"), 'read from the daemon\'s start, before the gate can return');
   fs.rmSync(tmp, { recursive: true, force: true });
 });
