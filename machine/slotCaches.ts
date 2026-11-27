@@ -470,7 +470,7 @@ export class SlotCaches {
         this.now() - (readMarker(dir)?.made ?? 0) > (this.d.refreshMs ?? REFRESH_MS);
       if (!due) return undefined;
       const any = this.seeds().some((t) => fs.existsSync(path.join(dir, t.dir)));
-      return await this.attempt(sandbox, any);
+      return await this.attempt(sandbox, any, until);
     } finally {
       this.busy = false;
     }
@@ -514,9 +514,9 @@ export class SlotCaches {
    * make, and a sandbox whose make throws before its per-cache step (a junction at its folder, a mkdir or marker write that
    * fails) waits RETRY_MS too, so it is not picked first at every tick, logging each time, while the others wait (w6292).
    */
-  private async attempt(sandbox: string, refresh: boolean): Promise<string> {
+  private async attempt(sandbox: string, refresh: boolean, until?: number): Promise<string> {
     try {
-      return await this.make(sandbox, refresh);
+      return await this.make(sandbox, refresh, until);
     } catch (e) {
       this.retryAt.set(sandbox, this.now() + RETRY_MS);
       const l = `slot caches: ${sandbox}: ${(e as Error).message}; tried again in ${RETRY_MS / 60_000} min (w6284)`;
@@ -527,9 +527,10 @@ export class SlotCaches {
 
   /**
    * Make a sandbox's clones (again). `refresh`: the sandbox is idle and had clones: merge what is new back into the seed
-   * first, then replace each clone. A tool whose seed is missing gets an empty folder.
+   * first, then replace each clone. A tool whose seed is missing gets an empty folder. `until` (ensure, w6393): when the
+   * light folder's create answered and its worker may run; past it a cache folder that is there is never replaced.
    */
-  async make(sandbox: string, refresh: boolean): Promise<string> {
+  async make(sandbox: string, refresh: boolean, until?: number): Promise<string> {
     const dir = slotCacheDir(this.d.root, sandbox);
     fs.mkdirSync(dir, { recursive: true });
     // w6212 B2: cache/slots is worker-writable; the daemon writes and deletes only in a plain folder where it should be.
@@ -543,6 +544,8 @@ export class SlotCaches {
     const tools: string[] = [];
     /** The caches this pass cloned (w6284: a completed half-made clone says which it made, and which it kept). */
     const madeNow: string[] = [];
+    /** Caches whose copy was dropped, the folder there kept (review w6394). */
+    const left: string[] = [];
     const failed: string[] = [];
     for (const t of this.seeds()) {
       const own = path.join(dir, t.dir);
@@ -585,6 +588,14 @@ export class SlotCaches {
           await this.d.copy(seed, fresh, { links: "keep" });
         }
         else fs.mkdirSync(fresh, { recursive: true });
+        // Review w6394: a folder that is there now and was not to be replaced (a first clone: a worker made it while this
+        // copied), or that a worker may be writing in (ensure's create answered), is kept: the copy goes, never the folder.
+        if (fs.existsSync(own) && (!refresh || (until !== undefined && this.now() > until))) {
+          await this.d.removeTree(fresh);
+          left.push(t.dir);
+          tools.push(t.dir);
+          continue;
+        }
         if (fs.existsSync(own)) fs.renameSync(own, gone);
         fs.renameSync(fresh, own);
         if (fs.existsSync(gone)) await this.d.removeTree(gone);
@@ -617,7 +628,7 @@ export class SlotCaches {
     const what = completing
       ? `completed from the shared seed in ${secs} s: made ${madeNow.join(", ") || "none"}${kept.length ? `; already there: ${kept.join(", ")}` : ""} (${tools.length} of ${this.seeds().length} caches now, w6284)`
       : `${refresh ? "made again" : "made"} from the shared seed in ${secs} s (${tools.join(", ")})`;
-    const line = `slot caches: ${sandbox}: ${what}${refresh ? `, ${merged} new entr${merged === 1 ? "y" : "ies"} merged back first` : ""}${failed.length ? `; failed: ${failed.join("; ")}; the missing ones are tried again in ${RETRY_MS / 60_000} min (w6284)` : ""} (w5615)`;
+    const line = `slot caches: ${sandbox}: ${what}${refresh ? `, ${merged} new entr${merged === 1 ? "y" : "ies"} merged back first` : ""}${left.length ? `; kept the folder a worker may be using, not replaced: ${left.join(", ")} (review w6394)` : ""}${failed.length ? `; failed: ${failed.join("; ")}; the missing ones are tried again in ${RETRY_MS / 60_000} min (w6284)` : ""} (w5615)`;
     this.d.log(line);
     return line;
   }

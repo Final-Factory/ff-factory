@@ -1213,3 +1213,34 @@ test("ensure (w6393): an old clone (a deleted folder's id made again) is made ag
   assert.match(a!, /slot1: made/);
   assert.match(b!, /agent6: made/);
 });
+
+test("review w6394: a folder a worker made while a first clone copied is kept, the copy dropped", async (t) => {
+  const box: { root?: string } = {};
+  const copy: typeof copyTree = async (src, dst) => {
+    if (path.basename(dst) === ".ff-new-uv") put(path.join(slotCacheDir(box.root!, "agent5"), "uv", "mine"), "worker");
+    return copyTree(src, dst);
+  };
+  const p = pool(t, [], { copy });
+  box.root = p.root;
+  const line = await p.caches.ensure("agent5");
+  const uv = path.join(slotCacheDir(p.root, "agent5"), "uv");
+  assert.equal(fs.readFileSync(path.join(uv, "mine"), "utf8"), "worker");
+  assert.equal(fs.existsSync(path.join(uv, "archive-v0")), false, "the seed's copy did not go in over it");
+  assert.match(line!, /kept the folder a worker may be using, not replaced: uv \(review w6394\)/);
+  assert.ok(!fs.readdirSync(path.dirname(uv)).some((n) => /^.ff-(new|old)-/.test(n)), "no .ff-new- or .ff-old- left");
+});
+
+test("review w6394: ensure past its deadline (the create answered) replaces no folder that is there", async (t) => {
+  const box: { clock?: { t: number } } = {};
+  const copy: typeof copyTree = async (src, dst) => {
+    box.clock!.t += 60_000; // the copy outlasts the wait
+    return copyTree(src, dst);
+  };
+  const p = pool(t, [], { copy });
+  box.clock = p.clock;
+  const uv = path.join(slotCacheDir(p.root, "agent6"), "uv");
+  put(path.join(uv, "cold"), "cold");
+  const line = await p.caches.ensure("agent6", 30_000);
+  assert.equal(fs.readFileSync(path.join(uv, "cold"), "utf8"), "cold");
+  assert.match(line!, /not replaced: [^(]*uv/);
+});

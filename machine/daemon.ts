@@ -3923,11 +3923,12 @@ export class Daemon {
    * w6393: a light folder's cache clones, made before the portal starts its worker (which it does as soon as the create
    * answers): a clone made at a later tick would find the worker's cold cache in the slot folder and keep it. Waited for up
    * to LIGHT_CLONE_WAIT_MS; past that, or on a failure, the folder is answered made all the same and the tick goes on.
+   * ensure stops replacing folders 5 s before that answer (review w6394): a clone still copying then keeps what is there.
    */
   private async lightClones(id: string, text: string): Promise<string> {
     const sc = this.slotCaches;
     if (!sc) return text;
-    const line = await within(this.sharedWrite(() => sc.ensure(id, LIGHT_CLONE_WAIT_MS), this.cacheSeeds()), LIGHT_CLONE_WAIT_MS, `the slot caches of ${id}`).catch((e: Error) => {
+    const line = await within(this.sharedWrite(() => sc.ensure(id, LIGHT_CLONE_WAIT_MS - 5_000), this.cacheSeeds()), LIGHT_CLONE_WAIT_MS, `the slot caches of ${id}`).catch((e: Error) => {
       const l = `slot caches: ${id}: ${e.message} (w6393)`;
       log(l);
       return l;
