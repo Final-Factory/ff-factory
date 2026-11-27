@@ -147,6 +147,85 @@ A batch Unity that a worker runs (`unity-slot run`) is the worker's, and is capp
 The residual risk is what a worker can make its editor do through the Unity MCP bridge (`execute_code`, for example). That
 stays a known gap.
 
+## Checking the caps are live, from inside a worker (w6438)
+
+Measured in w5638's checks on 2026-11-25 and re-read against `machine/workerCaps.ts` and `machine/winJob.cs` on 2026-11-27.
+What a check can show depends on the mode: **in warn nothing is limited**, so the limits below read as "none" (Windows flags
+`0x0`, Linux `max`) and only enforce shows the numbers. The mode is in the host's first line, `worker caps: mode <mode>`.
+
+**On every OS the proof line is in `host.log`, and a worker cannot read `host.log`.** The `worker caps: ...` lines (see below)
+need the orchestrator's ops worker, over ssh. What a worker can do is read its own limits, as follows.
+
+| OS | `host.log` line that proves it (ops worker) |
+| --- | --- |
+| Windows | `worker caps: in a job of <GB> GB and 2048 processes` (enforce), or `in a job with no limits (warn-only); measuring against ...` |
+| Linux | `worker caps: in scope ffw-agent-<id>.scope` (with `(no limits: warn-only)` in warn) |
+| macOS | `worker caps: watching the tree (<GB> GB, 2048 processes)` (with `, warn-only` in warn) |
+
+The numbers (`capsFor`, `CAP_LIMITS`): memory is 0.8 x the machine's RAM (never under 8 GiB), processes 2048 (Linux: tasks
+16384), temp folder 60 GB.
+
+### Windows
+
+`Get-Process ffjob*` from inside a worker finds nothing even when the caps work. Workers run at Low integrity, so they cannot
+see the higher-privilege job helper, nor their own agent host. Counting helpers against hosts needs normal privilege: the
+ops worker over ssh. The check that works from inside is to ask the worker's own job object, with `QueryInformationJobObject`
+on a null handle (the calling process's own job). Run it from **PowerShell** (the answer measured; a query from Git Bash once saw another job, w5554, fixed by #1223 setting no breakaway flag):
+
+```powershell
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class JobQ {
+  [StructLayout(LayoutKind.Sequential)] public struct Basic { public long PerProcessUserTimeLimit, PerJobUserTimeLimit; public uint LimitFlags; public UIntPtr MinWs, MaxWs; public uint ActiveProcessLimit; public UIntPtr Affinity; public uint PriorityClass, SchedulingClass; }
+  [StructLayout(LayoutKind.Sequential)] public struct Io { public ulong a,b,c,d,e,f; }
+  [StructLayout(LayoutKind.Sequential)] public struct Ext { public Basic B; public Io I; public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcess, PeakJob; }
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int cls, out Ext info, int len, IntPtr ret);
+  public static string Run() {
+    Ext e;
+    if (!QueryInformationJobObject(IntPtr.Zero, 9, out e, Marshal.SizeOf(typeof(Ext)), IntPtr.Zero)) return "no job or refused, error " + Marshal.GetLastWin32Error();
+    return string.Format("LimitFlags=0x{0:X} ActiveProcessLimit={1} JobMemoryLimitGB={2:F1}", e.B.LimitFlags, e.B.ActiveProcessLimit, e.JobMemoryLimit.ToUInt64()/1e9);
+  }
+}
+'@
+[JobQ]::Run()
+```
+
+Expected in **enforce**: `LimitFlags=0x208` (0x200 job memory limit + 0x8 active-process limit; no 0x800 breakaway-OK),
+`ActiveProcessLimit=2048`, and `JobMemoryLimitGB` of 0.8 x RAM (51.1 on a 63.9 GB machine). Expected in **warn**:
+`LimitFlags=0x0`, `ActiveProcessLimit=0`, `JobMemoryLimitGB=0.0`: the job exists and holds the worker, with nothing limited
+(measured on LothDesktop, 2026-11-27, in warn, 68.6 GB RAM). An error instead (`no job`) means the worker is in no job.
+
+### Linux
+
+Read the caps of the worker's own scope. Follow `/proc/self/cgroup` to `/sys/fs/cgroup/...`:
+
+```sh
+cg=/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)
+echo "$cg"; cat "$cg/memory.max" "$cg/pids.max" "$cg/cgroup.controllers"
+```
+
+The caps sit on the `ffw-agent-<id>.scope`: `memory.max` is 0.8 x RAM in bytes and `pids.max` is 16384 in enforce. In warn both
+read `max`. **`max` on the parent cgroups (the `user@<uid>.service`, `app.slice`) is expected**: the limit is on the scope, not
+above it. The cgroup the worker reads must end in `ffw-agent-<id>.scope`; any other name is not the host's scope. The controllers
+must be delegated for the limits to bind: `cgroup.controllers` of the scope (and of its parent) must list `memory` and `pids`.
+`memory.events` (`oom_kill`) and `pids.events` (`max`) count the kernel's refusals.
+
+### macOS
+
+There is no kernel limit, by design: the host watches the worker's process tree (`ps`) and ends it past a cap. From inside a
+worker only indirect evidence is possible: `ulimit -a` shows unlimited, and the worker fence refuses `ps` (so the worker cannot
+see the tree the host sees). The proof is the `host.log` line `worker caps: watching the tree (...)`, which the ops worker reads
+over ssh.
+
+### The temp-folder cap
+
+The code has no read-only check of the temp cap that a worker can run. The host measures the worker's temp folder
+(`measureTemp`, hard links counted once) and reports at 60 GB; in enforce it ends the tools, in warn it only reports. The worker
+sees a cap only by the note on its next tool result (`capNote`, "temp-folder cap (60 GB ..."), and the ops worker sees it in
+`host.log` (`worker caps: ... temp-folder cap`, and the closing `worker caps: peaks (mode ...)` line, which has `GB temp (cap 60.0 GB)`). To
+look at the same number from inside, `du -sh "$TMPDIR"` (not hard-link aware, so it can read higher).
+
 ## Known gaps
 
 The caps stop a runaway: a fork loop, a memory leak, or a clone that keeps growing. A hijacked worker that sets out to escape
