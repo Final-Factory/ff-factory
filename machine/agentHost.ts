@@ -976,7 +976,7 @@ export class HostedSession implements SessionHandle {
     }
     if (had === now) return;
     const mode = this.deps.restageMode?.() ?? 'warn';
-    const why = "its agent host started on another shared-lock environment (daemon.json sharedLock) than this daemon's (w6287)";
+    const why = "its agent host started on another shared-lock environment (a sharedLock switch, or a slot cache clone made since) than this daemon's (w6287)";
     this.restaged = mode === 'on' ? now : 'warned';
     if (mode !== 'on') {
       this.deps.log(`agent host ${this.info.id}: ${why}; hostRestage warn: it keeps the old cache paths and FF_PLAYER_BROKER until its next host start`);

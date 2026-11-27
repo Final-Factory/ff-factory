@@ -42,7 +42,6 @@ export const SHARED_LOCK_DELAY_NOTE =
   "Agents already running there keep the old shared-lock mode (their cache paths and FF_PLAYER_BROKER) until their next agent host start (a stop, the idle reap after an hour, a code update): sessions started after the switch get the new mode at once. The daemon logs each such agent (hostRestage warn, w6287; docs/worker-root.md \"After a sharedLock switch\")."
 
 /** Its one, fixed session id. Never a pool, never a configurable kind (lothsahn, 2026-10-07: "it's hardcoded"). */
-
 export const OPS_ID = 'ops-worker';
 export const OPS_TITLE = 'Orchestration worker (portal VM)';
 /** The people whose own orchestrators may use it, by login (user id). Nobody else, the dispatcher included. */
