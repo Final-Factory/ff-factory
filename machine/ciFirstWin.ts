@@ -116,6 +116,8 @@ export interface WinCiFirstResult {
   above: number;
   /** w6217: of `above`, agents' tools whose tree lost its link to the host (lowered with the rest when enforcing). */
   orphans?: number;
+  /** w6596: of `above`, game players (finalfactory.exe) and what they started: step 2 keeps them out of the tools. */
+  players?: number;
   /** Processes this tick lowered, and raised back. */
   lowered?: number;
   raised?: number;
@@ -260,6 +262,13 @@ const isRunnerShell = (p: WinProc, runnerRoots: string[]) => {
   );
 };
 const imageOf = (p: WinProc | undefined) => p?.name || (p?.cmd ?? '?').trim().replace(/^"/, '').split(/["\s]/)[0].split(/[\\/]/).pop() || '?';
+/**
+ * w6596: a Final Factory game player, by its image (finalfactory.exe; FinalFactory, FinalFactory.app's binary, on a Mac),
+ * never a command that only names it. At Idle beside a CI job its main loop starves and its HangWatchdog reports HANG
+ * (LothDesktop, 2026-11-26 20:26-20:39Z, a broker pair's host). Step 1 (warn) only names the players it lowers; step 2
+ * keeps them and what they start out of the tools, as Unity editors are.
+ */
+export const isGamePlayer = (p: WinProc | undefined) => !!p && /^finalfactory(\.exe)?$/i.test(imageOf(p));
 /** A process listing can be this old when it is answered (machine/sandboxes.ts realPoolDeps caches it for 5 s). */
 export const LIST_MAX_AGE_MS = 5_000;
 /** A raise that fails is tried again this many ticks, then dropped from the record with a line in the log. */
@@ -291,6 +300,8 @@ export class WinCiFirst {
   private envSkip = 0;
   /** w6217: orphaned tools already named in the log, by pid@start. */
   private orphansSaid = new Set<string>();
+  /** w6596: the game players (pid@start) already named in the log, so each is named once. */
+  private playersSaid = new Set<string>();
 
   constructor(d: WinCiFirstDeps) {
     this.d = d;
@@ -674,6 +685,20 @@ export class WinCiFirst {
       return p !== undefined && p < s.priority;
     });
     for (const [pid, host] of orphaned) tools.set(pid, host);
+    // w6596: a tool that is a game player or runs below one (step 1 names them; they are still lowered with the rest)
+    const playerOf = (pid: number): number | undefined => {
+      const seen = new Set<number>();
+      for (let x: number | undefined = pid; x !== undefined && procOf.has(x) && !seen.has(x); x = procOf.get(x)!.ppid) {
+        seen.add(x);
+        if (isGamePlayer(procOf.get(x))) return x;
+      }
+      return undefined;
+    };
+    const playerTools = [...tools.keys()].filter((pid) => {
+      if (playerOf(pid) === undefined) return false;
+      const p = this.d.priorityOf(pid);
+      return p !== undefined && p < s.priority;
+    });
     let above = 0;
     const loweredNow: { k: string; pid: number; prev: number }[] = [];
     let lowerFailed = 0;
@@ -752,7 +777,21 @@ export class WinCiFirst {
         `ci first: ${newly.length} more of the agents' tools' process(es) run above ${priorityName(s.priority)} beside the CI job(s) with the process that started them gone, found by their session's environment (w6217; ${orphanFind.roots} orphan tree(s) of ${orphanFind.members} process(es) looked at); ${what}: ${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}`,
       );
     }
-    const res: WinCiFirstResult = { jobs: census.workers.length, above, orphans: orphanAbove.length, lowered: loweredNow.length, raised };
+    const newPlayers = playerTools.filter((pid) => byPid.get(pid) && !this.playersSaid.has(keyOf(byPid.get(pid)!)));
+    for (const k of [...this.playersSaid]) if (!liveKeys.has(k)) this.playersSaid.delete(k);
+    for (const pid of newPlayers) this.playersSaid.add(keyOf(byPid.get(pid)!));
+    if (newPlayers.length) {
+      const lowSet = new Set(loweredNow.map((l) => l.pid));
+      const names = newPlayers.map((pid) => {
+        const pl = playerOf(pid)!;
+        return `${pid} ${imageOf(procOf.get(pid))}${pl !== pid ? ` (under player ${pl})` : ''} (${sessionOf.get(tools.get(pid)!) ?? '?'})${lowSet.has(pid) ? ' lowered' : ''}`;
+      });
+      const what = !enforcing ? 'enforcing would lower them (warn only)' : held ? "not lowered while a bench or a person's turn holds this machine" : 'lowered with the rest for now';
+      this.d.log(
+        `ci first: ${newPlayers.length} game player process(es) run above ${priorityName(s.priority)} beside the CI job(s) among the agents' tools; ${what}; step 2 of w6596 keeps game players at their own priority, as Unity editors are: ${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}`,
+      );
+    }
+    const res: WinCiFirstResult = { jobs: census.workers.length, above, orphans: orphanAbove.length, players: playerTools.length, lowered: loweredNow.length, raised };
     const jobFacts = [...jobPids].flatMap((p) => byPid.get(p) ?? []);
     const agentFacts = (root: number) => (trees.get(root) ?? []).flatMap((p) => byPid.get(p) ?? []);
     if (this.last && !changed && now > this.last.at) {

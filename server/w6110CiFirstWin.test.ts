@@ -10,6 +10,7 @@ import {
   WinCiFirst,
   agentTrees,
   cpuBetween,
+  isGamePlayer,
   loweredFile,
   priorityName,
   readLowered,
@@ -938,4 +939,58 @@ test('w6217: without an environment reader (not a real daemon) no orphan is look
   const res = await r.cf.tick();
   assert.equal(res?.orphans, 0);
   assert.ok(!r.lines.some((l) => /orphaned|started them gone/.test(l)));
+});
+
+// w6596: game players beside a CI job (step 1: named, still lowered; step 2 keeps them, as Unity editors are kept)
+test('w6596: isGamePlayer is the game player by its image or its command line, nothing that only names it', () => {
+  assert.equal(isGamePlayer({ pid: 1, ppid: 0, cmd: '', name: 'FinalFactory.exe' }), true);
+  assert.equal(isGamePlayer({ pid: 1, ppid: 0, cmd: String.raw`"V:\ffw\players\p3\FinalFactory.exe" -batchmode -ffPeer 0` }), true);
+  assert.equal(isGamePlayer({ pid: 1, ppid: 0, cmd: 'V:/ffw/players/p3/finalfactory.exe -logFile x' }), true);
+  assert.equal(isGamePlayer({ pid: 1, ppid: 0, cmd: '/Users/x/FinalFactory.app/Contents/MacOS/FinalFactory -ffPeer 1' }), true);
+  assert.equal(isGamePlayer({ pid: 1, ppid: 0, cmd: String.raw`python.exe scripts/nightly/player_slots.py launch --exe V:\p\FinalFactory.exe` }), false);
+  assert.equal(isGamePlayer({ pid: 1, ppid: 0, cmd: 'FinalFactoryCrashHandler.exe' }), false);
+  assert.equal(isGamePlayer(undefined), false);
+});
+
+const PLAYER_TREE: WinProc[] = [
+  ...BASE,
+  { pid: 24, ppid: 21, cmd: String.raw`"V:\ffw\players\p3\FinalFactory.exe" -batchmode -ffPeer 0` },
+  { pid: 25, ppid: 24, cmd: 'UnityCrashHandler64.exe --attach 24' },
+];
+
+test("w6596: enforce, step 1: a game player in an agent's tree and what it started are named once and still lowered with the tools", async () => {
+  const r = rig({ procs: PLAYER_TREE, prio: [[24, P.PRIORITY_NORMAL], [25, P.PRIORITY_NORMAL]], mode: 'enforce' });
+  const res = await r.cf.tick();
+  assert.equal(res?.players, 2);
+  assert.equal(r.prio.get(24), P.PRIORITY_BELOW_NORMAL, 'step 1 changes nothing that is done');
+  assert.equal(r.prio.get(25), P.PRIORITY_BELOW_NORMAL);
+  const line = r.lines.find((l) => /game player process\(es\)/.test(l))!;
+  assert.match(line, /^ci first: 2 game player process\(es\) run above BelowNormal/);
+  assert.match(line, /lowered with the rest for now; step 2 of w6596 keeps game players/);
+  assert.match(line, /24 FinalFactory\.exe \(.*\) lowered/);
+  assert.match(line, /25 UnityCrashHandler64\.exe \(under player 24\)/);
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL, 'the other tools go as before');
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.lines.filter((l) => /game player process\(es\)/.test(l)).length, 1, 'named once');
+});
+
+test('w6596: warn: a broker player (its starter gone, found by its session environment) is named as a game player, nothing lowered', async () => {
+  const procs: WinProc[] = [...ORPHANS, { pid: 90, ppid: 94, cmd: String.raw`V:\ffw\players\p1\FinalFactory.exe -ffAutomationStatusFile x.status.json` }];
+  const r = rig({ procs, env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT } }, root: ROOT, prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL]], mode: 'warn' });
+  const res = await r.cf.tick();
+  assert.equal(res?.players, 1);
+  assert.equal(res?.orphans, 3, 'the player is one of the orphans too');
+  assert.equal(r.prio.get(90), P.PRIORITY_NORMAL);
+  const line = r.lines.find((l) => /game player process\(es\)/.test(l))!;
+  assert.match(line, /^ci first: 1 game player process\(es\) run above BelowNormal .*enforcing would lower them \(warn only\)/);
+  assert.match(line, /90 FinalFactory\.exe \(/);
+  assert.doesNotMatch(line, / lowered/);
+});
+
+test('w6596: no game player, no line and no count', async () => {
+  const r = rig({ mode: 'enforce' });
+  const res = await r.cf.tick();
+  assert.equal(res?.players, 0);
+  assert.equal(r.lines.filter((l) => /game player/.test(l)).length, 0);
 });
