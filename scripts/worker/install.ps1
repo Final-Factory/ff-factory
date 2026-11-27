@@ -66,6 +66,10 @@
   default) logs and refuses so the caller starts it as before, on starts it, off refuses; warn or off is the way back.
   Left out: the install keeps what it has.
   only logs it (the recovery). Left out: the install keeps what it has.
+.PARAMETER LiveRunGuard
+  With -Update (w6378): set daemon.json's liveRunGuard, as ops_worker machine_update live_run_guard does: warn (the
+  default) logs a WARNING when a sandbox trim, release or delete would hit a sandbox where a run of its worker still
+  lives; off looks at nothing (the way back). Left out: the install keeps what it has.
 .PARAMETER DaemonTmpdir
   With -Update (w6000, docs/worker-root.md): set the daemon's own temp folder in daemon.json (daemonTmpdir), as ops_worker
   machine_update daemon_tmpdir does: on (the default) points the daemon's TEMP and TMP at <root>\tmp-daemon, off keeps the
@@ -148,6 +152,7 @@ param(
     [ValidateSet('off', 'warn', 'on')][string]$SharedLock,
     [ValidateSet('warn', 'on')][string]$HostRestage,
     [ValidateSet('off', 'warn', 'on')][string]$LongRuns,
+    [ValidateSet('off', 'warn')][string]$LiveRunGuard,
     [ValidateSet('warn', 'on')][string]$MediumAgentFolders,
     [ValidateSet('on', 'off')][string]$DaemonTmpdir,
     [ValidateSet('warn', 'on')][string]$ToolsDiskLock,
@@ -323,6 +328,7 @@ if ($Update) {
     if ($SharedLock) { $argv += @('--shared-lock', $SharedLock) }
     if ($HostRestage) { $argv += @('--host-restage', $HostRestage) }
     if ($LongRuns) { $argv += @('--long-runs', $LongRuns) }
+    if ($LiveRunGuard) { $argv += @('--live-run-guard', $LiveRunGuard) }
     if ($MediumAgentFolders) { $argv += @('--medium-agent-folders', $MediumAgentFolders) }
     if ($DaemonTmpdir) { $argv += @('--daemon-tmpdir', $DaemonTmpdir) }
     if ($ToolsDiskLock) { $argv += @('--tools-disk-lock', $ToolsDiskLock) }
