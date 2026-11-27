@@ -220,3 +220,40 @@ for (const known of ['scanned', 'listed at the start'] as const) {
     assert.ok(!fs.readFileSync(f, 'utf8').includes(v), 'the new file is scanned from its start');
   });
 }
+
+for (const how of ['made again at the same size', 'cut shorter in place'] as const) {
+  test(`w6494 review: a file ${how} under its name is scanned whole at the sweep`, async (t) => {
+    t.after(reset);
+    reset();
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-cliroot-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const v = fake(30);
+    addSecretValues([v]);
+    const extra = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-cliextra-'));
+    t.after(() => fs.rmSync(extra, { recursive: true, force: true }));
+    const f = path.join(extra, 'tasks', 'a.txt');
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    const old = JSON.stringify({ pad: 'x'.repeat(2_000) }) + '\n';
+    fs.writeFileSync(f, old);
+    const s = new CliScrubber({ root, extraRoots: () => [extra], log: () => undefined, sweepMs: 3_600_000 });
+    t.after(() => s.stop());
+    s.start({});
+    await s.sweep();
+    const read = (s as unknown as { read: Map<string, number> }).read;
+    assert.equal(read.get(f), Buffer.byteLength(old), 'the old file is known');
+    let made: string;
+    if (how === 'made again at the same size') {
+      fs.rmSync(f);
+      await s.pass('watch');
+      const head = JSON.stringify({ stdout: `now ${v}`, pad: '' });
+      made = JSON.stringify({ stdout: `now ${v}`, pad: 'y'.repeat(Buffer.byteLength(old) - Buffer.byteLength(head) - 1) }) + '\n';
+      assert.equal(Buffer.byteLength(made), Buffer.byteLength(old));
+    } else {
+      // the same file (its identity kept), cut and written again shorter: a scan from the old size would read nothing
+      made = JSON.stringify({ stdout: `now ${v}`, pad: 'y'.repeat(500) }) + '\n';
+    }
+    fs.writeFileSync(f, made);
+    await s.sweep();
+    assert.ok(!fs.readFileSync(f, 'utf8').includes(v), 'the file is scanned from its start');
+  });
+}

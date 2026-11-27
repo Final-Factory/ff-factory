@@ -94,7 +94,7 @@ function textFiles(root: string, ids?: Map<string, string>): Map<string, number>
  * The same, by the thread pool (w6479): the 2-minute sweep's walk (beast's 2,000 transcript files, lstat and readdir) ran
  * on the daemon's loop. One folder's entries at a time, so the loop only takes each answer.
  */
-async function textFilesAsync(root: string): Promise<Map<string, number>> {
+async function textFilesAsync(root: string, ids?: Map<string, string>): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   const walk = async (p: string): Promise<void> => {
     let st: fs.Stats;
@@ -112,7 +112,10 @@ async function textFilesAsync(root: string): Promise<Map<string, number>> {
         return;
       }
       for (const n of names) await walk(path.join(p, n));
-    } else if (st.isFile() && TEXT.test(p)) out.set(p, st.size);
+    } else if (st.isFile() && TEXT.test(p)) {
+      out.set(p, st.size);
+      ids?.set(p, fileId(st));
+    }
   };
   await walk(root);
   return out;
@@ -244,9 +247,9 @@ export class CliScrubber {
   }
 
   /** The same by the thread pool (w6479), for the sweep and the back-scan, which run while the daemon serves. */
-  private async filesAsync(): Promise<Map<string, number>> {
-    const out = await textFilesAsync(this.o.root);
-    for (const r of this.o.extraRoots?.() ?? []) for (const [f, size] of await textFilesAsync(r)) out.set(f, size);
+  private async filesAsync(ids?: Map<string, string>): Promise<Map<string, number>> {
+    const out = await textFilesAsync(this.o.root, ids);
+    for (const r of this.o.extraRoots?.() ?? []) for (const [f, size] of await textFilesAsync(r, ids)) out.set(f, size);
     return out;
   }
 
@@ -258,8 +261,13 @@ export class CliScrubber {
    */
   async sweep(): Promise<void> {
     this.watch();
-    const now = await this.filesAsync();
-    for (const [f, size] of now) if ((this.read.get(f) ?? -1) !== size) this.dirty.add(f);
+    // w6494: a file made again under its name at the same size is a new file too (its identity differs), scanned whole
+    const nowIds = new Map<string, string>();
+    const now = await this.filesAsync(nowIds);
+    for (const [f, size] of now) {
+      const was = this.ids.get(f);
+      if ((this.read.get(f) ?? -1) !== size || (was !== undefined && nowIds.get(f) !== was)) this.dirty.add(f);
+    }
     for (const f of [...this.read.keys()]) {
       if (now.has(f)) continue;
       try {
