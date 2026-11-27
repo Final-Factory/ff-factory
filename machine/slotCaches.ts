@@ -6,6 +6,7 @@
  * one worker could plant a wheel, an npm tarball or a NuGet package every other worker then ran. Now each sandbox gets its
  * own copy-on-write clone, `<root>/cache/slots/<sandbox>/<tool>`, made from the shared seed `<root>/cache/<tool>`:
  * - made when the daemon sees a sandbox without one (a new sandbox, or the first run after this ships), in the background;
+ *   counted cache by cache, so a cache whose clone failed is made at a later tick (w6284);
  * - a block clone where the disk has one (APFS clonefile, a reflink on Btrfs or XFS, the Windows copy engine on a ReFS Dev
  *   Drive), a full copy elsewhere (server/proc.ts copyTree);
  * - refreshed once a day while the sandbox is idle: what is new in the clone goes back into the seed first (mergeBack), then
@@ -143,6 +144,30 @@ export function readMarker(dir: string): SlotMarker | undefined {
   }
 }
 
+/** The cloned caches on this OS. */
+export const slotCacheTools = (
+  platform: NodeJS.Platform = process.platform,
+): SlotCacheTool[] =>
+  SLOT_CACHE_TOOLS.filter((t) => !t.platforms || t.platforms.includes(platform));
+
+/**
+ * The caches a sandbox's clone still lacks, by folder: each one its marker does not list or whose folder is gone; every one
+ * when there is no marker. A clone counts cache by cache, not by its folder (w6284: slot1 on LothDesktop kept 4 of its 7
+ * after uv, npm, upm and dotnet failed at the daemon's start, and was never tried again).
+ */
+export function missingSlotCaches(
+  root: string,
+  sandbox: string,
+  platform: NodeJS.Platform = process.platform,
+  exists: (p: string) => boolean = fs.existsSync,
+): string[] {
+  const dir = slotCacheDir(root, sandbox);
+  const m = readMarker(dir);
+  return slotCacheTools(platform)
+    .filter((t) => !m?.tools.includes(t.dir) || !exists(path.join(dir, t.dir)))
+    .map((t) => t.dir);
+}
+
 /**
  * A sandbox's environment for its own clones (every sandbox agent and editor, with sharedLock "warn" or "on"). A tool whose
  * clone is not made yet keeps the shared seed under "warn"; under "on" it gets its slot's folder all the same (empty until
@@ -188,6 +213,11 @@ export interface SlotCachesDeps {
 }
 
 export const REFRESH_MS = 24 * 3600_000;
+/**
+ * After a clone with a failed cache, how long before tick tries that sandbox again (w6284), so one that keeps failing neither
+ * logs every 10 minutes nor holds back the other sandboxes. retryNow (the daemon, once its Low node copies exist) clears it.
+ */
+export const RETRY_MS = 3600_000;
 /** An entry touched this recently may still be being written: merge-back leaves it for the next pass. */
 export const QUIET_MS = 60_000;
 
@@ -329,6 +359,8 @@ export async function mergeBack(
 export class SlotCaches {
   private busy = false;
   private d: SlotCachesDeps;
+  /** Sandboxes whose last clone had a failed cache, and when tick may try them again (w6284). */
+  private retryAt = new Map<string, number>();
   constructor(d: SlotCachesDeps) {
     this.d = d;
   }
@@ -339,9 +371,15 @@ export class SlotCaches {
 
   /** The tools whose seed folder is there to clone (a tool nobody used yet has none: its slot folder starts empty). */
   private seeds(): SlotCacheTool[] {
-    return SLOT_CACHE_TOOLS.filter(
-      (t) => !t.platforms || t.platforms.includes(process.platform),
-    );
+    return slotCacheTools();
+  }
+
+  /**
+   * Try every sandbox with a missing cache again at the next tick, whatever failed before: the daemon calls it once its Low
+   * node copies exist (w6284: the start's first tick ran before them, so every Windows copy failed).
+   */
+  retryNow(): void {
+    this.retryAt.clear();
   }
 
   async tick(): Promise<string | undefined> {
@@ -349,11 +387,16 @@ export class SlotCaches {
     this.busy = true;
     try {
       const all = this.d.sandboxes().filter((s) => okSandboxId(s.id));
-      // First the sandboxes with no clone, idle or not (a clone of a seed nobody else writes is safe while a worker runs:
-      // its own folder is made beside, renamed in, and named in the environment only from its next run on).
-      const none = all.find(
-        (s) => !readMarker(slotCacheDir(this.d.root, s.id)),
+      // First the sandboxes with no clone or a part of one, idle or not (a clone of a seed nobody else writes is safe while
+      // a worker runs: its own folder is made beside, renamed in, and named in the environment only from its next run on).
+      // Counted cache by cache (w6284); no clone at all goes first, and one that just failed waits RETRY_MS or retryNow.
+      const due = (id: string) => (this.retryAt.get(id) ?? -Infinity) <= this.now();
+      const lacking = all.filter(
+        (s) => due(s.id) && missingSlotCaches(this.d.root, s.id).length > 0,
       );
+      const none =
+        lacking.find((s) => !readMarker(slotCacheDir(this.d.root, s.id))) ??
+        lacking[0];
       if (none) return await this.make(none.id, false);
       const old = all.find(
         (s) =>
@@ -387,7 +430,10 @@ export class SlotCaches {
     const seedRoot = sharedCacheDir(this.d.root);
     const t0 = this.now();
     let merged = 0;
+    const before = readMarker(dir);
     const tools: string[] = [];
+    /** The caches this pass cloned (w6284: a completed half-made clone says which it made, and which it kept). */
+    const madeNow: string[] = [];
     const failed: string[] = [];
     for (const t of this.seeds()) {
       const own = path.join(dir, t.dir);
@@ -428,6 +474,7 @@ export class SlotCaches {
         fs.renameSync(fresh, own);
         if (fs.existsSync(gone)) await this.d.removeTree(gone);
         tools.push(t.dir);
+        madeNow.push(t.dir);
       } catch (e) {
         failed.push(
           `${t.dir} (${(e as Error).message.split("\n")[0].slice(0, 200)})`,
@@ -439,10 +486,23 @@ export class SlotCaches {
         if (fs.existsSync(own)) tools.push(t.dir);
       }
     }
-    const marker: SlotMarker = { v: 1, made: this.now(), tools };
+    // Completing a part-made clone keeps its first `made`: the caches it kept are as old as that, and the daily refresh
+    // goes by it.
+    const kept = tools.filter((x) => !madeNow.includes(x));
+    const completing = !refresh && !!before;
+    const marker: SlotMarker = {
+      v: 1,
+      made: completing ? before.made : this.now(),
+      tools,
+    };
     writeFileSafe(path.join(dir, MARKER), JSON.stringify(marker));
+    if (failed.length) this.retryAt.set(sandbox, this.now() + RETRY_MS);
+    else this.retryAt.delete(sandbox);
     const secs = ((this.now() - t0) / 1000).toFixed(1);
-    const line = `slot caches: ${sandbox}: ${refresh ? "made again" : "made"} from the shared seed in ${secs} s (${tools.join(", ")})${refresh ? `, ${merged} new entr${merged === 1 ? "y" : "ies"} merged back first` : ""}${failed.length ? `; failed: ${failed.join("; ")}` : ""} (w5615)`;
+    const what = completing
+      ? `completed from the shared seed in ${secs} s: made ${madeNow.join(", ") || "none"}${kept.length ? `; already there: ${kept.join(", ")}` : ""} (${tools.length} of ${this.seeds().length} caches now, w6284)`
+      : `${refresh ? "made again" : "made"} from the shared seed in ${secs} s (${tools.join(", ")})`;
+    const line = `slot caches: ${sandbox}: ${what}${refresh ? `, ${merged} new entr${merged === 1 ? "y" : "ies"} merged back first` : ""}${failed.length ? `; failed: ${failed.join("; ")}; the missing ones are tried again in ${RETRY_MS / 60_000} min (w6284)` : ""} (w5615)`;
     this.d.log(line);
     return line;
   }
@@ -477,21 +537,34 @@ export function sharedLockLine(
 }
 
 /**
- * What keeps "on" from applying: a sandbox with no clones yet (its agents would download everything again), or no root.
+ * What keeps "on" from applying: a sandbox with no clones yet (its agents would download everything again), one that lacks
+ * some of its caches (its agents would be refused writes to the shared seeds they still use; counted cache by cache, w6284),
+ * or no root.
  */
 export function sharedLockBlockers(
   root: string | undefined,
   sandboxes: string[],
+  platform: NodeJS.Platform = process.platform,
 ): string[] {
   if (!root) return ["this install has no worker root"];
-  const none = sandboxes.filter(
-    (s) => okSandboxId(s) && !readMarker(slotCacheDir(root, s)),
-  );
-  return none.length
-    ? [
-        `sandbox${none.length === 1 ? "" : "es"} ${none.join(", ")} without their own cache clones yet (made within minutes of the daemon's start)`,
-      ]
-    : [];
+  const all = slotCacheTools(platform).length;
+  const ids = sandboxes.filter((s) => okSandboxId(s));
+  const none = ids.filter((s) => !readMarker(slotCacheDir(root, s)));
+  const part = ids
+    .filter((s) => !none.includes(s))
+    .map((s) => ({ s, miss: missingSlotCaches(root, s, platform) }))
+    .filter((x) => x.miss.length > 0);
+  return [
+    ...(none.length
+      ? [
+          `sandbox${none.length === 1 ? "" : "es"} ${none.join(", ")} without their own cache clones yet (made within minutes of the daemon's start)`,
+        ]
+      : []),
+    ...part.map(
+      (x) =>
+        `sandbox ${x.s} lacks ${x.miss.length} of its ${all} cache clones (${x.miss.join(", ")}; tried again by the daemon)`,
+    ),
+  ];
 }
 
 /**

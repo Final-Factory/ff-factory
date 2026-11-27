@@ -10,6 +10,8 @@ import {
   SLOT_CACHE_TOOLS,
   SlotCaches,
   mergeBack,
+  missingSlotCaches,
+  RETRY_MS,
   mergeEntries,
   okSandboxId,
   readMarker,
@@ -207,6 +209,14 @@ test("readMarker reads a whole marker and nothing half-made or foreign", (t) => 
     assert.equal(readMarker(dir), undefined, bad);
   }
 });
+
+/** A whole clone: a marker that lists every cache, and each cache's folder. */
+const wholeClone = (root: string, sandbox: string) => {
+  const dir = writeMarker(root, sandbox, SLOT_CACHE_TOOLS.map((x) => x.dir));
+  for (const x of SLOT_CACHE_TOOLS)
+    fs.mkdirSync(path.join(dir, x.dir), { recursive: true });
+  return dir;
+};
 
 // ---------------------------------------------------------------- SlotCaches: make, tick, refresh
 
@@ -620,12 +630,12 @@ test("sharedLockBlockers: no root is one blocker; a sandbox with no marker is na
     two[0],
     /^sandboxes slot1, slot2 without their own cache clones/,
   );
-  writeMarker(root, "slot1", ["uv"]);
+  wholeClone(root, "slot1");
   const one = sharedLockBlockers(root, ["slot1", "slot2"]);
   assert.equal(one.length, 1);
   assert.match(one[0], /^sandbox slot2 without their own cache clones/);
   assert.ok(!one[0].includes("slot1"));
-  writeMarker(root, "slot2", ["uv"]);
+  wholeClone(root, "slot2");
   assert.deepEqual(sharedLockBlockers(root, ["slot1", "slot2"]), []);
   assert.deepEqual(
     sharedLockBlockers(root, ["slot1", "../x"]),
@@ -801,4 +811,83 @@ test("watchShared: the events of a daemon write that arrive after it ended are n
   put(path.join(folder, "planted.txt"));
   assert.ok(await until(() => lines.some((l) => l.includes("planted.txt"))));
   assert.ok(!lines.some((l) => l.includes("slot.json")), lines.join("\n"));
+});
+
+// ---------------------------------------------------------------- w6284: a half-made clone is completed
+
+test("w6284: a clone whose copies failed is completed cache by cache, after RETRY_MS or retryNow, and says what it made", async (t) => {
+  // As on LothDesktop at 02:56Z: the first tick ran before the Low node copies, so every real copy failed.
+  let lowReady = false;
+  const p = pool(t, [{ id: "slot1", idle: false }, { id: "slot2", idle: false }], {
+    copy: async (src, dst) => {
+      if (!lowReady)
+        throw new Error(
+          "no Low node copy to copy with; a worker's files are never copied with the daemon's rights",
+        );
+      await copyTree(src, dst);
+    },
+  });
+  put(seedDir(p.root, "npm", "_cacache", "content-v2", "blob"), "npm blob");
+  const dir = slotCacheDir(p.root, "slot1");
+  const first = await p.caches.tick();
+  assert.match(first!, /^slot caches: slot1: made from the shared seed/);
+  assert.match(first!, /failed: uv \(no Low node copy.*; npm \(no Low node copy/);
+  assert.match(first!, /the missing ones are tried again in 60 min/);
+  const made = p.clock.t;
+  assert.deepEqual(readMarker(dir)!.tools.sort(), SLOT_CACHE_TOOLS.map((x) => x.dir).filter((x) => x !== "uv" && x !== "npm").sort());
+  assert.deepEqual(missingSlotCaches(p.root, "slot1").sort(), ["npm", "uv"]);
+
+  // The start line counts it per cache: a marker is not a whole clone.
+  const half = sharedLockBlockers(p.root, ["slot1"]);
+  assert.deepEqual(half, [
+    `sandbox slot1 lacks 2 of its ${SLOT_CACHE_TOOLS.length} cache clones (uv, npm; tried again by the daemon)`,
+  ]);
+  assert.match(sharedLockLine("warn", half)!, /With "on" it would stay off: sandbox slot1 lacks 2 of its 7 cache clones/);
+
+  // One failing sandbox holds back no other: the next tick goes to slot2 (it fails too, Low copies are not there yet).
+  p.clock.t += 600_000;
+  assert.match((await p.caches.tick())!, /^slot caches: slot2: made/);
+  // Within RETRY_MS nothing is tried again.
+  p.clock.t += 600_000;
+  assert.equal(await p.caches.tick(), undefined);
+
+  // The daemon makes its Low node copies and calls retryNow: slot1 is completed at once.
+  lowReady = true;
+  p.caches.retryNow();
+  p.clock.t += 1_000;
+  const done = await p.caches.tick();
+  assert.match(done!, /^slot caches: slot1: completed from the shared seed in [\d.]+ s: made uv, npm; already there: pip, nuget.packages, upm, dotnet, ms-playwright \(7 of 7 caches now, w6284\) \(w5615\)$/);
+  assert.equal(fs.readFileSync(path.join(dir, "npm", "_cacache", "content-v2", "blob"), "utf8"), "npm blob");
+  assert.ok(fs.existsSync(path.join(dir, "uv", "archive-v0", "seed1", "file")));
+  assert.deepEqual(missingSlotCaches(p.root, "slot1"), []);
+  assert.equal(readMarker(dir)!.made, made, "completing keeps the first made, so the daily refresh is not put off");
+  assert.equal(slotCacheEnv(p.root, "slot1", "warn", "linux").UV_CACHE_DIR, path.join(dir, "uv"));
+  assert.deepEqual(sharedLockBlockers(p.root, ["slot1"]), []);
+
+  // slot2, not cleared by retryNow's tick, is due again: it is completed at the next one.
+  assert.match((await p.caches.tick())!, /^slot caches: slot2: completed .*made uv, npm/);
+  assert.equal(await p.caches.tick(), undefined);
+});
+
+test("w6284: without retryNow a failed sandbox is tried again after RETRY_MS; a cache whose folder went is made again", async (t) => {
+  let fail = true;
+  const p = pool(t, [{ id: "slot1", idle: false }], {
+    copy: async (src, dst) => {
+      if (fail) throw new Error("boom");
+      await copyTree(src, dst);
+    },
+  });
+  await p.caches.tick();
+  fail = false;
+  p.clock.t += RETRY_MS - 1;
+  assert.equal(await p.caches.tick(), undefined);
+  p.clock.t += 1;
+  assert.match((await p.caches.tick())!, /completed .*made uv;/);
+  assert.equal(await p.caches.tick(), undefined);
+  // a cache the marker lists but whose folder is gone counts as missing, and is made at the next tick
+  const dir = slotCacheDir(p.root, "slot1");
+  fs.rmSync(path.join(dir, "pip"), { recursive: true });
+  assert.deepEqual(missingSlotCaches(p.root, "slot1"), ["pip"]);
+  assert.match(sharedLockBlockers(p.root, ["slot1"])[0], /lacks 1 of its 7 cache clones \(pip;/);
+  assert.match((await p.caches.tick())!, /completed .*made pip; already there: uv, npm/);
 });

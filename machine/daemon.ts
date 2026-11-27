@@ -4069,6 +4069,11 @@ export class Daemon {
       if (!writable(this.slotMailbox)) log(`worker integrity: the Unity slots mailbox ${this.slotMailbox} is outside the root and not in workerIntegrityAllow; a Low worker's unity-slot run cannot ask for a slot`);
       const sdkClaude = this.cfg.claude ?? path.join(path.dirname(createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk-win32-x64/package.json')), 'claude.exe');
       this.lowCopies ??= new LowCopies(root, say); // w5877: one per daemon run, which never takes over another run's copies
+      // w6284: the slot caches' first tick may have run before the Low node copy its copies need; try what it lacks again now.
+      if (this.slotCaches) {
+        this.slotCaches.retryNow();
+        void this.sharedWrite(() => this.slotCaches?.tick());
+      }
       const claude = this.lowCopies.make(sdkClaude);
       if (!claude) {
         return this.lowFail('no Low claude copy');
