@@ -628,7 +628,7 @@ test('w5845: replay of ffu#1097: the row and the planner both wait on its CI; wh
   assert.equal(store.work.get('w2')!.status, 'active');
   assert.equal(did.get('w1'), 'waits for PR #1097 to merge: w2 works on it (w5845)');
   const w1 = store.work.get('w1')!;
-  assert.deepEqual([w1.status, w1.blocked?.kind, w1.blocked?.ref, w1.blocked?.by], ['blocked', 'pr', ref, 'blocker watch']);
+  assert.deepEqual([w1.status, w1.blocked?.kind, w1.blocked?.ref, w1.blocked?.by, w1.blocked?.holder], ['blocked', 'pr', ref, 'blocker watch', 'w2'], 'w6446: a planner overlapping its row (no review, no wait back) still waits for the merge, and its holder is kept');
   assert.match(w1.log.join('\n'), /Final-Factory\/ffu#1097 is w2's to act on, not w1's \(w2 owns it \(its Request: line, ledger link or branch\)\); w1 now waits for it to merge \(w5845\)/);
   assert.ok(logged.some((l) => l.includes(`blocker watch: ${ref}: w2, w1 would all be woken; only w2 is (w2 owns it`) || l.includes(`blocker watch: ${ref}: w1, w2 would all be woken; only w2 is (w2 owns it`)), logged.join(' | '));
   // Neither owns it (two requests that only wait on its CI): the one whose worker called blocked_on last is woken.
@@ -645,6 +645,95 @@ test('w5845: replay of ffu#1097: the row and the planner both wait on its CI; wh
   assert.match(again.get('w4') ?? '', /^clear:/);
   assert.equal(again.get('w3'), 'waits for PR #2000 to merge: w4 works on it (w5845)');
   for (const id of [planner.id, row.id, x.id, y.id]) agents.waker.cancel(id);
+});
+
+const captureLog = async <T>(fn: () => Promise<T>): Promise<[T, string[]]> => {
+  const logged: string[] = [];
+  const log = console.log;
+  const warn = console.warn;
+  console.log = (...a: unknown[]) => void logged.push(a.join(' '));
+  console.warn = (...a: unknown[]) => void logged.push(a.join(' '));
+  try {
+    return [await fn(), logged];
+  } finally {
+    console.log = log;
+    console.warn = warn;
+  }
+};
+
+test('w6446: replay of ff-factory #1368: its author and its independent review both wait on its CI; when it finishes both are woken, and the review is never set to wait for the merge, logged', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  // w1 is w6102 (the review), w2 is w6085 (the author, its Request: line).
+  putRequests(store, [{ id: 'w1', title: 'w2: independent review of ff-factory PR #1368 (Low copies, warn only)', relatedIds: ['w2'] }, { id: 'w2', title: 'Low-copy hardening leftovers' }]);
+  const ref = 'Final-Factory/ff-factory#1368';
+  const author = await startedFor(env, 'w2');
+  const review = await startedFor(env, 'w1', { override_duplicate: 'another request' });
+  await author.h.blocked_on!({ prs: [`ci:${ref}`], what: `CI on ${ref}` });
+  await review.h.blocked_on!({ prs: [`ci:${ref}`], what: `CI on ${ref}` });
+  let clock = Date.now();
+  const seen: PrHealth = { state: 'open', head: 'dddcef41aaaa', headRef: 'w6085-lowcopies-warn', requests: ['w2'] };
+  let checks: Record<string, { done: boolean; text: string }> = {};
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, ci: async (r) => checks[r] ?? { done: false, text: `CI on ${r} running` }, pr: async (r) => ({ state: 'open', text: `${r} is still open` }), prHealth: async () => seen });
+  assert.equal((await watch.tick()).size, 0);
+  checks = { [ref]: { done: true, text: `CI on ${ref} finished: all 1 workflow runs passed or skipped` } };
+  clock += 3 * 60_000;
+  const [did, logged] = await captureLog(() => watch.tick());
+  assert.match(did.get('w2') ?? '', /^clear: CI on Final-Factory\/ff-factory#1368 finished/);
+  assert.match(did.get('w1') ?? '', /^clear: CI on Final-Factory\/ff-factory#1368 finished/, 'the review is woken to review, not set to wait for the merge');
+  assert.deepEqual([store.work.get('w1')!.status, store.work.get('w1')!.blocked], ['active', undefined]);
+  assert.ok(!store.work.get('w1')!.log.some((l) => l.includes('w5845')), store.work.get('w1')!.log.join(' | '));
+  assert.ok(logged.some((l) => l === `blocker watch: ${ref}: w1 is woken with w2, not set to wait for it to merge (w1 reviews ${ref}, which merges only after its review) (w6446)`), logged.join(' | '));
+  for (const id of [author.id, review.id]) agents.waker.cancel(id);
+});
+
+test('w6446: a request the PR owner waits on (its report) is not set to wait for the PR to merge: the two would wait on each other', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  // w1 is no review by its words; w2 owns the PR and waits on w1's report as well as on the PR's CI.
+  putRequests(store, [{ id: 'w1', title: 'Measure the spawn thread on BEAST' }, { id: 'w2', title: 'Spawn thread' }]);
+  const ref = 'Final-Factory/ff-factory#1366';
+  const owner = await startedFor(env, 'w2');
+  const other = await startedFor(env, 'w1', { override_duplicate: 'another request' });
+  await other.h.blocked_on!({ prs: [`ci:${ref}`], what: `CI on ${ref}` });
+  await owner.h.blocked_on!({ prs: [`ci:${ref}`], reports: ['w1'], what: `CI on ${ref} and w1's timing` });
+  let clock = Date.now();
+  const seen: PrHealth = { state: 'open', head: 'eec70798aaaa', headRef: 'w6077-spawn-thread', requests: ['w2'] };
+  let checks: Record<string, { done: boolean; text: string }> = {};
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, ci: async (r) => checks[r] ?? { done: false, text: `CI on ${r} running` }, pr: async (r) => ({ state: 'open', text: `${r} is still open` }), prHealth: async () => seen });
+  await watch.tick();
+  checks = { [ref]: { done: true, text: `CI on ${ref} finished: all 1 workflow runs passed or skipped` } };
+  clock += 3 * 60_000;
+  const [did, logged] = await captureLog(() => watch.tick());
+  assert.match(did.get('w1') ?? '', /^clear:/);
+  assert.equal(store.work.get('w1')!.status, 'active');
+  assert.equal(store.work.get('w2')!.status, 'blocked', "the owner still waits on w1's report");
+  assert.ok(logged.some((l) => l === `blocker watch: ${ref}: w1 is woken with w2, not set to wait for it to merge (w2 waits on w1: a wait for the merge would make them wait on each other) (w6446)`), logged.join(' | '));
+  for (const id of [owner.id, other.id]) agents.waker.cancel(id);
+});
+
+test('w6446: a pair deadlocked when it deploys (a w5845 merge wait set before, its holder only in its words) is freed on the first look: the merge wait goes, logged', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  const ref = 'Final-Factory/ff-factory#1366';
+  const at = new Date(Date.now() - 24 * 3_600_000).toISOString();
+  // As the ledger held them on 2026-11-27: w6077 (here w2) waits on w6105 (w3) reporting, w3 was merged into w6090 (w1),
+  // and w1 waits for #1366 to merge because w2 works on it.
+  putRequests(store, [
+    { id: 'w1', title: 'w2 re-review: check the fixes to ff-factory PR #1366', status: 'blocked', blocked: { kind: 'pr', ref, what: `${ref} merging (w2 works on it, w5845)`, at, by: 'blocker watch' } },
+    { id: 'w2', title: 'Spawn thread', status: 'blocked', blocked: { kind: 'request', ref: 'w3', on: 'report', what: "w3's report", at, by: 'worker abc' } },
+    { id: 'w3', title: 'Re-review', status: 'merged', mergedInto: 'w1' },
+  ]);
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => Date.now(), ci: async (r) => ({ done: false, text: `CI on ${r} running` }), pr: async (r) => ({ state: 'open', text: `${r} is still open` }), prHealth: async () => ({ state: 'open', head: 'eec70798aaaa', requests: ['w2'] }) });
+  const [did, logged] = await captureLog(() => watch.tick());
+  assert.match(did.get('w1') ?? '', /^cycle: a wait cycle \(w1 -> w2 -> w1\): w1 was set to wait for Final-Factory\/ff-factory#1366 to merge because w2 works on it \(w5845\), but that request waits on w1 in turn, so the merge wait is dropped and w1 goes on \(w6446\)/);
+  assert.notEqual(store.work.get('w1')!.status, 'blocked');
+  assert.equal(store.work.get('w2')!.status, 'blocked', 'the author still waits on the review');
+  assert.ok(logged.some((l) => l.startsWith('blocker watch: CYCLE: w1 -> w2 -> w1: resuming w1')), logged.join(' | '));
+  void agents;
 });
 
 test("w890 (found live): a worker's own waiting_on_person counts for every request it is the latest worker on, also one it moved on from, so a worker on two requests that ends its turn waiting on a person frees its sandbox", async (t) => {
