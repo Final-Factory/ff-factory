@@ -275,7 +275,7 @@ test("install takes a build from the sandbox, the caller's own temp folder or ni
     path.join(b.root, "players", "slot4-0", "link-target"),
   );
   const link = path.join(b.sandbox, "Linked.app");
-  fs.symlinkSync(target, link);
+  fs.symlinkSync(target, link, "junction");
   await refused(
     () => b.h["players/install"](ME, { player: link }),
     403,
@@ -714,17 +714,17 @@ test("release: the caller's own lease goes; another session's is refused (403); 
 
 test("splitPlayer and bundleExe: what a player path means", (t) => {
   assert.deepEqual(splitPlayer("/b/Game.app/"), {
-    src: "/b/Game.app",
+    src: path.resolve("/b/Game.app"), // resolved: a drive letter on Windows
     lands: "Game.app",
     entry: "Game.app",
   });
   assert.deepEqual(splitPlayer("/b/win/Game.EXE"), {
-    src: "/b/win",
+    src: path.resolve("/b/win"),
     lands: "",
     entry: "Game.EXE",
   });
   assert.deepEqual(splitPlayer("/b/lin/Game.x86_64"), {
-    src: "/b/lin",
+    src: path.resolve("/b/lin"),
     lands: "",
     entry: "Game.x86_64",
   });
@@ -1007,14 +1007,17 @@ test("w6212 B2: a slot that is a link and a players folder that is a link are re
   fs.mkdirSync(path.join(elsewhere, "player"), { recursive: true });
   fs.writeFileSync(path.join(elsewhere, "keep.txt"), "mine");
   fs.renameSync(b.slot(), path.join(b.root, "players", "moved"));
-  fs.symlinkSync(elsewhere, b.slot());
+  fs.symlinkSync(elsewhere, b.slot(), "junction");
   await refused(() => b.h["players/install"](ME, { player: good }), 409, /link or junction/);
   await refused(() => b.h["players/launch"](ME, { config: "{}" }), 409, /link or junction/);
   assert.equal(fs.readFileSync(path.join(elsewhere, "keep.txt"), "utf8"), "mine");
   assert.equal(fs.existsSync(path.join(elsewhere, "player", AUTOMATION_CONFIG)), false);
   // the players folder itself a link
-  fs.rmSync(b.slot());
+  // the link only: on Windows a junction goes with rmdir (rmSync says EISDIR, unlink EPERM) and its target stays
+  if (process.platform === "win32") fs.rmdirSync(b.slot());
+  else fs.unlinkSync(b.slot());
+  assert.equal(fs.readFileSync(path.join(elsewhere, "keep.txt"), "utf8"), "mine");
   fs.renameSync(path.join(b.root, "players"), path.join(b.root, "players-real"));
-  fs.symlinkSync(path.join(b.root, "players-real"), path.join(b.root, "players"));
+  fs.symlinkSync(path.join(b.root, "players-real"), path.join(b.root, "players"), "junction");
   await refused(() => b.h["players/install"](ME, { player: good }), 409, /players folder that is a link/);
 });

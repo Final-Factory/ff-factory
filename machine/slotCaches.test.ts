@@ -582,7 +582,7 @@ test("w6212 L3/B2: merge-back never replaces a seed file and writes nothing thro
   // the seed's archive-v0 is a link to a folder elsewhere: nothing lands there
   const elsewhere = path.join(root, "elsewhere");
   fs.mkdirSync(elsewhere);
-  fs.symlinkSync(elsewhere, path.join(seed, "archive-v0"));
+  fs.symlinkSync(elsewhere, path.join(seed, "archive-v0"), "junction");
   const now = Date.now() + 3600_000;
   await mergeBack(clone, seed, rule as never, copyTree, now);
   assert.equal(fs.readFileSync(path.join(seed, "wheels-v0", "a.whl"), "utf8"), "old");
