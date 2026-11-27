@@ -79,6 +79,7 @@ function broker(
         fs.cpSync(s, d, { recursive: true });
       }),
     removeTree: async (d) => fs.rmSync(d, { recursive: true, force: true }),
+    playerCache: path.join(root, "player-cache"),
     launch:
       o.launch ??
       (async (l) => {
@@ -267,7 +268,7 @@ test("install takes a build from the sandbox, the caller's own temp folder or ni
     await refused(
       () => b.h["players/install"](ME, { player: app }),
       403,
-      /not in your sandbox, your own temp folder or the nightly folder/,
+      /not in your sandbox, your own temp folder, the nightly folder or a ready player-cache entry/,
     );
   }
   // a link inside the sandbox to a build in players is followed, not trusted
@@ -281,6 +282,41 @@ test("install takes a build from the sandbox, the caller's own temp folder or ni
     403,
     /not in your sandbox/,
   );
+});
+
+test("w6286: install takes a build from a ready entry of the machine's player cache, and nothing else there", async (t) => {
+  const b = broker(t);
+  const cache = path.join(b.root, "player-cache");
+  const sha = "b8ca4cbc429c97e5753409e0296ea2ad10248c4b";
+  const entry = (key: string, status: unknown) => {
+    const dir = path.join(cache, key);
+    put(path.join(dir, "build-manifest.json"), JSON.stringify({ status, sha, target: "win" }));
+    return dir;
+  };
+  // the usual cached build (w6213's refused launch): <cache>/<sha>-win/player/finalfactory.exe
+  const ok = winBuild(path.join(entry(`${sha}-win`, "ok"), "player"));
+  const got = (await b.h["players/install"](ME, { player: ok, sha })) as { filled: boolean; player: string };
+  assert.equal(got.filled, true);
+  assert.ok(fs.existsSync(got.player), got.player);
+  assert.ok(b.log.some((l) => l.includes(`installed ${path.dirname(ok)} into slot3-0`)), b.log.join("\n"));
+  // a Mac entry and a burst variant are entries too
+  const mac = macBuild(path.join(entry(`${sha}-mac-burst2`, "ok"), "player"));
+  assert.equal(((await b.h["players/install"](ME, { player: mac, peer: 1 })) as { filled: boolean }).filled, true);
+  // not ready, no manifest, a folder that is not an entry, outside player/, or a link out of the cache: refused
+  const bad = [
+    winBuild(path.join(entry(`${"1".repeat(40)}-win`, "building"), "player")),
+    winBuild(path.join(cache, `${"2".repeat(40)}-win`, "player")),
+    winBuild(path.join(cache, ".fetch-x", "player")),
+    winBuild(path.join(cache, "planted", "player")),
+    winBuild(path.join(entry(`${"3".repeat(40)}-win`, "ok"), "other")),
+  ];
+  const outside = winBuild(path.join(tmp(t), "elsewhere"));
+  const linkEntry = path.join(cache, `${"4".repeat(40)}-win`);
+  put(path.join(linkEntry, "build-manifest.json"), JSON.stringify({ status: "ok" }));
+  fs.symlinkSync(path.dirname(outside), path.join(linkEntry, "player"), "junction");
+  bad.push(path.join(linkEntry, "player", path.basename(outside)));
+  for (const exe of bad)
+    await refused(() => b.h["players/install"](ME, { player: exe }), 403, /a ready player-cache entry/);
 });
 
 test("install refuses a caller with no sandbox (403), a bad peer or player (400) and a missing build (404)", async (t) => {

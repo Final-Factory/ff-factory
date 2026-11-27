@@ -3816,6 +3816,7 @@ export class Daemon {
       sandboxPath: (id) => this.pool.list().find((sb) => sb.id === id)?.path,
       copy: this.workerCopy(),
       tempDir: this.cfg.tempDir || path.join(root, 'tmp'),
+      playerCache: playerCacheRoot(root),
       removeTree: async (dir) => {
         await this.sharedWrite(() => removeTree(dir));
       },

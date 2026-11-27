@@ -12,7 +12,8 @@
  *   no credential in its environment, and writes the lease with the caller's session. Answers the pid.
  * - `players/release` {lease}: the caller's own lease goes. `players/status`: the caller's slots.
  * The slot comes from the caller's token (its sandbox), never from the body: a worker reaches only its own two slots.
- * The build must lie in the caller's sandbox, its own temp folder or the nightly folder, never in players, the daemon's
+ * The build must lie in the caller's sandbox, its own temp folder, the nightly folder or a ready entry of this machine's
+ * player cache (w6286: `<cache>/<sha>-<os>/player/...` whose build-manifest.json says ok), never in players, the daemon's
  * folder or the secrets, and it is copied with the worker's rights (machine/workerCopy.ts), never the daemon's. Before it
  * writes or deletes in a slot (a folder workers can change under "warn") the broker checks the slot, its player/ and
  * leases/ are plain folders where they should be, and writes no file through a link (w6212 B1, B2).
@@ -21,6 +22,7 @@ import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { RpcRefused, type Caller } from "./daemonRpc.ts";
+import { PLAYER_CACHE_ENTRY } from "./playerCache.ts";
 import { okSandboxId } from "./slotCaches.ts";
 import { isLinkAt, linkIn, plainDirAt, real, writeFileSafe, writeNew, type WorkerCopy } from "./workerCopy.ts";
 
@@ -74,6 +76,12 @@ export interface PlayersBrokerDeps {
   removeTree: (dir: string) => Promise<void>;
   /** Where the workers' temp folders are (`ffa-<session>` each; default `<root>/tmp`). */
   tempDir?: string;
+  /**
+   * w6286: this machine's player cache (machine/playerCache.ts playerCacheRoot), where build_player.sh keeps past builds and
+   * most launches take theirs from. Workers write it, as they write nightly, so it opens no more than they could copy: the
+   * copy runs with the worker's rights and refuses links (machine/workerCopy.ts), into the caller's own slot only.
+   */
+  playerCache?: string;
   /** Start the player, fenced, detached; answers its pid or why it was not started. */
   launch: (l: BrokerLaunch) => Promise<{ pid: number } | { refused: string }>;
   alive?: (pid: number) => boolean;
@@ -263,7 +271,21 @@ export function playersRpcHandlers(
     const open = [sb, c.session ? ownTemp(c) : undefined, path.join(d.root, "nightly")]
       .filter((x): x is string => !!x)
       .map(real);
-    return open.some((x) => inside(s, x));
+    return open.some((x) => inside(s, x)) || cacheEntryPlayer(s);
+  };
+  /** w6286: `s` is inside the player/ folder of a ready player-cache entry (as playerCache.ts readPlayerCache reports them). */
+  const cacheEntryPlayer = (s: string): boolean => {
+    if (!d.playerCache || !fs.existsSync(d.playerCache)) return false;
+    const cache = real(d.playerCache);
+    if (!inside(s, cache)) return false;
+    const [key, sub] = path.relative(cache, s).split(/[\\/]/);
+    if (!key || !PLAYER_CACHE_ENTRY.test(key) || sub !== "player") return false;
+    try {
+      const m = JSON.parse(fs.readFileSync(path.join(cache, key, "build-manifest.json"), "utf8")) as { status?: unknown };
+      return m.status === "ok";
+    } catch {
+      return false;
+    }
   };
 
   return {
@@ -301,7 +323,7 @@ export function playersRpcHandlers(
         if (!allowedSource(c, src))
           throw refuse(
             403,
-            `players/install: ${src} is not in your sandbox, your own temp folder or the nightly folder`,
+            `players/install: ${src} is not in your sandbox, your own temp folder, the nightly folder or a ready player-cache entry's player folder`,
           );
         const fingerprint = buildKey(src);
         plainSlot(slot, true);

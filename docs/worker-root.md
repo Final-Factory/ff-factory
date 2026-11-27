@@ -1414,8 +1414,12 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
   worker's), writes `slot.json` as `player_slots.py` does, and starts the player itself: in the player write fence on Linux and
   macOS (machine/playerFence.ts), through the Low node copy on Windows (never at the daemon's Medium), with no credential in
   its environment. The slot comes from the caller's token, never the body. The source must be in the caller's sandbox, its
-  own temp folder (`<tempDir>/ffa-<session>`, not all of `<root>/tmp`: w6212 M1) or `<root>/nightly`, and so must a
-  `-logFile` folder the player may write. A launch onto a slot whose player still runs is refused (w6212 L1).
+  own temp folder (`<tempDir>/ffa-<session>`, not all of `<root>/tmp`: w6212 M1), `<root>/nightly` or the `player/`
+  folder of a ready player-cache entry (`<player cache>/<sha>-<os>[-burstN]/player`, build-manifest.json status ok; w6286),
+  and a `-logFile` folder the player may write must be in that own temp folder. The player cache is worker-written (build_player.sh
+  runs in workers), as nightly is, so it is no more trusted than them: the copy runs with the worker's rights and refuses
+  links (machine/workerCopy.ts), into the caller's own slot only, so a file planted there reaches only a worker that chose
+  that entry, as running it from the cache would. A launch onto a slot whose player still runs is refused (w6212 L1).
 - **What `warn` watches**: the seeds, `players`, `seed` and `tools` (`sharedLockedFolders`), each folder and its first level
   (not recursive), one daemon log line per entry an hour: `shared lock (warn): <path> changed and the daemon did not write it`.
 - **What `on` adds** (the enforce PR, separate): those folders become read-only to sandbox workers, a Medium No-Write-Up label
