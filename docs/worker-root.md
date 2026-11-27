@@ -1391,7 +1391,9 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
 - **No write through a link** (w6212 B2): before it writes or deletes in `players/<slot>`, `cache/slots/<sandbox>` or a
   seed folder, the daemon checks the folder is a plain folder at its own path (`plainDirAt`), makes missing folders one level
   at a time below checked ones, and writes files by a fresh name and a rename (`writeFileSafe`), never through a link at the
-  name.
+  name. A link is what lstat or the entry's Dirent in its parent says is one, and a real path is
+  `realpathSync.native`'s: a `mklink /J` junction made in a worker session stores `\??\Global\F:\...`, which lstat and the JS
+  realpath miss (review w6247, measured on BEAST at Low); `machine/workerCopyJunction.test.ts` makes one on Windows.
 - **Merge-back** copies what the slot downloaded and the seed lacks (uv `archive-v*` entries and wheels, pip wheels, npm
   `_cacache`, nuget package folders with `.nupkg.metadata`, upm files, finished Playwright browsers) into the seed through a
   `.ff-merge` stage beside the clone and a rename (a folder) or a hard link then unlink (a file, which fails rather than

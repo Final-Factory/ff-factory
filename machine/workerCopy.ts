@@ -18,21 +18,45 @@ import path from 'node:path';
 import { fencedArgv, type WorkerFence } from '../server/workerFence.ts';
 import { FF_LANDLOCK } from './writeLock.ts';
 
-const real = (p: string) => {
+/**
+ * The real path, by the OS (realpathSync.native: GetFinalPathNameByHandle on Windows). The JS realpathSync returns a
+ * junction whose target is stored as `\??\Global\F:\...` (what `mklink /J` writes in a worker session) unresolved
+ * (review w6247, measured on BEAST with Node 24.22.1).
+ */
+export const real = (p: string) => {
   try {
-    return fs.realpathSync(p);
+    return fs.realpathSync.native(p);
   } catch {
     return path.resolve(p);
   }
 };
 
 /**
- * The first link in a tree (its relative path; '.' for the top itself), or undefined. Node's lstat and readdir report a
- * Windows junction or symbolic link as a symbolic link, so this finds both.
+ * `p` is a link or junction: lstat says so, or its entry in the parent folder does. Node's lstat reports a junction
+ * stored as `\??\Global\X:\...` as a plain folder (libuv reads only the `\??\X:\` and `\??\UNC\` forms as a
+ * link), while readdir's Dirent takes it from the reparse attribute and says link (review w6247, measured on BEAST).
+ */
+export function isLinkAt(p: string): boolean {
+  try {
+    if (fs.lstatSync(p).isSymbolicLink()) return true;
+  } catch {
+    return false;
+  }
+  const name = path.basename(p);
+  try {
+    return fs.readdirSync(path.dirname(p), { withFileTypes: true }).some((e) => e.name === name && e.isSymbolicLink());
+  } catch {
+    return true; // a folder whose parent cannot be listed is not one the daemon writes in
+  }
+}
+
+/**
+ * The first link in a tree (its relative path; '.' for the top itself), or undefined. Each entry's Dirent says whether
+ * it is a link, which sees every Windows junction (isLinkAt); a Dirent link is never walked into.
  */
 export function linkIn(tree: string): string | undefined {
+  if (isLinkAt(tree)) return '.';
   const st = fs.lstatSync(tree);
-  if (st.isSymbolicLink()) return '.';
   if (!st.isDirectory()) return undefined;
   const walk = (rel: string): string | undefined => {
     for (const e of fs.readdirSync(path.join(tree, rel), { withFileTypes: true })) {
@@ -54,8 +78,7 @@ export function linkIn(tree: string): string | undefined {
  */
 export function plainDirAt(dir: string, base: string, rel: string): boolean {
   try {
-    const st = fs.lstatSync(dir);
-    if (st.isSymbolicLink() || !st.isDirectory()) return false;
+    if (isLinkAt(dir) || !fs.lstatSync(dir).isDirectory()) return false;
   } catch {
     return false;
   }
@@ -93,11 +116,18 @@ export function writeFileSafe(file: string, data: string): void {
  */
 export const LOW_COPY_SCRIPT =
   "const fs=require('node:fs'),path=require('node:path');const[,src,dst,mode]=process.argv;let skipped=0;" +
-  "function cp(s,d){const st=fs.lstatSync(s);if(st.isSymbolicLink()){if(mode!=='keep'){console.error('a link: '+s);process.exit(3)}" +
-  "const t=fs.readlinkSync(s);let dir=false;try{dir=fs.statSync(s).isDirectory()}catch{}try{fs.symlinkSync(t,d,dir?'junction':'file')}catch{skipped++}return}" +
-  "if(st.isDirectory()){fs.mkdirSync(d);for(const e of fs.readdirSync(s))cp(path.join(s,e),path.join(d,e));return}" +
+  // a link by lstat or by the parent's Dirent: lstat misses a \??\Global\ junction, the Dirent does not (w6247)
+  "function linkAt(s){try{if(fs.lstatSync(s).isSymbolicLink())return true}catch{return false}const n=path.basename(s);" +
+  "try{return fs.readdirSync(path.dirname(s),{withFileTypes:true}).some(e=>e.name===n&&e.isSymbolicLink())}catch{return true}}" +
+  // keep: make it again with the same target; readlink fails on that junction form, so the OS's real path stands in
+  "function mk(s,d){if(mode!=='keep'){console.error('a link: '+s);process.exit(3)}let t;try{t=fs.readlinkSync(s)}catch{" +
+  "try{t=fs.realpathSync.native(s)}catch{skipped++;return}}let dir=false;try{dir=fs.statSync(s).isDirectory()}catch{}" +
+  "try{fs.symlinkSync(t,d,dir?'junction':'file')}catch{skipped++}}" +
+  "function cp(s,d,link){if(link)return mk(s,d);const st=fs.lstatSync(s);if(st.isSymbolicLink())return mk(s,d);" +
+  "if(st.isDirectory()){fs.mkdirSync(d);for(const e of fs.readdirSync(s,{withFileTypes:true}))" +
+  "cp(path.join(s,e.name),path.join(d,e.name),e.isSymbolicLink());return}" +
   "if(st.isFile()){fs.copyFileSync(s,d,fs.constants.COPYFILE_EXCL);return}skipped++}" +
-  "cp(src,dst);console.log('skipped '+skipped)";
+  "cp(src,dst,linkAt(src));console.log('skipped '+skipped)";
 
 export type Ran = { code: number; stdout: string; stderr: string };
 

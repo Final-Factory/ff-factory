@@ -22,7 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { RpcRefused, type Caller } from "./daemonRpc.ts";
 import { okSandboxId } from "./slotCaches.ts";
-import { linkIn, plainDirAt, writeFileSafe, writeNew, type WorkerCopy } from "./workerCopy.ts";
+import { isLinkAt, linkIn, plainDirAt, real, writeFileSafe, writeNew, type WorkerCopy } from "./workerCopy.ts";
 
 /** What a running player writes into its own folder (the game's LocalMultiplayerAutomationSessionConfig): not the build. */
 export const RUNTIME_FILES = new Set([
@@ -83,13 +83,6 @@ export interface PlayersBrokerDeps {
   platform?: NodeJS.Platform;
 }
 
-const real = (p: string) => {
-  try {
-    return fs.realpathSync(p);
-  } catch {
-    return path.resolve(p);
-  }
-};
 const inside = (p: string, dir: string) => {
   const r = path.relative(dir, p);
   return r === "" || (!!r && !r.startsWith("..") && !path.isAbsolute(r));
@@ -199,13 +192,7 @@ export function playersRpcHandlers(
    * B2: the slot is a plain folder at players/<name> (players itself one at <root>/players), with nothing in it a link,
    * and its player/ and leases/ plain folders where they are. Made when `make` and missing. Refuses otherwise.
    */
-  const isLink = (p: string) => {
-    try {
-      return fs.lstatSync(p).isSymbolicLink();
-    } catch {
-      return false;
-    }
-  };
+  const isLink = isLinkAt; // lstat or the parent's Dirent: a \??\Global\ junction too (w6247)
   const plainSlot = (slot: { name: string; dir: string }, make: boolean) => {
     const bad = (why: string) =>
       refuse(409, `players: ${slot.name} ${why}; the broker writes nothing through a link or junction (w6212)`);
