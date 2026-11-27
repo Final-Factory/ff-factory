@@ -188,14 +188,14 @@ test('w605: a host that died with its agent is not taken back; the portal resume
   assert.ok(hostAlive(hostDir(id)));
 });
 
-test("w2625: a host started before a daemon update that added a worker tool: the worker's next turn, restarted on the new code, runs in a new host and sees the tool", { timeout: 180_000 }, async (t) => {
+for (let round = 1; round <= 20; round++) test(`w2625: a host started before a daemon update that added a worker tool: the worker's next turn, restarted on the new code, runs in a new host and sees the tool (diag ${round})`, { timeout: 180_000 }, async (t) => {
   // w2618, worker bcd8d4e5 on beast, 2026-10-30: its agent host (pid 50752) started at 19:51:45 MDT, during the daemon
   // update that finished at 19:52:09, so it loaded the code from before PR #773 (the bug-thread listing). At 19:54:19 the
   // portal stopped its idle process to start it again on the new code (w1166, agents.ts codeMove), and the daemon handed
   // the next message to the old host, still closing, which started the agent again inside itself, on its own code and the
   // launch spec it was started with. The tool stayed missing, and the worker waited two hours for a restart nobody could do.
   let tools: { name: CatalogTool; description: string }[] = [{ name: 'wake_me', description: 'Come back later.' }];
-  const { sessions, mm, daemon, kill, hostPid, cleanup, logs } = await setup({ mcp: () => ({ server: 'machine', tools }) });
+  const { store, sessions, mm, daemon, kill, hostPid, cleanup, logs } = await setup({ mcp: () => ({ server: 'machine', tools }) });
   t.after(cleanup);
   const turnEnds: string[] = [];
   sessions.events.on('turnEnd', (_s: SessionHandle, text: string) => turnEnds.push(text));
@@ -236,9 +236,14 @@ test("w2625: a host started before a daemon update that added a worker tool: the
   };
   sessions.send(id, '#tools');
   await until('its next turn', () => turnEnds.length === 2, 60_000, logs);
-  assert.ok(moved, `its process was started again (the portal asked: ${asked.join('; ') || 'never'})`);
-  assert.equal(turnEnds[1], 'Tools: list_ffbox_files, wake_me', 'the next turn sees the tool the update added');
-  assert.notEqual(hostPid(id), pid, 'in a new host, on the code the machine runs now');
+  // What the move saw, for any assert below that fails (the CI reporter's own text can be lost, w6548).
+  const saw = () => `moved=${moved}; the portal asked: ${asked.join('; ') || 'never'}; turns: ${JSON.stringify(turnEnds)}; host pid ${pid} then ${hostPid(id)}
+transcript: ${JSON.stringify(store.readTranscript(id).map((e) => `${e.kind}: ${(e as { text?: string }).text ?? ''}`.slice(0, 160)))}
+${logs()}`;
+  if (!moved || turnEnds[1] !== 'Tools: list_ffbox_files, wake_me' || hostPid(id) === pid) console.log(`w2625 diag: ${saw()}`);
+  assert.ok(moved, `its process was started again: ${saw()}`);
+  assert.equal(turnEnds[1], 'Tools: list_ffbox_files, wake_me', `the next turn sees the tool the update added: ${saw()}`);
+  assert.notEqual(hostPid(id), pid, `in a new host, on the code the machine runs now: ${saw()}`);
 });
 
 test('w605: LineTail reads whole lines only, any length, from an offset kept across restarts', () => {
