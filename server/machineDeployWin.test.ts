@@ -826,9 +826,14 @@ $null = [Console]::In.ReadLine()
     const state = (fltGuard: boolean) => tray.stdin.write(`${JSON.stringify({ type: 'state', paused: false, why: 'x', schedule: 'none', work: 'x', settings: { schedule: { enabled: false, start: '22:00', end: '08:00', days: [0] }, activity: { enabled: false, idleMinutes: 90 } }, machine: 'test', fltGuard })}\n`);
     const had = Number((await flt()).live);
     t.diagnostic(`the live ForegroundLockTimeout here: ${had} ms`);
-    const armed = await flt(2147483647);
-    t.diagnostic(`set to 2147483647: ${JSON.stringify(armed)}`);
-    if (armed.set !== true || armed.live !== 2147483647) {
+    // Only a caller that may force the foreground can set the value (SystemParametersInfo, SPI_SETFOREGROUNDLOCKTIMEOUT:
+    // "The calling thread must be able to change the foreground window, otherwise the call fails"), and the tray in the
+    // background may only once the lock has expired (SetForegroundWindow's rules), which at 0 it always has. So the test
+    // arms it only from 0; a value Windows already armed (a hosted runner that logged on just before, w6366) is used as it
+    // is: a direct set of it is refused with error 87, and the guard must still repair it.
+    const armed = had === 0 ? await flt(2147483647) : { type: 'flt', live: had, set: true, error: 0 };
+    t.diagnostic(had === 0 ? `set to 2147483647: ${JSON.stringify(armed)}` : `already armed at ${had} ms: the guard leg starts from it`);
+    if (armed.set !== true || armed.live !== (had === 0 ? 2147483647 : had)) {
       assert.ok(!process.env.CI, `a CI runner must let the tray set the live ForegroundLockTimeout: ${JSON.stringify(armed)}`);
       t.diagnostic('the live value could not be set here (an agent at Low integrity): the guard leg is skipped');
     } else {
