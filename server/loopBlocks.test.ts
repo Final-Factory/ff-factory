@@ -322,3 +322,92 @@ test('w6428: page builds keep each worker\'s requests until a request is saved o
   info.title = 'w6009: renamed';
   assert.deepEqual(ids(), ['w6009']);
 });
+
+/**
+ * w6513: pc's daemon goes away with `n` stopped workers' messages waiting. Returns what the drain left on each (in the order
+ * the workers started) and what it cost: walks of the sessions and the ledger, and memo wipes (placementFree).
+ */
+async function disconnectDrain(t: Parameters<typeof setupOnMachine>[0], n: number, memo = true) {
+  const env = await setupOnMachine(t);
+  const { store, sessions, machines, pc } = env;
+  const ids = Array.from({ length: n }, (_, i) => `w${i + 1}`);
+  putRequests(store, ids.map((id) => ({ id, by: LOTH, status: 'active' as const })));
+  const workers: SessionInfo[] = [];
+  for (const id of ids) {
+    const a = await startedFor(env, id);
+    sessions.sessions.get(a.id)!.stop(true);
+    await until('its process stopped', () => !sessions.sessions.get(a.id)?.live);
+    workers.push(a);
+  }
+  await pc.stop();
+  await until('pc offline', () => !machines.isOnline('pc'));
+  // Queued as a check-in's or a gate's resume is (hold): what would refuse it now keeps it waiting.
+  for (const a of workers) sessions.send(a.id, 'carry on.', 'system', undefined, { hold: true });
+  assert.equal(sessions.queued().filter((q) => workers.some((a) => a.id === q.id)).length, n, 'every message waits');
+  const s = sessions as unknown as { placementPass?: unknown; placementFree?: <T>(fn: () => T) => T };
+  if (!memo) {
+    s.placementPass = undefined;
+    s.placementFree = undefined;
+  }
+  let frees = 0;
+  const free0 = s.placementFree;
+  if (free0) s.placementFree = (fn) => (frees++, free0(fn));
+  let sessionWalks = 0;
+  let ledgerWalks = 0;
+  const sv = sessions.sessions.values.bind(sessions.sessions);
+  sessions.sessions.values = () => (sessionWalks++, sv());
+  const wv = store.work.values.bind(store.work);
+  store.work.values = () => (ledgerWalks++, wv());
+  const before = workers.map((a) => store.readTranscript(a.id).length);
+  sessions.drain();
+  sessions.sessions.values = sv;
+  store.work.values = wv;
+  const left = workers.map((a, i) => {
+    const q = sessions.queued().find((x) => x.id === a.id) as { why?: string; on?: string; lastError?: string } | undefined;
+    const said = store.readTranscript(a.id).slice(before[i]).map((e) => `${e.kind}: ${(e as { text?: string }).text ?? ''}`);
+    return { queued: !!q, why: q?.why, on: q?.on, lastError: q?.lastError, said, lastRequestedBy: a.lastRequestedBy?.userId };
+  });
+  return { left, frees, sessionWalks, ledgerWalks };
+}
+
+test('w6513: after a daemon disconnect, a drain of many held messages walks the sessions and the ledger once per pass, not per message', async (t) => {
+  const few = await disconnectDrain(t, 2);
+  const many = await disconnectDrain(t, 6);
+  for (const r of [few, many]) assert.ok(r.left.every((x) => x.queued && x.on === 'machine' && /is offline/.test(x.lastError ?? '')), JSON.stringify(r.left));
+  assert.equal(few.frees, 1, 'only the first send, which found pc offline, emptied the memo');
+  assert.equal(many.frees, 1, 'only the first send, which found pc offline, emptied the memo');
+  assert.equal(many.sessionWalks, few.sessionWalks, `walks of the sessions do not grow with the messages held (${few.sessionWalks} for 2, ${many.sessionWalks} for 6)`);
+  assert.equal(many.ledgerWalks, few.ledgerWalks, `walks of the ledger do not grow with the messages held (${few.ledgerWalks} for 2, ${many.ledgerWalks} for 6)`);
+});
+
+test('w6513: the drain after a daemon disconnect leaves each held message as the drain without its memo does', async (t) => {
+  const kept = await disconnectDrain(t, 4);
+  const bare = await disconnectDrain(t, 4, false);
+  assert.deepEqual(kept.left, bare.left);
+  assert.ok(kept.left.every((x) => x.said.some((l) => /could not be delivered yet \(machine pc is offline/.test(l))), JSON.stringify(kept.left));
+});
+
+test('w6513: within a drain pass each machine\'s mid-turn counts are the same as counted afresh, and a turn sent counts at once', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, sessions, machines } = env;
+  putRequests(store, [{ id: 'w1', by: LOTH, status: 'active' }, { id: 'w2', by: LOTH, status: 'active' }]);
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  const bi = sessions.sessions.get(b.id)!.info;
+  const counts = () => [machines.runningIn('pc', 'alpha'), machines.runningIn('pc', '*'), machines.runningIn('pc', undefined), machines.midTurnTotal('pc'), machines.midTurnTotal('elsewhere')];
+  const fresh = counts();
+  machines.withLiveCounts(() => {
+    assert.deepEqual(counts(), fresh);
+    const was = bi.status;
+    bi.status = bi.status === 'running' ? 'idle' : 'running';
+    assert.deepEqual(counts(), fresh, 'kept within the pass');
+    machines.liveCountsChanged();
+    machines.withoutLiveCounts(() => assert.notDeepEqual(counts(), fresh, 'counted afresh outside it'));
+    const changed = counts();
+    assert.notDeepEqual(changed, fresh, 'counted afresh after a change');
+    bi.status = was;
+    machines.liveCountsChanged();
+    assert.deepEqual(counts(), fresh);
+  });
+  assert.equal(sessions.sessions.get(a.id)!.info.machineId, 'pc');
+});
