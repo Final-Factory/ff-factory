@@ -944,6 +944,8 @@ test('w6189: request_pair files a pre-1.0 pair run whose commit has the FF_GAME_
   const out = String(await withBackport.h.request_pair!({ ...ask, commit: '20786882d8' }));
   const p = store.work.get(/^Filed (w\d+)/.exec(out)![1])!;
   assert.equal(p.pair?.legacyData, undefined, 'not a pre-w5297 run');
+  // w6458: newPair's own text and pairAskWords share PAIR_FILED_BY, so the stored run gives the worker's words back.
+  assert.deepEqual(pairAskWords(p), { what: ask.what, brief: ask.brief });
   assert.match(p.pair?.dataDirChecked ?? '', /^its player at 20786882d8 reads FF_GAME_DATA_DIR \(Assets\/Scripts\/FFCore\/GameData\/GameDataPaths\.cs, the backport of game PR #4357\)/);
   assert.match(out, /Not a pre-w5297 run: its player at 20786882d8 reads FF_GAME_DATA_DIR/);
   // Placement lets its leg on the Low-integrity Windows computer.
@@ -1122,6 +1124,35 @@ test('w6451: the queue re-check forgets runs that are no longer queued and marke
 
 test('w6451: pairAskWords keeps the worker\'s own words of a filed pair run', () => {
   assert.deepEqual(pairAskWords({ title: 'Pair run for w12: MP check', brief: `Run it.${PAIR_FILED_BY}e425e43b on w12.` }), { what: 'MP check', brief: 'Run it.' });
+});
+
+// w6458 (w6454's review of PR #1484): words that name a build without a number ("the host runs the Steam pre-1.0 build")
+// named no sha or 0.50.x.y, so the commit's file cleared the mark though that player is not the commit.
+test('w6458: a build named without a number keeps the mark at request_pair, start_agent and the queue re-check', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, dispatcher, call, machines } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w6459', by: LOTH }]);
+  machines.update('pc', { platform: 'win32', fence: { state: 'on', kind: 'low', agentIntegrity: 'low' } });
+  agents.gameDataDirAt = fakeDataDir;
+  const before = store.work.size;
+  const s = await startedFor(env, 'w6459');
+  await assert.rejects(
+    async () => s.h.request_pair!({ what: 'MP determinism check of PR #4382', brief: 'The host runs the Steam pre-1.0 build; the client runs the PR head.', commit: '20786882d8' }),
+    /^Error: Nothing filed: no computer fits a pair run of a pre-w5297 player \(read from its words.*its brief names a build no commit is \("Steam pre-1\.0 build"\), but FF Factory checked only 20786882d8/,
+  );
+  assert.equal(store.work.size, before, 'nothing filed');
+  const filed = (id: string, what: string, brief: string) => ({ id, by: LOTH, status: 'queued' as const, queuedFor: { at: T0 }, title: `Pair run for w6459: ${what}`, brief: `${brief}${PAIR_FILED_BY}e425e43b on w6459 (w1945, request_pair): 1 leg.`, pair: { legs: 1, legacyData: LEGACY_READ, commit: '20786882d8' } });
+  putRequests(store, [
+    filed('w6460', 'MP check of PR #4382 on pre-1.0', 'The client runs the installed Steam copy.'),
+    filed('w6461', 'MP check of PR #4382 on pre-1.0', 'Build the 0.50 line at the PR head and run the MP scenarios.'),
+    filed('w6462', 'MP check of the published pre-1.0 player against PR #4382', 'Run the MP scenarios.'),
+  ]);
+  const r = await call(dispatcher().info, 'start_agent', { work_id: 'w6460', prompt: 'Run the MP scenarios on the 0.50 line.', title: 'pair', sandbox: 'pc/alpha' });
+  assert.equal(r.isError, true);
+  assert.ok(store.work.get('w6460')!.pair?.legacyData, 'start_agent: the brief names the installed Steam copy');
+  assert.deepEqual(await agents.recheckLegacyPairs(Date.parse(T0)), ['w6461'], 'only the run whose words name no other player is cleared');
+  assert.ok(store.work.get('w6462')!.pair?.legacyData, 'the re-check: the what names the published player');
 });
 
 test('w5965: the words that mark a pre-w5297 player', () => {
