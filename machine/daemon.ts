@@ -1181,7 +1181,7 @@ export class Daemon {
       facts: (pids) => inspectProcs(machinePlatformOf(process.platform), pids),
       machineBusyMs: () => machineBusyMs(),
       // w6217: the env of orphaned trees (a tool whose shell exited) names the session that started it
-      envOf: real ? (pids) => readEnvs('win32', pids) : undefined,
+      envOf: real ? (pids) => readEnvs('win32', pids, { ci: true }) : undefined,
       root: cfg.root,
       self: process.pid,
       mode: cfg.winCiFirst,

@@ -90,6 +90,17 @@ anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macO
   Such a pair run goes on Windows only where Medium or above was measured: never by the fence setting, and never where
   nothing was measured (`shared/capacity.ts` `legacyUnfitWhy`, enforced at `request_pair`, placement and `start_agent`, w6003).
   With every Windows computer fenced, none fits, and `request_pair` says so and files nothing.
+- **Decided per commit** (w6189). Game PR #4357 (merge `6fcc274a`, on pre-1.0 since 2026-11-26) backported
+  `FF_GAME_DATA_DIR` to the 0.50 line, so a pre-1.0 commit is not by itself a pre-w5297 player: w6122 ran 5 of 5 MP
+  scenarios of one at Low integrity on lothdesktop. When a pair run's words or `legacy_data` would mark it, `request_pair`
+  reads `Assets/Scripts/FFCore/GameData/GameDataPaths.cs` at its `commit` (or its published player's) through GitHub
+  (`server/gameDataDir.ts`): a file that reads the variable (the `"FF_GAME_DATA_DIR"` literal and an environment read) clears
+  the mark, the pair says why (`WorkPair.dataDirChecked`), and its legs go where any game pair goes, Low-integrity Windows
+  sandboxes included. The file decides rather than "is #4357's merge an ancestor", since a branch that carries the backport
+  without that merge (a cherry-pick, or #4357's own head `48f1fbab`, the commit w6122 ran) builds the same player. It fails
+  closed: no commit given, a commit GitHub does not know, a failed read, or a file without the read keeps the mark, with that
+  reason added to it, so the refusal says which. `start_agent` makes the same check for a marked pair run that has a commit
+  (one filed before w6189, or by hand) and clears the mark on the request before its legs are checked.
 
 ## How it works
 
