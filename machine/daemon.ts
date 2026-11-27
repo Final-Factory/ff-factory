@@ -91,7 +91,7 @@ import { FfuBusyRetry } from './ffuBusyRetry.ts';
 import { cleanupPass, firstAlonePass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
-import { hubEditorDirs, hubListedEditors, listWinDialogs, macEditorFenceFor, macEditorStatusDir, realDeps as realUnityDeps, type EditorFence, type LowEditorFence, type SeatbeltEditorFence } from './unity.ts';
+import { hubEditorDirs, hubListedEditors, linuxEditorFenceFor, listWinDialogs, macEditorFenceFor, macEditorStatusDir, realDeps as realUnityDeps, type EditorFence, type LandlockEditorFence, type LowEditorFence, type SeatbeltEditorFence } from './unity.ts';
 import { listMacDialogs } from './macDialogs.ts';
 import { UnityReaper, inspectProcs, realReaperDeps, type ReaperDeps } from './unityReaper.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
@@ -234,6 +234,9 @@ export interface DaemonConfig {
    * macOS (w5630, stage 2): with the Seatbelt worker fence on, sandbox editors start under the workers' profile; unset is
    * warn-only for now (refuses nothing, and macOS logs no report of what it would refuse; lothsahn's rule), true enforces
    * it, false starts them unfenced as before. The switch takes effect at each editor's next start.
+   * Linux (w5631, stage 3): with the Landlock write lock on, sandbox editors start under the workers' write rules with
+   * `<root>/home` as their home; unset is warn-only (the rules refuse nothing), true enforces them, false starts them
+   * unfenced. Decided once per daemon run.
    */
   editorFence?: boolean;
   /** The machine's own `claude` (its login, settings and plugins). */
@@ -3997,7 +4000,8 @@ export class Daemon {
       if (process.platform === 'win32') await (this.cfg.root ? this.sharedWrite(() => this.lowSetup(), sharedLockedFolders(this.cfg.root)) : this.lowSetup());
       // w5630: a fenced editor that ran through this daemon's restart writes its bridge status only under <root>/home; read
       // that folder from the start, whatever the fence switches say now (an extra folder is harmless: the newest status wins).
-      if (process.platform === 'darwin' && this.cfg.root) addMcpStatusDir(macEditorStatusDir(this.cfg.root));
+      // w5631: so does a fenced Linux editor.
+      if (process.platform !== 'win32' && this.cfg.root) addMcpStatusDir(macEditorStatusDir(this.cfg.root));
       if (this.fence.state.state !== 'setting_up') return;
       if (process.platform === 'win32') {
         if (this.low) this.fence.on();
@@ -4049,6 +4053,7 @@ export class Daemon {
   private editorFence(): EditorFence | undefined {
     if (this.cfg.editorFence === false) return undefined;
     if (process.platform === 'darwin') return this.macEditorFence();
+    if (process.platform === 'linux') return this.linuxEditorFence();
     const ed = this.low?.editor;
     if (!ed) return undefined;
     // w5838: the launcher is checked against the daemon's node before each editor start; one that cannot be checked or made
@@ -4089,6 +4094,39 @@ export class Daemon {
       fence = undefined;
     }
     this.macEditorMemo = { fence };
+    return fence;
+  }
+
+  private linuxEditorMemo?: { fence?: LandlockEditorFence };
+  /**
+   * w5631 (w5540 stage 3): the Linux editor fence, decided once: the workers' Landlock write rules (only while their write
+   * lock is on and probed) with `<root>/home` as the editor's HOME (machine/unity.ts LandlockEditorFence). Warn-only unless
+   * daemon.json says `editorFence: true`. Probed with a no-op first: rules the kernel refuses leave editors unfenced, as
+   * before, and say so in the log.
+   */
+  private linuxEditorFence(): LandlockEditorFence | undefined {
+    if (this.linuxEditorMemo) return this.linuxEditorMemo.fence;
+    let fence: LandlockEditorFence | undefined;
+    try {
+      const root = this.cfg.root;
+      const agents = this.writeLock;
+      if (!agents || !root) log('editor fence: sandbox editors start unfenced (the Landlock write lock is off here)');
+      else {
+        fence = linuxEditorFenceFor(this.lockRules(root, path.join(root, 'home'), !!this.lockMemo?.transcripts), root, this.cfg.editorFence === true ? 'enforce' : 'warn')!;
+        const probe = probeFence(['python3', FF_LANDLOCK, ...fence.args, '--', '/bin/true']);
+        if (probe.ok) {
+          addMcpStatusDir(fence.env.UNITY_MCP_STATUS_DIR);
+          log(`editor fence: sandbox editors start under the workers' Landlock write rules${fence.warn ? ', warn-only (it refuses no write: Landlock has no report-only mode; still applied: its signal scope, no_new_privs, so setuid helpers run without their rights, and its block on /proc of processes outside the editor; editorFence true enforces)' : ''}, home <root>/home, from their next start`);
+        } else {
+          log(`editor fence: the editor's Landlock rules could not run a no-op (${probe.why}); sandbox editors start unfenced`);
+          fence = undefined;
+        }
+      }
+    } catch (e) {
+      log(`editor fence: ${(e as Error).message}; sandbox editors start unfenced`);
+      fence = undefined;
+    }
+    this.linuxEditorMemo = { fence };
     return fence;
   }
 
@@ -4701,6 +4739,10 @@ export class Daemon {
   }
 
   private lockMemo?: { args?: string[]; why?: string; transcripts?: string; transcriptsWait?: boolean };
+  /** The workers' write rules (writeLockArgs) with `home` as the home whose Unity prefs folders are granted (w5631: the editor's is `<root>/home`). */
+  private lockRules(root: string, home: string, transcriptLock: boolean, dropped?: (folder: string, why: string) => void): string[] {
+    return writeLockArgs({ root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home, extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock, lockStore: this.storeLock.locked, ...(dropped ? { dropped } : {}) });
+  }
   /**
    * The Linux write lock's ff-landlock.py arguments for sandbox agents, or undefined when daemon.json leaves it off.
    * Probed once like the fence above (w5377): a kernel without Landlock or a missing python3 fails it, with why in
@@ -4717,7 +4759,7 @@ export class Daemon {
           waits = this.cfg.transcriptLock === 'on' ? this.transcriptMoveWaits(this.cfg.root) : [];
           if (waits.length) log(`transcript lock: on, but waiting to move the transcripts until ${waits.length} sandbox agent${waits.length === 1 ? '' : 's'} locked without the transcripts folder end${waits.length === 1 ? 's' : ''} (${waits.join(', ')}): the move would cut them off from their own (w5718); until then workers write the transcripts folder whole, as with the switch off`);
           transcripts = this.cfg.transcriptLock === 'on' && !waits.length ? this.lockTranscripts(this.cfg.root) : undefined;
-          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock: !!transcripts, lockStore: this.storeLock.locked, dropped: (f, why) => log(`write lock: left out the extra writable folder ${f}: ${why} (w5899)`) });
+          args = this.lockRules(this.cfg.root, os.homedir(), !!transcripts, (f, why) => log(`write lock: left out the extra writable folder ${f}: ${why} (w5899)`));
           // w5546: the given-back folders exist before any run, so Landlock grants them (it skips a path that is not there).
           ensureReadBackDirs(appDirOfConfig(this.cfg), this.cfg.root);
           // The probe runs with the read half too, so a read rule Landlock refuses leaves agents unlocked, not stuck.
