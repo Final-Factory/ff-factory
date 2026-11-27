@@ -102,16 +102,17 @@ export function otherPlayerIn(said: string, commit: string, where = 'legacy_data
  * the mark, and legacy_data "none" is the way out.
  */
 export const INSTALLED_BUILD: readonly RegExp[] = [
-  /\bsteam(?:['’]s)?[\s-]+(?:[\w.-]+\s+){0,3}?(?:builds?|players?|versions?|branch(?:es)?|install(?:ation)?s?|cop(?:y|ies)|releases?|games?)\b/i,
+  /\bsteam(?:\s*[^\w\s]s)?[\W_]+(?:[\w.-]+\s+){0,3}?(?:builds?|players?|versions?|branch(?:es)?|install(?:ation)?s?|cop(?:y|ies)|releases?|games?)\b/i,
   /\b(?:installed|downloaded)\s+(?:from|via|through|on)\s+steam\b/i,
   /\b(?:installed|published|public|released|release|shipped|live|retail)\s+(?:[\w.-]+\s+){0,2}?(?:builds?|players?|versions?|cop(?:y|ies)|games?)\b/i,
   /\b(?:pre-1\.0|0\.50(?:\.\d+)*)\s+releases?\b(?!\s+(?:branch|line))/i,
   // w6467 (w6463's review of PR #1487): "the client runs Steam 0.50" names Steam's build by a short version, no build word.
-  // w6488's review of PR #1499: any separator after Steam, "Steam [0.50]", "Steam: 0.50", "Steam-pre-1.0", "Steam ver 0.50".
-  /\bsteam(?:['’]s)?(?:[\s(\[{:,-]+|\s+(?:ver(?:sion)?|on|at)\s+)v?(?:pre-1\.0|0\.50(?:\.\d+)*)(?![\w-]|\.\d)/i,
+  // w6488's and w6497's reviews of PR #1499: any run of non-word characters after Steam or its apostrophe, "Steam [0.50]",
+  // "Steam — 0.50", "Steam‘s 0.50", "Steam ver 0.50".
+  /\bsteam(?:\s*[^\w\s]s)?\W+(?:(?:ver(?:sion)?|on|at)\W+)?v?(?:pre-1\.0|0\.50(?:\.\d+)*)(?![\w-]|\.\d)/i,
   // w6485 (497345e4's review of PR #1492): the version named before Steam, "0.50 from Steam", "the 0.50 Steam client".
-  // and a build word, "the" or punctuation between: "0.50 build from Steam", "0.50 (from the Steam store)", "0.50-Steam".
-  /\b(?:pre-1\.0|v?0\.50(?:\.\d+)*)[\s(,-]+(?:(?:build|player|version|copy|client|game)s?\s+)?(?:(?:from|on|via|through|in|over|off)\s+)?(?:the\s+)?steam\b/i,
+  // and a build word, "the" or any punctuation between: "0.50 build from Steam", "0.50 (from the Steam store)", "0.50 / Steam".
+  /\b(?:pre-1\.0|v?0\.50(?:\.\d+)*)\W+(?:(?:build|player|version|copy|client|game)s?\W+)?(?:(?:from|on|via|through|in|over|off)\W+)?(?:the\W+)?steam\b/i,
 ];
 
 /**

@@ -143,3 +143,15 @@ test('w6485: plurals of every build pattern, a word or punctuation around Steam 
     assert.equal(otherPlayerIn(t, NEW), undefined, t);
   }
 });
+
+// w6497's review of PR #1499 (measured lifting the mark at 9bdf2539): any punctuation counts as the separator.
+test('w6485: any punctuation around Steam and its version, and any apostrophe, keeps the mark', () => {
+  for (const t of ['Steam — 0.50', 'Steam –0.50', 'Steam / 0.50', 'Steam; 0.50', 'Steam. 0.50', "Steam 'pre-1.0'", 'Steam "0.50"', 'Steam <0.50>',
+    'Steam‑0.50', '0.50 / Steam', '0.50 — Steam', '0.50 [Steam]', '0.50: Steam', 'Steam‘s 0.50', 'Steam`s 0.50', 'Steam ’s build']) {
+    assert.ok(otherPlayerIn(t, NEW), t);
+  }
+  for (const t of ['a Steam lobby on 0.50', 'the Steam build of the PR head', 'Steam’s build of the PR head', 'join through a Steam lobby',
+    'join with the Steam game client of the PR build', 'Build a release player of the PR head']) {
+    assert.equal(otherPlayerIn(t, NEW), undefined, t);
+  }
+});
