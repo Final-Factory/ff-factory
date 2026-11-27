@@ -315,6 +315,18 @@ test("w6286: install takes a build from a ready entry of the machine's player ca
   put(path.join(linkEntry, "build-manifest.json"), JSON.stringify({ status: "ok" }));
   fs.symlinkSync(path.dirname(outside), path.join(linkEntry, "player"), "junction");
   bad.push(path.join(linkEntry, "player", path.basename(outside)));
+  // w6293 review: a manifest that is a link (to an ok manifest elsewhere) is not read through
+  const linkManifest = path.join(cache, `${"5".repeat(40)}-win`);
+  const okManifest = path.join(tmp(t), "build-manifest.json");
+  put(okManifest, JSON.stringify({ status: "ok" }));
+  fs.mkdirSync(linkManifest, { recursive: true });
+  try {
+    fs.symlinkSync(okManifest, path.join(linkManifest, "build-manifest.json"), "file");
+    bad.push(winBuild(path.join(linkManifest, "player")));
+  } catch (e) {
+    // Windows without Developer Mode makes no file symlink (EPERM); Linux and macOS CI run this case.
+    if ((e as NodeJS.ErrnoException).code !== "EPERM") throw e;
+  }
   for (const exe of bad)
     await refused(() => b.h["players/install"](ME, { player: exe }), 403, /a ready player-cache entry/);
 });

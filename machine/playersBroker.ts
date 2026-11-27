@@ -280,11 +280,23 @@ export function playersRpcHandlers(
     if (!inside(s, cache)) return false;
     const [key, sub] = path.relative(cache, s).split(/[\\/]/);
     if (!key || !PLAYER_CACHE_ENTRY.test(key) || sub !== "player") return false;
+    // w6293 review: the daemon reads the manifest with its own rights, so only a plain file, never through a link (a link
+    // would tell a worker whether a file only the daemon reads is JSON with status ok). The open file must still be the
+    // one lstat saw, so a link swapped in between is refused too.
+    const file = path.join(cache, key, "build-manifest.json");
+    let fd: number | undefined;
     try {
-      const m = JSON.parse(fs.readFileSync(path.join(cache, key, "build-manifest.json"), "utf8")) as { status?: unknown };
+      const before = fs.lstatSync(file, { bigint: true });
+      if (!before.isFile() || isLinkAt(file)) return false;
+      fd = fs.openSync(file, "r");
+      const open = fs.fstatSync(fd, { bigint: true });
+      if (open.ino !== before.ino || open.dev !== before.dev) return false;
+      const m = JSON.parse(fs.readFileSync(fd, "utf8")) as { status?: unknown };
       return m.status === "ok";
     } catch {
       return false;
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
     }
   };
 
