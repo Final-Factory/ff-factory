@@ -959,12 +959,12 @@ function checkStaleOutput(key: string, value: unknown): Partial<StaleOutputSetti
       return value;
     }
   })() : value;
-  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error(`${key} is an object such as { "mode": "dry-run" } (mode on, dry-run or off; everyHours, untouchedHours, shaBuildDays, runRetentionDays, logRetentionDays, tempHours, nightlyKeep, nightlyRoots)`);
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error(`${key} is an object such as { "mode": "dry-run" } (mode on, dry-run or off; everyHours, untouchedHours, shaBuildDays, runRetentionDays, logRetentionDays, tempHours, nightlyKeep, nightlyRoots, ffuBusyRetry off, warn or on, ffuBusyRetryMinutes)`);
   const out: Record<string, unknown> = {};
   const normal = staleOutputSettings(v) as unknown as Record<string, unknown>;
   for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
     if (!(k in STALE_OUTPUT_DEFAULTS) && k !== 'nightlyRoots') throw new Error(`${key}: unknown key "${k}"; known: ${[...Object.keys(STALE_OUTPUT_DEFAULTS), 'nightlyRoots'].join(', ')}`);
-    if (JSON.stringify(normal[k]) !== JSON.stringify(x)) throw new Error(`${key}.${k}: ${JSON.stringify(x)} is not allowed (mode is on, dry-run or off; numbers in range: everyHours 1-336, untouchedHours 6-720, shaBuildDays, runRetentionDays and logRetentionDays 1-365, tempHours 1-720, nightlyKeep 1-20; nightlyRoots a list of folders)`);
+    if (JSON.stringify(normal[k]) !== JSON.stringify(x)) throw new Error(`${key}.${k}: ${JSON.stringify(x)} is not allowed (mode is on, dry-run or off; numbers in range: everyHours 1-336, untouchedHours 6-720, shaBuildDays, runRetentionDays and logRetentionDays 1-365, tempHours 1-720, nightlyKeep 1-20, ffuBusyRetryMinutes 1-60; ffuBusyRetry off, warn or on; nightlyRoots a list of folders)`);
     out[k] = x;
   }
   return out as Partial<StaleOutputSettings>;

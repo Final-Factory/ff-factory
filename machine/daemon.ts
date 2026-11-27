@@ -34,13 +34,13 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
-import { SlotCaches, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
+import { SlotCaches, idleForRefresh, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
 import { playersRpcHandlers } from './playersBroker.ts';
 import { brokerLauncher } from './playersLaunch.ts';
 import { playerFenceFor, type PlayerFence } from './playerFence.ts';
 import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, unlinkShimBinLink, watchShimBin, retryShimWrite, type ShimModeGuard } from './pathFence.ts';
 import { isSlotRepo } from './slotRepo.ts';
-import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
+import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState, restageModeOf } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
 import { junctionRmSignalLine } from '../server/junctionRmWarn.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
@@ -87,6 +87,7 @@ import { RELEASE_SETTINGS, anyBusyNow, ffuSlotBusyNow, mergePlans, planInstallLe
 import { gitBashStrayRoot, gitBashStrayTop, sweepGitBashStray } from '../server/gitBashPath.ts';
 import { publishedFile, readPublished, recordPublished } from '../server/published.ts';
 import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
+import { FfuBusyRetry } from './ffuBusyRetry.ts';
 import { cleanupPass, firstAlonePass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
@@ -333,6 +334,11 @@ export interface DaemonConfig {
    * unset; decided once per daemon process; set remotely by `ops_worker machine_update shared_lock`.
    */
   sharedLock?: 'off' | 'warn' | 'on';
+  /**
+   * w6287: an idle agent whose host was adopted across a sharedLock switch (it keeps the old cache paths and
+   * FF_PLAYER_BROKER): "warn" (default) logs it; "on" ends its agent between turns so its next message starts a new host.
+   */
+  hostRestage?: 'warn' | 'on';
   /** The sandbox pool (add_machine sandbox_root and limits; docs/machines.md "Machine sandboxes"); the portal's welcome overrides it. */
   sandboxes?: SandboxPoolSettings;
   /** Stop a sandbox editor after this long without agent activity there (default 120; 0: never). */
@@ -737,6 +743,7 @@ export class Daemon {
   private ffuReporting = false;
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
   readonly cleaner: CleanupRunner;
+  private ffuRetry?: FfuBusyRetry;
   /** The shared uv cache's daily `uv cache prune` (w5281); only with a worker root. */
   private uvPruner?: UvCachePruner;
   private mediumUvPruner?: UvCachePruner;
@@ -1314,6 +1321,7 @@ export class Daemon {
     if (cfg.root) this.uvPruner = new UvCachePruner({ dir: workerUvCacheDir(cfg.root), uv: () => findUv(), run: runQuiet, log });
     // w5565: the daemon's and Medium agents' own cache, pruned on its own clock.
     if (cfg.root) this.mediumUvPruner = new UvCachePruner({ dir: mediumUvCacheDir(cfg.root), uv: () => findUv(), run: runQuiet, log });
+    this.ffuRetry = this.makeFfuRetry();
     this.cleaner = new CleanupRunner({
       // Below the pool's disk_critical_gb a pass may take a live Unity cache, the last resort (w2752).
       settings: () => ({ everyMinutes: this.cleanupSettings.everyMinutes, softFreeGB: this.cleanupSettings.softFreeGB, criticalFreeGB: this.currentPool()?.diskCriticalGB, staleOutput: staleOutputSettings(this.cleanupSettings.staleOutput) }),
@@ -1359,7 +1367,7 @@ export class Daemon {
             passOpts.step?.('stale (install leftovers)', lastDone, lastSoFar);
             return mergePlans(
               output,
-              await planInstallLeftovers({
+              this.noteFfuBusy(await planInstallLeftovers({
                 root: this.cfg.root,
                 sandboxes: this.pool.list().map((x) => x.path),
                 tempRoots: this.agentTempRoots(),
@@ -1379,22 +1387,24 @@ export class Daemon {
                 ffuSized: this.ffuSized,
                 // w6291: the warn period of the FFU runners' cargo-target sweep counts its misses here, in the daemon's own folder.
                 ...(this.cfg.root ? { runnerWarnFile: path.join(this.cfg.appDir || path.join(this.cfg.root, 'daemon'), 'ffu-runner-sweep-warn.json') } : {}),
-              }),
+              })),
             );
           },
           cap: async () =>
-            planInstallLeftovers({
-              root: this.cfg.root,
-              sandboxes: [],
-              tempRoots: this.agentTempRoots(),
-              guard,
-              ctx: this.staleCtx,
-              procs: await this.procs().catch(() => undefined),
-              self: [process.pid, process.ppid],
-              scope: 'cargo-cap',
-              closed: this.closedSessionDirs(),
-              ffuSized: this.ffuSized,
-            }),
+            this.noteFfuBusy(
+              await planInstallLeftovers({
+                root: this.cfg.root,
+                sandboxes: [],
+                tempRoots: this.agentTempRoots(),
+                guard,
+                ctx: this.staleCtx,
+                procs: await this.procs().catch(() => undefined),
+                self: [process.pid, process.ppid],
+                scope: 'cargo-cap',
+                closed: this.closedSessionDirs(),
+                ffuSized: this.ffuSized,
+              }),
+            ),
           // w6044: the released ffu slots' targets taken first, before the slow steps a restart cuts off.
           first: this.ffuFirstStep(low, guard, ''),
           busyNow: this.cleanupBusyNow(),
@@ -1435,6 +1445,41 @@ export class Daemon {
       },
       // w6044 stage 3: a low trigger that meets a pass in flight that is not low runs the released ffu slots' first step alone.
       firstAlone: (trigger) => this.ffuFirstAlone(trigger),
+    });
+  }
+
+  /** w6290: the slots a pass kept over the cap because something ran from them are re-checked until the next pass. */
+  private noteFfuBusy<T extends { held?: { path: string; bytes: number; why: string }[] }>(plan: T): T {
+    try {
+      this.ffuRetry?.note(plan);
+    } catch {
+      // A note that throws costs the pass nothing.
+    }
+    return plan;
+  }
+
+  /** w6290: the busy ffu slots' re-check (machine/ffuBusyRetry.ts), every ffuBusyRetryMinutes, warn-only unless ffuBusyRetry is on. */
+  private makeFfuRetry(): FfuBusyRetry | undefined {
+    if (!this.cfg.root) return undefined;
+    const roots = [this.cfg.root, ...(this.cfg.extraRoots ?? [])];
+    return new FfuBusyRetry({
+      root: () => this.cfg.root,
+      settings: () => {
+        const so = staleOutputSettings(this.cleanupSettings.staleOutput);
+        return { mode: so.ffuBusyRetry, staleMode: so.mode, everyMinutes: this.cleanupSettings.everyMinutes || 60, retryMinutes: so.ffuBusyRetryMinutes };
+      },
+      plan: async (slots) => {
+        const p = await planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard: this.cleanupGuard(), procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-busy-retry', slots, ffuSized: this.ffuSized });
+        return { ...p, items: fenceToRoot(p.items, roots).inside };
+      },
+      remove: (items) => runCleanup(items, this.cleanupGuard(), this.cleanupBusyNow()),
+      size: (items) => sizePlan(items),
+      passRunning: () => this.cleaner.inPass,
+      log,
+      record: (e) => {
+        appendCleanupLog(appDirOfConfig(this.cfg), e);
+        this.out({ type: 'cleanup_log', entry: trimLogEntry(e) });
+      },
     });
   }
 
@@ -2178,6 +2223,8 @@ export class Daemon {
     // w1946: not while a timed run plays here (its disk work would be in the legs' numbers); the pass comes after it.
     // A timed run defers the clean-up (its legs measure the disk), but not below disk_warn_gb + 5 GB (w3700: CleanupRunnerDeps.hold).
     this.timers.push(setInterval(loopLabel('timer cleaner.tick', () => void this.cleaner.tick().catch((e) => log(`clean-up failed: ${(e as Error).message}`))), 60_000));
+    // w6290: the busy ffu slots a pass kept over the cap, judged again between passes.
+    this.timers.push(setInterval(loopLabel('timer ffuRetry.tick', () => void this.ffuRetry?.maybeTick().catch((e) => log(`clean-up: ffu busy re-check failed (w6290): ${(e as Error).message}`))), 60_000));
     // Its own logs (w2038): every run's kept, the old ones gzipped, the folder capped (machine/logRetention.ts).
     const logsDir = path.join(appDirOfConfig(this.cfg), 'logs');
     const keepLogs = () => {
@@ -3632,8 +3679,16 @@ export class Daemon {
     // w5565: a sandbox agent keeps the workers' uv cache; the daemon's own (Medium) one is read-only to it. w5693: and its uv tool folder.
     const uv = spec.sandbox ? sandboxUvEnv({ ...process.env, ...spec.env }, this.cfg.root) : {};
     // w5615: with the shared lock, its own clones of the tool caches and audit folder, and player_slots.py asks the broker.
-    const slotOwn = spec.sandbox && this.sharedLock !== 'off' ? { ...slotCacheEnv(this.cfg.root, spec.sandbox, this.sharedLock), FF_PLAYER_BROKER: '1' } : {};
+    const slotOwn = this.lockEnvFor(spec.sandbox);
     return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), ...(low?.transcripts ? { transcriptLabels: true } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...slotOwn, ...this.agentTempEnv(info.id, !!spec.sandbox), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
+  }
+
+  /**
+   * w5615: what daemon.json `sharedLock` gives a sandbox run (its slot's cache clones, audit folder, FF_PLAYER_BROKER);
+   * none when off or outside a sandbox. w6287: an adopted host started on another one is restaged (agentHost.ts).
+   */
+  private lockEnvFor(sandbox: string | undefined): Record<string, string> {
+    return sandbox && this.sharedLock !== 'off' ? { ...slotCacheEnv(this.cfg.root, sandbox, this.sharedLock), FF_PLAYER_BROKER: '1' } : {};
   }
 
   /**
@@ -3782,7 +3837,15 @@ export class Daemon {
           ? new SlotCaches({
               root,
               setting: this.sharedLock,
-              sandboxes: () => this.pool.list().map((sb) => ({ id: sb.id, idle: this.liveIn(sb.id) === 0 && !this.pool.editorUp(sb.id) })),
+              // Idle: no live agent, no editor, and nothing else holding its tree: a unity-slot run, a batchmode Unity or a
+              // night (switchHoldIn, as switch_branch refuses; review w6212 L4). One holds() read per tick; one that fails or
+              // does not answer counts every sandbox busy (review w6281).
+              sandboxes: () =>
+                idleForRefresh(
+                  this.pool.list(),
+                  () => this.slots.holds(),
+                  (sb, holds) => this.liveIn(sb.id) === 0 && !this.pool.editorUp(sb.id) && !this.switchHoldIn(sb, holds),
+                ),
               copy: this.workerCopy(),
               removeTree: async (dir) => {
                 await removeTree(dir);
@@ -4750,6 +4813,9 @@ export class Daemon {
       events: this.events,
       handlers: () => this.handlers(info.id),
       spec: () => this.runSpec(info, holder.e!.spec!),
+      // w6287: an adopted host's agent keeps the sharedLock environment it started on; restaged between turns when on.
+      lockEnv: () => this.lockEnvFor(holder.e?.spec?.sandbox),
+      restageMode: () => restageModeOf(this.cfg.hostRestage),
       editorUp: () => {
         const sb = holder.e?.spec?.sandbox;
         return sb ? this.pool.editorUp(sb) : undefined;
@@ -4864,11 +4930,15 @@ export class Daemon {
   private async switchHold(sandbox: string): Promise<string | undefined> {
     const sb = this.pool.list().find((x) => x.id === sandbox);
     if (!sb) return undefined;
+    return this.switchHoldIn(sb, await this.slots.holds().catch(() => ({ reqs: [], unity: [] })));
+  }
+
+  /** switchHold's check from holds already read (the slot cache refresh reads them once per tick and fails closed). */
+  private switchHoldIn(sb: { id: string; path: string }, holds: Awaited<ReturnType<UnitySlots['holds']>>): string | undefined {
     const platform = machinePlatformOf(process.platform);
     const roots = staleOutputSettings(this.cleanupSettings.staleOutput).nightlyRoots ?? defaultNightlyRoots(this.cfg.root);
     const nights = nightsIn({ roots, checkout: sb.path, platform, alive: isAlive, now: Date.now() });
-    const { reqs, unity } = await this.slots.holds().catch(() => ({ reqs: [], unity: [] }));
-    return switchHoldRefusal(sandbox, { nights, runs: slotRunsFor(reqs, sandbox, sb.path, platform), batch: batchUnityIn(unity, sb.path, platform) });
+    return switchHoldRefusal(sb.id, { nights, runs: slotRunsFor(holds.reqs, sb.id, sb.path, platform), batch: batchUnityIn(holds.unity, sb.path, platform) });
   }
 
   /** Live agents in one place: a sandbox, or outside sandboxes (standing agents, sandbox undefined). */
