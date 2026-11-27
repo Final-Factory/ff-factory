@@ -38,7 +38,7 @@ import { statusLinesIn, stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, MEDIA_FILE, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
 import { ciPushHold } from './savePushHold.ts';
-import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
+import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, offSince, onRequest, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
 import { isSamePerson, personForWork, poolOwnerOf, tokenPersonForWork, vaultContext, withPool } from './vault.ts';
 import { ghRunner, githubFromVault, githubPersonOf, githubTokens } from './githubTokens.ts';
 import { clashLine, expectedFiles, type FfuClash, ffuStartClashes, FfuPrReads, peerFilesNote, sharedFilesNote } from './ffuOverlap.ts';
@@ -1624,7 +1624,7 @@ export class Agents {
    */
   private otherWorkerOn(w: WorkItem, i: SessionInfo, workLeft = false): string | undefined {
     const o = w.sessionIds
-      .filter((id) => id !== i.id)
+      .filter((id) => id !== i.id && onRequest(w, id))
       .map((id) => this.store.sessions.get(id))
       .find((x) => !!x && x.kind === 'worker' && (isMidTurn(x) || !!this.sessions.sessions.get(x.id)?.live) && !(x.machineId === i.machineId && x.machineSandbox === i.machineSandbox) && (!workLeft || this.stillWorkingOn(w, x)));
     return o ? `its worker ${o.id} works on it in ${o.machineId}/${o.machineSandbox ?? '?'}` : undefined;
@@ -2477,7 +2477,7 @@ export class Agents {
    */
   spendExportFor(sessionId: string, raw: Record<string, unknown>): string {
     if (!this.spend) throw new Error('the spend record is not wired into this server');
-    const own = [...this.store.work.values()].filter((w) => w.sessionIds.includes(sessionId));
+    const own = [...this.store.work.values()].filter((w) => onRequest(w, sessionId));
     const granted = own.filter((w) => w.spendRead && (WORK_OPEN.includes(w.status) || w.status === 'stalled'));
     if (!granted.length) throw new Error(`spend_export needs a spend-read grant on one of your open requests (${own.map((w) => w.id).join(', ') || 'you are on none'}), and none has one. Its person's orchestrator grants it (update_work spend_read); say in your report what you need and why.`);
     const { args: a, warnings } = clampArgs(raw, { limit: [1, 2000], offset: [0] });
@@ -2491,7 +2491,7 @@ export class Agents {
    */
   async workTimingFor(sessionId: string, raw: Record<string, unknown>): Promise<string> {
     this.transcriptAccessOf(sessionId, 'work_timing');
-    const own = [...this.store.work.values()].filter((w) => w.sessionIds.includes(sessionId) && (WORK_OPEN.includes(w.status) || w.status === 'stalled'));
+    const own = [...this.store.work.values()].filter((w) => onRequest(w, sessionId) && (WORK_OPEN.includes(w.status) || w.status === 'stalled'));
     if (!own.some((w) => w.ledgerRead)) throw new Error(`work_timing needs a ledger-read grant on an open request of yours (${own.map((w) => w.id).join(', ') || 'you are on none'}). Its person's orchestrator grants it (update_work ledger_read); say in your report what you need and why.`);
     const { args: a, warnings } = clampArgs(raw, { last: [1, 300] });
     const sessions = this.store.sessions;
@@ -3173,7 +3173,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       ...(m.attachments?.length ? { attachments: m.attachments.map((a) => a.id) } : {}),
     }).then(
       (said) => {
-        const to = this.store.work.get(w.id)?.sessionIds.at(-1);
+        // w6309 (the w6335 review): the new session is the newest worker on it, never one moved off it that a merge listed again.
+        const x = this.store.work.get(w.id);
+        const to = x?.sessionIds.filter((sid) => onRequest(x, sid)).at(-1);
         if (!to || to === id || !this.store.sessions.get(to)) throw new Error(`no new session: ${String(said).slice(0, 200)}`);
         this.carryOver(id, to, w.id);
         console.log(`fresh-after-merge pilot (w2043): ${w.id}: worker ${id} ended after PR ${prs} merged; fresh session ${to} goes on (pilot arm)`);
@@ -3212,7 +3214,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   private endAfterMerge(i: SessionInfo) {
     if (freshAfterMergePercent(this.cfg) <= 0 || i.kind !== 'worker') return;
     const all = [...this.store.work.values()];
-    if (all.some((w) => isOpen(w) && w.sessionIds.includes(i.id))) return;
+    if (all.some((w) => isOpen(w) && onRequest(w, i.id))) return;
     const w = mergedInSession(i, all, this.cfg);
     if (!w) return;
     console.log(`fresh-after-merge pilot (w2043): worker ${i.id} ends after ${w.id}'s PR merged and it holds nothing open: ${this.orchestrators.retireWhenFree(i.id)}`);
@@ -3642,7 +3644,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   private onWorkerTempSize(s: SessionHandle, arg: unknown) {
     const line = tempSizeLedgerLine(s.info.id, arg);
     if (!line) return;
-    const open = [...this.store.work.values()].filter((w) => isOpen(w) && w.sessionIds.includes(s.info.id));
+    const open = [...this.store.work.values()].filter((w) => isOpen(w) && onRequest(w, s.info.id));
     if (!open.length) return console.warn(`${line} (no open request)`);
     // A note (quiet): it is no activity on the request.
     for (const w of open) this.orchestrators.ledgerEdit(w.id, line, () => undefined, true);
@@ -3653,7 +3655,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const line = capLedgerLine(s.info.id, arg);
     if (!line) return;
     console.warn(line);
-    const open = [...this.store.work.values()].filter((w) => isOpen(w) && w.sessionIds.includes(s.info.id));
+    const open = [...this.store.work.values()].filter((w) => isOpen(w) && onRequest(w, s.info.id));
     // Not quiet: a person should see a runaway was stopped.
     for (const w of open) this.orchestrators.ledgerEdit(w.id, line, () => undefined);
   }
@@ -4048,7 +4050,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     if (!i.machineId || isMidTurn(i)) return undefined;
     // w1863: a hold that names requests it lets through resumes their workers (lothsahn: "stop all work on LothDesktop
     // except w1785 until it's done"; at 15:15 the hold kept for w1785 queued a message to w1785's own worker).
-    const mine = [...this.store.work.values()].filter((w) => isOpen(w) && w.sessionIds.includes(i.id)).map((w) => w.id);
+    const mine = [...this.store.work.values()].filter((w) => isOpen(w) && onRequest(w, i.id)).map((w) => w.id);
     // w5895, w5937: a drain set to let only its running workers finish ("and none resume") holds the resume of any other
     // worker there that no exception lets through, until hold_machine lift, update_work hold lift or resumes 'all'.
     const why = holdReason(i.machineId, this.placement(false), mine) ?? this.builds.resumeHold(i) ?? (i.kind === 'worker' ? this.drainResumeHold(i, mine) : undefined);
@@ -4066,7 +4068,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   private drainOrphan(s: SessionHandle): string | undefined {
     const i = s.info;
     if (i.kind !== 'worker' || !i.machineId || isMidTurn(i)) return undefined;
-    if ([...this.store.work.values()].some((w) => isOpen(w) && w.sessionIds.includes(i.id))) return undefined;
+    if ([...this.store.work.values()].some((w) => isOpen(w) && onRequest(w, i.id))) return undefined;
     const why = this.machineHold(s);
     if (!why || why !== this.drainResumeHold(i, [])) return undefined;
     return `${i.machineId} is drained to let only its running workers finish, and worker ${i.id} has no open request left, so its held message is dropped (w5937)`;
@@ -4593,7 +4595,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   private movableWorkOf(info: SessionInfo): { reqs: WorkItem[]; owned: WorkItem[]; gone: WorkItem[] } {
     const out = { reqs: [] as WorkItem[], owned: [] as WorkItem[], gone: [] as WorkItem[] };
     for (const w of this.openWorkOf(info)) {
-      if (!w.sessionIds.includes(info.id) && w.movedOff?.[info.id]) out.gone.push(w);
+      if (offSince(w, info.id)) out.gone.push(w);
       else if (!w.pair?.started?.legs.some((l) => l.session === info.id) && this.otherWorkerOn(w, info, true)) out.owned.push(w);
       else out.reqs.push(w);
     }
@@ -4622,7 +4624,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * worker it went to after it moved off `info`.
    */
   private heirOf(w: WorkItem, info: SessionInfo): SessionInfo | undefined {
-    const at = w.sessionIds.filter((id) => id !== info.id).map((id) => this.store.sessions.get(id)).filter((x): x is SessionInfo => !!x && x.kind === 'worker');
+    const at = w.sessionIds.filter((id) => id !== info.id && onRequest(w, id)).map((id) => this.store.sessions.get(id)).filter((x): x is SessionInfo => !!x && x.kind === 'worker');
     const working = at.find((x) => (isMidTurn(x) || !!this.sessions.sessions.get(x.id)?.live) && !(x.machineId === info.machineId && x.machineSandbox === info.machineSandbox) && this.stillWorkingOn(w, x));
     return working ?? at.at(-1);
   }
@@ -4672,11 +4674,11 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       const w = this.store.work.get(id);
       return !!w && isOpen(w);
     });
-    const moved = items.filter((w) => isOpen(w) && !!w.movedOff?.[info.id] && !w.sessionIds.includes(info.id));
+    const moved = items.filter((w) => isOpen(w) && offSince(w, info.id));
     const heirs = (w: WorkItem): HeirFacts[] =>
       w.sessionIds.flatMap((id) => {
         const x = this.store.sessions.get(id);
-        if (!x || x.kind !== 'worker' || id === info.id) return [];
+        if (!x || x.kind !== 'worker' || id === info.id || !onRequest(w, id)) return [];
         return [{ id, live: !!this.sessions.sessions.get(id)?.live, turns: x.turns ?? 0, midTurn: isMidTurn(x), status: x.status, ...(x.stoppedOnPurpose ? { stoppedOnPurpose: true } : {}), sameSandbox: x.machineId === info.machineId && x.machineSandbox === info.machineSandbox }];
       });
     return { facts: { stillHolds, moving: this.roomMoving.has(info.id) || this.timedMoving.has(info.id), moved: moved.map((w) => ({ id: w.id, heirs: heirs(w) })) }, moved };
@@ -5127,7 +5129,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       const since = x.handedBack?.at;
       if (!since) return undefined;
       const id = x.sessionIds
-        .filter((sid) => sid !== info.id && (x.links?.[sid]?.at ?? '') >= since)
+        .filter((sid) => sid !== info.id && onRequest(x, sid) && (x.links?.[sid]?.at ?? '') >= since)
         .sort((p, r) => (x.links![p]!.at < x.links![r]!.at ? -1 : x.links![p]!.at > x.links![r]!.at ? 1 : 0))
         .at(-1);
       const n = id ? this.store.sessions.get(id) : undefined;
@@ -5329,9 +5331,10 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * fetched, a held pool), which the status list alone missed: 9a3c8e5d, w2547's first worker, was such a one.
    */
   workersOn(w: WorkItem): string[] {
+    // w6309 (the w6331 review): a worker moved off it that a merge listed again is not one of its workers (onRequest).
     return w.sessionIds.filter((id) => {
       const info = this.store.sessions.get(id);
-      if (!info || info.kind !== 'worker') return false;
+      if (!info || info.kind !== 'worker' || !onRequest(w, id)) return false;
       return ['running', 'starting', 'waiting_permission', 'idle'].includes(info.status) || occupies(info, !!this.sessions.sessions.get(id)?.live);
     });
   }
@@ -5563,7 +5566,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // w2521: work pinned to its computer is never moved to an idle one.
     const pin = this.pinOf(w);
     if (pin) return { stays: `it must run on ${pin.ids.join(' or ')} (${pin.why})` };
-    const live = w.sessionIds.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && s.kind === 'worker' && !!s.machineId && occupies(s, !!this.sessions.sessions.get(s.id)?.live, Date.now()));
+    const live = w.sessionIds.filter((id) => onRequest(w, id)).map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && s.kind === 'worker' && !!s.machineId && occupies(s, !!this.sessions.sessions.get(s.id)?.live, Date.now()));
     if (live.length !== 1) return undefined;
     const info = live[0];
     if (info.movedAway || this.timedMoving.has(info.id)) return undefined;
@@ -6267,7 +6270,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       if (this.benchTold.has(key)) continue;
       if (agentState(s, undefined, now).resumes?.startsWith('check-in')) continue;
       for (const w of items) {
-        if (!w.sessionIds.includes(s.id) || w.done?.[s.id]) continue;
+        if (!onRequest(w, s.id) || w.done?.[s.id]) continue;
         const l = lastOpenLine(w, s, now);
         const named = l && !l.logged ? benchWaitOf(l.line) : undefined;
         if (named === undefined) continue;
@@ -7042,7 +7045,8 @@ A report is for a person who asked for one, and people want very few. File one w
     const m = t.machineSandbox ? this.store.machines.get(t.machine) : undefined;
     const sb = m?.sandboxes?.find((x) => x.id === t.machineSandbox);
     if (!m || !sb) return;
-    const mine = workId ? this.store.work.get(workId.toLowerCase())?.sessionIds ?? [] : [];
+    const own = workId ? this.store.work.get(workId.toLowerCase()) : undefined;
+    const mine = own ? own.sessionIds.filter((id) => onRequest(own, id)) : [];
     // w2548: the request's own workers count too: two workers of one request in one sandbox share its tree as two
     // requests' would (w2547's 9a3c8e5d and 57ab10fc in lothdesktop/slot1, 2026-10-29).
     const there = this.sessionsOf(sb.sessionIds).filter((x) => x.kind === 'worker' && occupies(x, !!this.sessions.sessions.get(x.id)?.live));
@@ -7479,7 +7483,7 @@ A report is for a person who asked for one, and people want very few. File one w
     const priority = w?.priority ?? 'normal';
     const why = reservedReason(machine, this.placement(), priority);
     if (!why) return undefined;
-    if (w?.sessionIds.some((id) => placeId(this.store.sessions.get(id)?.machineId ?? '') === placeId(machine))) return undefined;
+    if (w?.sessionIds.some((id) => onRequest(w, id) && placeId(this.store.sessions.get(id)?.machineId ?? '') === placeId(machine))) return undefined;
     return `${placeId(machine)} is ${why}: ${w ? `${w.id} is ${priority}` : 'work started without a request counts as normal'}, so it does not go there. Start it on another computer (the Capacity block's Next lines, list_sandboxes), or queue it (decide_work queue) when none has room; a request a person raises to the level may go there at once.`;
   }
 
@@ -7859,7 +7863,7 @@ A report is for a person who asked for one, and people want very few. File one w
               }
               // A crash request that looks like one a worker is on (w1827, lothsahn: "the orchestrator should look at the
               // findings and see if they should be sent to the same worker"): a new worker needs what in FFBox's findings differs.
-              const working = (x: WorkItem) => x.sessionIds.some((id) => ['running', 'starting', 'waiting_permission', 'idle'].includes(this.store.sessions.get(id)?.status ?? 'stopped'));
+              const working = (x: WorkItem) => x.sessionIds.some((id) => onRequest(x, id) && ['running', 'starting', 'waiting_permission', 'idle'].includes(this.store.sessions.get(id)?.status ?? 'stopped'));
               const crashPeers = this.orchestrators.crashPeers(w).filter((x) => isOpen(x) && working(x));
               if (crashPeers.length && !override) {
                 throw new Error(`${w.id} may be the same crash as ${crashPeers.map((x) => x.id).join(', ')}, which a worker is on.\n\n${this.orchestrators.crashPeersText(w, crashPeers)}`);
@@ -8107,7 +8111,7 @@ ${w.repo ?? ''}
             }
             const requestedBy = actor(for_user, work_id);
             const item = work_id ? this.orchestrators.requireWork(work_id) : undefined;
-            const linked = !!item?.sessionIds.includes(w.info.id);
+            const linked = !!item && onRequest(item, w.info.id);
             // A gated request is not given to a worker, not even the one already on it (w754): what people add is kept for
             // when the gates clear and it is resumed. A message_agent would also mark it active and drop the gates.
             const gated = item ? this.orchestrators.gateProblem(item, override_gate) : undefined;

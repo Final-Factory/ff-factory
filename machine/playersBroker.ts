@@ -23,6 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { RpcRefused, type Caller } from "./daemonRpc.ts";
 import { PLAYER_CACHE_ENTRY } from "./playerCache.ts";
+import { isLightId } from "./lightFolders.ts";
 import { okSandboxId } from "./slotCaches.ts";
 import { isLinkAt, linkIn, plainDirAt, real, writeFileSafe, writeNew, type WorkerCopy } from "./workerCopy.ts";
 
@@ -87,7 +88,7 @@ export interface PlayersBrokerDeps {
   alive?: (pid: number) => boolean;
   log: (l: string) => void;
   now?: () => number;
-  /** "warn": note it in the log; the broker answers the same either way. */
+  /** The OS the slots' players run on (default process.platform): on win32 a light folder has no slot (w6348). */
   platform?: NodeJS.Platform;
 }
 
@@ -164,6 +165,19 @@ export function bundleExe(app: string): string {
   return path.join(dir, files[0]);
 }
 
+/**
+ * w6348: on Windows a light agent folder (agentN, machine/lightFolders.ts) has no player slot that can start. Windows Firewall
+ * rules name one exact program path, and the worker install's elevated firewall step (scripts/worker/firewall.ps1, w1742)
+ * makes them for the game sandboxes' slotK-0/-1 only; light folders are numbered as agents start (agent1..agent999), so no
+ * fixed rule list covers them, and the game repo's player_slots.py refuses a player with no rule. So the broker refuses
+ * install and launch for them up front, saying where to run instead. Linux and macOS have no per-path rule: they go on.
+ */
+export const lightSlotRefusal = (sandbox: string, slot: string) =>
+  `players: ${sandbox} is a light agent folder, and on Windows its slot ${slot} can start no player: ` +
+  `the worker install's firewall step makes allow rules only for the game sandboxes' slots (slotK-0/-1), ` +
+  `so player_slots.py would refuse it for a missing firewall rule. Run the player from a game sandbox ` +
+  `(a request that needs a sandbox, not only an agent slot) (w6348)`;
+
 export function playersRpcHandlers(
   d: PlayersBrokerDeps,
 ): Record<string, (c: Caller, b: Record<string, unknown>) => unknown> {
@@ -183,6 +197,7 @@ export function playersRpcHandlers(
     const peer = b.peer === undefined ? 0 : b.peer;
     if (peer !== 0 && peer !== 1) throw refuse(400, "players: peer is 0 or 1");
     const name = `${c.sandbox}-${peer}`;
+    if (isLightId(c.sandbox) && (d.platform ?? process.platform) === "win32") throw refuse(409, lightSlotRefusal(c.sandbox, name));
     return { name, dir: path.join(players, name), sandbox: c.sandbox };
   };
   const readMarker = (dir: string): PlayersMarker | undefined => {
