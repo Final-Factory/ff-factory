@@ -6670,7 +6670,41 @@ A report is for a person who asked for one, and people want very few. File one w
    * A sandbox ready for new work: ready, with no live agent and none between turns to come back to it (w475). Its label is
    * its name and says nothing about use (w575).
    */
-  private free(x: { id: string; kind?: 'light'; status: string; sessionIds: string[]; lingering?: unknown[]; path?: string; git?: { dirty: number } }, machineId?: string) {
+  private free(x: { id: string; kind?: 'light'; status: string; sessionIds: string[]; lingering?: unknown[]; path?: string; git?: { dirty: number } }, machineId?: string): boolean {
+    // w6428: within pageRead, each sandbox's answer once: a page's state build asked every sandbox three times (its machine
+    // view, then placesNow's freeSandboxes and idleEditors), 75-90 ms of 'machines' and much of 'room' on 2026-11-27.
+    const memo = this.freeMemo;
+    if (!memo) return this.freeNow(x, machineId);
+    const key = `${machineId ?? ''}/${x.id}`;
+    const had = memo.get(key);
+    if (had && had.x === x) return had.v;
+    const v = this.freeNow(x, machineId);
+    memo.set(key, { x, v });
+    return v;
+  }
+
+  /** w6428: free() of each sandbox within pageRead, `${machineId}/${id}`, with the sandbox object it was asked of (a new one asks afresh). */
+  private freeMemo?: Map<string, { x: object; v: boolean }>;
+
+  /** How many times free() worked a sandbox out (w6428 tests: once per sandbox within pageRead). */
+  freeMade = 0;
+
+  /**
+   * w6428: runs read-only `fn` (a page's state build) with places(), each machine's claims and each sandbox's free() worked
+   * out once. Only for reads that change no placement: unlike withPlacesOnce, nothing empties the free() memo inside it.
+   */
+  pageRead<T>(fn: () => T): T {
+    if (this.freeMemo) return fn();
+    this.freeMemo = new Map();
+    try {
+      return this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(fn));
+    } finally {
+      this.freeMemo = undefined;
+    }
+  }
+
+  private freeNow(x: { id: string; kind?: 'light'; status: string; sessionIds: string[]; lingering?: unknown[]; path?: string; git?: { dirty: number } }, machineId?: string): boolean {
+    this.freeMade++;
     if (x.status !== 'ready') return false;
     // w5924: a light agent folder is one worker's own, never a FREE game sandbox (agent work gets a new one: lightTarget).
     if (isLight(x)) return false;

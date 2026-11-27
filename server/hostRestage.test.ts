@@ -59,10 +59,10 @@ function rig(id: string, mode: RestageMode | undefined) {
 }
 
 /** The host's agent reports a state, as its host's out.jsonl line does; the daemon's poll reads it. */
-const say = async (r: ReturnType<typeof rig>, status: SessionInfo['status'], live: boolean, id: string) => {
+const say = async (r: ReturnType<typeof rig>, status: SessionInfo['status'], live: boolean, id: string, backgroundTasks?: number) => {
   const before = r.commands().length;
-  r.hostSays({ op: 'state', info: info(id, status), live, lastFrom: 'system' });
-  await until(`the session reads ${status}`, () => r.s.info.status === status && r.s.live === live);
+  r.hostSays({ op: 'state', info: { ...info(id, status), ...(backgroundTasks ? { backgroundTasks } : {}) }, live, lastFrom: 'system' });
+  await until(`the session reads ${status}`, () => r.s.info.status === status && r.s.live === live && (r.s.info.backgroundTasks ?? 0) === (backgroundTasks ?? 0));
   // The same status as before reads at once: a few of the daemon's polls (100 ms) so this line is read too.
   await new Promise((res) => setTimeout(res, 400));
   return before;
@@ -130,6 +130,23 @@ test('w6287: a restage the host skipped (a turn had started) is asked again at t
   await say(r, 'running', true, 'h2');
   await say(r, 'idle', true, 'h2');
   assert.deepEqual(r.commands().map((c) => c.op), ['send', 'restage', 'restage']);
+});
+
+test('w6439: hostRestage on: an idle agent with a background task is not restaged until its task ends, then once', { timeout: 30_000 }, async (t) => {
+  const r = rig('h5', 'on');
+  t.after(() => fs.rmSync(r.root, { recursive: true, force: true }));
+  r.s.send('first turn', 'system');
+  await say(r, 'idle', true, 'h5');
+  // ed1d17df (w6291) on LothDesktop: idle with a background task while its host was on the old environment.
+  r.switchToWarn();
+  await say(r, 'idle', true, 'h5', 1);
+  await say(r, 'idle', true, 'h5', 1);
+  assert.deepEqual(r.commands().map((c) => c.op), ['send'], 'never a restage while a background task runs');
+  // Its task ends: the host is told to restage, once.
+  await say(r, 'idle', true, 'h5');
+  assert.deepEqual(r.commands().map((c) => c.op), ['send', 'restage']);
+  await say(r, 'idle', true, 'h5');
+  assert.deepEqual(r.commands().map((c) => c.op), ['send', 'restage'], 'asked once');
 });
 
 test('w6287: hostRestage warn (the default) only logs an agent on the old environment, once, and never stops it', { timeout: 30_000 }, async (t) => {

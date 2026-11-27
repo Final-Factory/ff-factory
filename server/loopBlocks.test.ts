@@ -269,3 +269,32 @@ test('w6381: a drain checks a held computer\'s pause for each message inside its
   assert.equal(sessions.queued().filter((q) => q.id === c.id).length, 0, 'the notice went');
   assert.equal(sessions.queued().filter((q) => q.id === a.id || q.id === b.id).length, 2, 'the others still wait');
 });
+
+test('w6428: a page build\'s placement (pageRead) works out each sandbox\'s FREE once, with the same answers and room', async (t) => {
+  const env = await setupOnMachine(t, {}, { sandboxes: ['alpha', 'beta', 'gamma', 'delta'] });
+  const { agents, store } = env;
+  const sbs = store.machines.get('pc')!.sandboxes!;
+  const read = () => ({ free: agents.sandboxesFree('pc', sbs), room: agents.roomNow(), extras: agents.roomExtras() });
+  let f0 = agents.freeMade;
+  const before = agents.withPlacesOnce(() => agents.placeAgain.withClaimsMemo(read));
+  const askedBefore = agents.freeMade - f0;
+  f0 = agents.freeMade;
+  const after = agents.pageRead(read);
+  assert.deepEqual(after.free, before.free);
+  assert.deepEqual(after.room, before.room);
+  assert.deepEqual(after.extras, before.extras);
+  assert.equal(agents.freeMade - f0, sbs.length, `once per sandbox (${askedBefore} times outside pageRead)`);
+  assert.ok(askedBefore > sbs.length, `outside pageRead each sandbox was asked more than once (${askedBefore})`);
+  // A sandbox the daemon reported again is a new object: asked afresh, not answered from the memo.
+  agents.pageRead(() => {
+    agents.sandboxesFree('pc', sbs);
+    f0 = agents.freeMade;
+    agents.sandboxesFree('pc', sbs.map((sb) => ({ ...sb })));
+    assert.equal(agents.freeMade - f0, sbs.length);
+  });
+  // Outside pageRead nothing is kept.
+  f0 = agents.freeMade;
+  agents.sandboxFree('pc', sbs[0]);
+  agents.sandboxFree('pc', sbs[0]);
+  assert.equal(agents.freeMade - f0, 2);
+});

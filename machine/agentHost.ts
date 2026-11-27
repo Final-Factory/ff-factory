@@ -961,7 +961,9 @@ export class HostedSession implements SessionHandle {
    */
   private restageIfOther() {
     if (!this.deps.lockEnv || !this.running || !this.liveNow || this.stoppingNow || this.waiting.length) return;
-    if (isMidTurn(this.info)) {
+    // w6439: a background task (a build, a measurement, a player it launched) waits like a turn does: a restage ends the
+    // host's whole tree, which would end it and lose its completion notice (codeMove, accountMove and liveIdle skip it too).
+    if (isMidTurn(this.info) || (this.info.backgroundTasks ?? 0) > 0) {
       // A restage the host skipped (a turn had started) is asked again at this turn's end; a warning is said once per host.
       if (this.restaged !== 'warned') this.restaged = undefined;
       return;
@@ -1315,6 +1317,11 @@ export async function runHost(dir: string, start: HostStart): Promise<void> {
         // w6287: never mid-turn. A send read before this one has started a turn: skip it, and the daemon asks again.
         if (!session.live || isMidTurn(session.info)) {
           console.log(new Date().toISOString(), `restage skipped: its agent is ${session.live ? session.info.status : 'not live'}`);
+          return;
+        }
+        // w6439: nor while a background task runs (ending the agent would end it); the daemon asks again once it is done.
+        if ((session.info.backgroundTasks ?? 0) > 0) {
+          console.log(new Date().toISOString(), 'restage skipped: a background task runs');
           return;
         }
         console.log(new Date().toISOString(), `restage: ${c.why}; its agent ends between turns`);
