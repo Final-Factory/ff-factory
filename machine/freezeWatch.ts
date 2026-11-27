@@ -52,7 +52,7 @@ const WORKER_SOURCE = `
 const { workerData } = require('node:worker_threads');
 const fs = require('node:fs');
 const beat = new BigInt64Array(workerData.sab);
-const { afterMs, repeatMs, exitMs, everyMs, fd, who } = workerData;
+const { afterMs, repeatMs, exitMs, everyMs, beatMs, fd, who } = workerData;
 const out = (line) => {
   try { fs.writeSync(fd, new Date().toISOString() + ' ' + line + '\\n'); } catch {}
 };
@@ -106,7 +106,8 @@ function askStack() {
       out('event loop: frozen: could not read the main thread\\'s stack: ' + ((e && e.message) || e));
     }
     // The stack is in the log: end now, after the resume has gone out (a short wait), not at the fallback's time.
-    if (ending) { clearTimeout(ending); ending = setTimeout(end, 200); }
+    // Two beats' time first, so a main loop that has just come free has beaten again before the last look.
+    if (ending) { clearTimeout(ending); ending = setTimeout(end, 2 * beatMs + 200); }
   });
   s.post('Debugger.enable', (e) => {
     if (e) { out('event loop: frozen: could not read the main thread\\'s stack: ' + e.message); drop(s); return; }
@@ -115,8 +116,14 @@ function askStack() {
     });
   });
 }
+let lookedAt = Date.now();
 setInterval(() => {
   const now = Date.now();
+  // This thread was held too (the computer slept, or the clock jumped): a gap seen now is no freeze of the main loop alone.
+  // Skip this look; the main loop beats again within beatMs if it runs.
+  const held = now - lookedAt > Math.max(5 * everyMs, 5000) || now < lookedAt;
+  lookedAt = now;
+  if (held) { warnedAt = 0; return; }
   const last = Number(Atomics.load(beat, 0));
   const gap = now - last;
   if (gap < afterMs) { warnedAt = 0; return; }
@@ -155,7 +162,7 @@ export function startFreezeWatch(o: { afterMs: number; repeatMs: number; exitMs?
   timer.unref();
   const w = new Worker(WORKER_SOURCE, {
     eval: true,
-    workerData: { sab, afterMs: o.afterMs, repeatMs: o.repeatMs, exitMs: o.exitMs ?? 0, everyMs: o.everyMs ?? 1000, fd: o.fd ?? 1, who: o.who ?? 'the daemon' },
+    workerData: { sab, afterMs: o.afterMs, repeatMs: o.repeatMs, exitMs: o.exitMs ?? 0, everyMs: o.everyMs ?? 1000, beatMs: o.beatMs ?? 1000, fd: o.fd ?? 1, who: o.who ?? 'the daemon' },
     // Its own small heap: a thread that only reads a clock and writes a line.
     resourceLimits: { maxOldGenerationSizeMb: 16, maxYoungGenerationSizeMb: 4 },
   });

@@ -60,7 +60,8 @@ next JavaScript step (the in-process inspector, no port), and both again every `
 Once a freeze reaches `exitMin` (default 3) the watch writes `... ending it so its supervisor starts a fresh one`, reads the
 stack once more (5 s at most), looks again, and ends the process with SIGKILL (TerminateProcess on Windows), since a frozen
 main thread runs no exit of its own: `event loop: ending the daemon now (SIGKILL)` is its last line. A loop that came free
-in that moment is left running (`came free before it was ended`). Its supervisor starts a fresh daemon: `run-daemon.ps1`
+in that moment is left running (`came free before it was ended`; the last look waits two beats), and a gap the watch's own
+thread shares (the computer slept, the clock jumped) is no freeze. Its supervisor starts a fresh daemon: `run-daemon.ps1`
 restarts on every exit but 75, 10 s later after a run of over 5 minutes (`server/machineDeployWin.ts`); a Mac's LaunchAgent
 has KeepAlive true and ThrottleInterval 10 (`server/machineDeploy.ts`); Linux's unit has `Restart=always`, `RestartSec=10`
 and `KillMode=process` (`server/machineDeployLinux.ts`). Agent hosts run detached in their own process group, so they and
