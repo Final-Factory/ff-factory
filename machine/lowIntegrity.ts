@@ -623,7 +623,9 @@ export function lockCopyScript(p: string): string {
   ].join('\n');
 }
 
-const psqLock = (s: string) => `'${s.replace(/'/g, "''")}'`;
+// w6321 review (w6325): PowerShell also ends a single-quoted string at the curly quotes U+2018, U+2019, U+201A and
+// U+201B, so each of them is doubled as well as the ASCII one.
+const psqLock = (s: string) => `'${s.replace(/['‘’‚‛]/g, '$&$&')}'`;
 
 /**
  * w6321: a PowerShell script that removes these files with .NET's File.Delete (DeleteFileW: DELETE access alone, which the
@@ -631,10 +633,34 @@ const psqLock = (s: string) => `'${s.replace(/'/g, "''")}'`;
  * `err <i> <why>` for each. Exported for tests.
  */
 export function deleteFilesScript(paths: readonly string[]): string {
+  // Each path once, in a list a loop walks (w6325: a line a path, with the path in it twice, made about 730 characters of
+  // command line a path, and past about 44 paths Windows refused the call, ENAMETOOLONG).
   return [
     "$ErrorActionPreference = 'Stop'",
-    ...paths.map((p, i) => `try { [System.IO.File]::Delete(${psqLock(p)}); if ([System.IO.File]::Exists(${psqLock(p)})) { 'kept ${i}' } else { 'gone ${i}' } } catch { 'err ${i} ' + $_.Exception.GetBaseException().Message }`),
+    `$p = @(${paths.map(psqLock).join(',')})`,
+    'for ($i = 0; $i -lt $p.Count; $i++) { try { [System.IO.File]::Delete($p[$i]); if ([System.IO.File]::Exists($p[$i])) { "kept $i" } else { "gone $i" } } catch { "err $i " + $_.Exception.GetBaseException().Message } }',
   ].join('\n');
+}
+
+/**
+ * w6321 review (w6325): the paths in batches of at most DELETE_BATCH, each script at most DELETE_SCRIPT_CHARS long, so its
+ * call (base64 of UTF-16: 8/3 characters a script character, about 21,000) stays well inside Windows' 32,767-character
+ * command line. A single path longer than that still gets a batch of its own (its call then fails alone). Exported for tests.
+ */
+export const DELETE_BATCH = 20;
+export const DELETE_SCRIPT_CHARS = 8_000;
+export function deleteBatches(paths: readonly string[]): string[][] {
+  const out: string[][] = [];
+  let cur: string[] = [];
+  for (const p of paths) {
+    if (cur.length && (cur.length >= DELETE_BATCH || deleteFilesScript([...cur, p]).length > DELETE_SCRIPT_CHARS)) {
+      out.push(cur);
+      cur = [];
+    }
+    cur.push(p);
+  }
+  if (cur.length) out.push(cur);
+  return out;
 }
 
 /**
@@ -718,7 +744,7 @@ export class LowCopies {
         this.say(`worker integrity: could not remove ${p} (${why}); its name is skipped (w6321)`);
       }
       const copy = names.find((p) => !fs.existsSync(p));
-      if (!copy) throw new Error(`no free name for it in ${dir}: ${COPY_SLOTS} copies of it could not be removed (still running?); the last said: ${[...kept.values()].pop() ?? 'nothing'} (w6321)`);
+      if (!copy) throw new Error(`no free name for it in ${dir}: ${COPY_SLOTS} copies of it could not be removed; the last said: ${[...kept.values()].pop() ?? 'nothing'} (w6321)`);
       const part = `${copy}.part`;
       fs.rmSync(part, { force: true });
       fs.copyFileSync(exe, part);
@@ -762,7 +788,7 @@ export class LowCopies {
     for (const [p, why] of this.removeCopies(old)) {
       if (this.keptSaid.has(p)) continue;
       this.keptSaid.add(p);
-      this.say(`worker integrity: kept the old Low copy ${p} (${why}; still running?); tried again after the next copy is made (w6321)`);
+      this.say(`worker integrity: kept the old Low copy ${p} (${why}); tried again after the next copy is made (w6321)`);
     }
   }
 
@@ -795,20 +821,30 @@ export class LowCopies {
       }
     }
     if (!retry.length) return kept;
-    const r = this.exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(deleteFilesScript(retry.map((x) => x.p)), 'utf16le').toString('base64')]);
-    const said = new Map<number, string>();
-    for (const l of r.stdout.split(/\r?\n/)) {
-      const m = /^(gone|kept|err) (\d+) ?(.*)$/.exec(l.trim());
-      if (m) said.set(Number(m[2]), m[1] === 'err' ? m[3] : m[1]);
-    }
-    retry.forEach(({ p, why }, i) => {
-      if (said.get(i) === 'gone' && !fs.existsSync(p)) {
-        this.copies.delete(p);
-        return;
+    const nodeSaid = new Map(retry.map((x) => [x.p, x.why]));
+    // w6325: one call a batch, so a long backlog fits the command line; a batch whose call fails (refused, a timeout, a
+    // throw) keeps only its own paths, each said with that call's own error, and the next batch still runs.
+    for (const batch of deleteBatches(retry.map((x) => x.p))) {
+      let r: Ran;
+      try {
+        r = this.exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(deleteFilesScript(batch), 'utf16le').toString('base64')]);
+      } catch (e) {
+        r = { code: null, stdout: '', stderr: (e as Error).message };
       }
-      const ps = said.get(i) ?? ((r.stderr || r.stdout).trim().slice(-200) || `no answer (exit ${r.code})`);
-      kept.set(p, `Node: ${why}; File.Delete: ${ps}`.slice(0, 300));
-    });
+      const said = new Map<number, string>();
+      for (const l of r.stdout.split(/\r?\n/)) {
+        const m = /^(gone|kept|err) (\d+) ?(.*)$/.exec(l.trim());
+        if (m) said.set(Number(m[2]), m[1] === 'err' ? m[3] : m[1]);
+      }
+      batch.forEach((p, i) => {
+        if (!fs.existsSync(p)) {
+          this.copies.delete(p);
+          return;
+        }
+        const ps = said.get(i) ?? ((r.stderr || r.stdout).trim().slice(-200) || `no answer (exit ${r.code})`);
+        kept.set(p, `Node: ${nodeSaid.get(p)}; File.Delete: ${ps}`.slice(0, 300));
+      });
+    }
     return kept;
   }
 

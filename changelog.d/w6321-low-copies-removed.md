@@ -8,3 +8,8 @@
   refuses to remove a copy a live process runs (measured), so one still running is kept, said with its error (once per
   daemon run for an old one), and tried again after the next copy is made. A copy is still never taken over (w5838).
   Tests: `lowIntegrity.test.ts`.
+- **Review fix (w6325):** the File.Delete call lists each path once and goes in batches of at most 20 (and at most about
+  21,000 characters of command line), so a backlog of any size fits; a batch whose call fails keeps only its own copies,
+  said with that call's real error, and the others still go. The log no longer guesses "still running?". PowerShell
+  quoting doubles the curly single quotes too. Measured with Node 22.17.1: 120 read-only copies Node could not remove
+  (EPERM) all went in 2.1 s.

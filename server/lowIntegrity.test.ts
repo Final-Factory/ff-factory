@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, lowDiskImageWarning, lowDiskImages, toolsDiskPlan, labelNoReadUp, LowCopies, LOW_COPY_NAME, lowUnityJunctions, MEDIUM_TOOLS, pickEnv, PROBE_ENV_KEYS, isReadOnlyCopy, junctionLeadsTo, lockCopyScript, deleteFilesScript, readOnlyGrants, type ExecSync, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, unlabelNoReadUp, credDeleteScript, deleteGenericCreds, NO_LABEL, type Exec } from '../machine/lowIntegrity.ts';
+import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, lowDiskImageWarning, lowDiskImages, toolsDiskPlan, labelNoReadUp, LowCopies, LOW_COPY_NAME, lowUnityJunctions, MEDIUM_TOOLS, pickEnv, PROBE_ENV_KEYS, isReadOnlyCopy, junctionLeadsTo, lockCopyScript, deleteFilesScript, deleteBatches, readOnlyGrants, type ExecSync, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, unlabelNoReadUp, credDeleteScript, deleteGenericCreds, NO_LABEL, type Exec } from '../machine/lowIntegrity.ts';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 import { ensureDaemonOnlyDirs } from '../machine/readFence.ts';
 
@@ -283,7 +283,7 @@ const markKey = (p: string) => {
 };
 
 // The one-call lock (lockCopyScript, w5904) is faked by path: what it locked, the `.part`, keeps it under the copy's name.
-const icaclsSync = (o: { readOnlyFails?: boolean; lockFails?: boolean; running?: Set<string> } = {}): { exec: ExecSync; calls: string[][]; low: Set<string>; ro: Set<string>; locked: Set<string>; events: string[] } => {
+const icaclsSync = (o: { readOnlyFails?: boolean; lockFails?: boolean; running?: Set<string>; deleteFails?: Set<number> } = {}): { exec: ExecSync; calls: string[][]; low: Set<string>; ro: Set<string>; locked: Set<string>; events: string[] } => {
   const calls: string[][] = [];
   const low = new Set<string>();
   const ro = new Set<string>();
@@ -302,7 +302,11 @@ const icaclsSync = (o: { readOnlyFails?: boolean; lockFails?: boolean; running?:
         // w6321: deleteFilesScript: each path goes, but one a live process runs (o.running), as Windows refuses that.
         if (script.includes('[System.IO.File]::Delete(')) {
           events.push('delete');
-          const out = [...script.matchAll(/^try \{ \[System\.IO\.File\]::Delete\('((?:[^']|'')*)'\)/gm)].map((m, i) => {
+          // w6325: Windows refuses a command line past 32,767 characters, as spawnSync says it.
+          if (['powershell.exe', ...args].join(' ').length > 32_767) return { code: null, stdout: '', stderr: 'spawnSync powershell.exe ENAMETOOLONG' };
+          if (o.deleteFails?.has(events.filter((e) => e === 'delete').length)) throw new Error('spawnSync powershell.exe ETIMEDOUT');
+          const list = /^\$p = @\((.*)\)$/m.exec(script)![1];
+          const out = [...list.matchAll(/'((?:[^']|'')*)'/g)].map((m, i) => {
             const at = m[1].replace(/''/g, "'");
             if (o.running?.has(at)) return `err ${i} Access to the path '${at}' is denied.`;
             fs.rmSync(at, { force: true });
@@ -587,9 +591,62 @@ test('w6321: making one program\'s copy keeps the copies this run made of the ot
 });
 
 test('w6321: deleteFilesScript quotes each path and says gone or err by index', () => {
-  const s = deleteFilesScript(["F:\\ffw\\tools\\low\\it's.exe", 'F:\\b.exe']);
-  assert.ok(s.includes("[System.IO.File]::Delete('F:\\ffw\\tools\\low\\it''s.exe')"), s);
-  assert.ok(s.includes("'gone 1'") && s.includes("'err 1 '"), s);
+  const s = deleteFilesScript(["F:\\ffw\\tools\\low\\it's.exe", 'F:\\b\u2019+(New-Item pwn)+\u2018.exe']);
+  assert.ok(s.includes("$p = @('F:\\ffw\\tools\\low\\it''s.exe','F:\\b\u2019\u2019+(New-Item pwn)+\u2018\u2018.exe')"), s);
+  assert.ok(s.includes('"gone $i"') && s.includes('"err $i "'), s);
+});
+
+test('w6325: 150 old copies Node cannot remove all go, in batches that fit the command line', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  try {
+    const exe = path.join(root, 'node.exe');
+    fs.writeFileSync(exe, 'the real node');
+    const dir = path.join(root, 'tools', 'low');
+    fs.mkdirSync(dir, { recursive: true });
+    // LothDesktop-shaped names, long enough that one call for all of them would be refused.
+    for (let n = 0; n < 150; n++) fs.writeFileSync(path.join(dir, `claude-367634080-1789${String(n).padStart(9, '0')}-${n % 20}.exe`), 'old claude');
+    const f = icaclsSync();
+    const said: string[] = [];
+    const copy = new LowCopies(root, (l) => void said.push(l), f.exec, 'BEAST\\rydin', undefined, nodeRefuses).make(exe)!;
+    assert.deepEqual(fs.readdirSync(dir), [path.basename(copy)], said.join('\n'));
+    assert.ok(f.events.filter((e) => e === 'delete').length >= 8, 'at most 20 a call');
+    assert.ok(!said.some((l) => /could not|kept/.test(l)), said.join('\n'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('w6325: a batch whose call fails keeps only its own copies, with that error, and the other batches still go', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  try {
+    const exe = path.join(root, 'node.exe');
+    fs.writeFileSync(exe, 'the real node');
+    const dir = path.join(root, 'tools', 'low');
+    fs.mkdirSync(dir, { recursive: true });
+    for (let n = 0; n < 60; n++) fs.writeFileSync(path.join(dir, `gh-${n}-1.exe`), 'old gh');
+    const f = icaclsSync({ deleteFails: new Set([2]) });
+    const said: string[] = [];
+    const copies = new LowCopies(root, (l) => void said.push(l), f.exec, 'BEAST\\rydin', undefined, nodeRefuses);
+    const copy = copies.make(exe)!;
+    const left = fs.readdirSync(dir).filter((n) => n !== path.basename(copy));
+    assert.equal(left.length, 20, 'only the failed batch stays');
+    const kept = said.filter((l) => l.includes('kept the old Low copy'));
+    assert.equal(kept.length, 20, said.join('\n'));
+    assert.ok(kept.every((l) => l.includes('File.Delete: spawnSync powershell.exe ETIMEDOUT') && !l.includes('still running')), kept[0]);
+    // The next make tries them again, and they go.
+    fs.writeFileSync(exe, 'the real node, v2');
+    const c2 = copies.make(exe)!;
+    assert.deepEqual(fs.readdirSync(dir), [path.basename(c2)]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('w6325: deleteBatches keeps each call inside the command line, even for long paths', () => {
+  const long = Array.from({ length: 120 }, (_, n) => `V:\\ffw\\tools\\low\\${'x'.repeat(200)}-${n}.exe`);
+  const b = deleteBatches(long);
+  assert.equal(b.flat().length, 120);
+  assert.ok(b.every((x) => x.length <= 20 && Buffer.from(deleteFilesScript(x), 'utf16le').toString('base64').length < 32_000), String(b.map((x) => x.length)));
 });
 
 test('w5877: a same-size rewrite with its times put back is still caught before the run', () => {
