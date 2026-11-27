@@ -5,7 +5,7 @@ import path from 'node:path';
 import { run } from '../server/proc.ts';
 import { DEFAULT_HANG, bridgeInfo, bridgePing, editorVerdict, restartAllowed, type HangThresholds } from '../server/unityHang.ts';
 import { closeWindow, decide, decideClose, describeDialog, findClosable, findDialogs, listWindows, mainWindow, parsePsJson, pressButton, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
-import { ensureBurstPrefOn, realBurstPrefDeps } from './burstPref.ts';
+import { ensureBurstPrefOn, linuxPrefsPath, realBurstPrefDeps } from './burstPref.ts';
 import { scoped } from './linuxScope.ts';
 import { DOTNET_DIR, FF_LANDLOCK, makeDotnetShm } from './writeLock.ts';
 import { fencedEditorEnv, fencedEditorEnvWarning } from './editorEnv.ts';
@@ -179,25 +179,59 @@ const LINUX_PREFS_DIRS = [['.local', 'share', 'unity3d'], ['.config', 'unity3d']
 
 /**
  * w5631: makes the moved home's Unity folders before a fenced Linux editor starts and seeds each `prefs` file it lacks from
- * the real home; answers the files seeded. Unity makes a prefs folder without its parents, so with no `.local/share` it
- * logged "Editor preferences folder ... does not exist and could not be created. Preferences won't be saved" (measured on
- * biscuit, w5631); with fresh prefs the bridge's tool switches and the Burst pref would be the defaults, not the person's.
- * A file already there is the editors' own and is kept.
+ * the real home. Unity makes a prefs folder without its parents, so with no `.local/share` it logged "Editor preferences
+ * folder ... does not exist and could not be created. Preferences won't be saved" (measured on biscuit, w5631); with fresh
+ * prefs the bridge's tool switches and the Burst pref would be the defaults, not the person's. A file already there is the
+ * editors' own and is kept.
+ *
+ * The daemon runs this unfenced, as the person, in a folder workers write: it never follows a link (w6354's review of
+ * w5631: a planted `.config` link made it write outside the root, and a dangling `prefs` link was filled with the person's
+ * prefs). Each folder from the home down is lstat'ed and made one level at a time; a link or a non-folder anywhere stops
+ * that chain (answered in `refused`), and the copy is exclusive (COPYFILE_EXCL refuses an existing name, a link included).
+ * `safe` lists the prefs files whose whole chain is plain folders, the only ones the daemon may write later (the Burst pref).
  */
-export function seedLinuxEditorHome(home: string, realHome: string, f: Pick<typeof fs, 'mkdirSync' | 'existsSync' | 'copyFileSync'> = fs): string[] {
-  const seeded: string[] = [];
-  for (const rel of LINUX_PREFS_DIRS) {
-    const dir = path.posix.join(home, ...rel);
-    f.mkdirSync(dir, { recursive: true });
-    const to = path.posix.join(dir, 'prefs');
-    const from = path.posix.join(realHome, ...rel, 'prefs');
-    if (!f.existsSync(to) && f.existsSync(from)) {
-      f.copyFileSync(from, to);
-      seeded.push(to);
-    }
+export interface SeedResult { seeded: string[]; refused: string[]; safe: string[] }
+type SeedFs = Pick<typeof fs, 'mkdirSync' | 'lstatSync' | 'existsSync' | 'copyFileSync'>;
+
+/** w5631: makes `rel` under `home` one folder at a time, never through a link; answers why not, or undefined when done. */
+function plainDirs(home: string, rel: string[], f: SeedFs): string | undefined {
+  let at = home;
+  for (const part of ['', ...rel]) {
+    at = part ? path.posix.join(at, part) : at;
+    let st: fs.Stats | undefined;
+    try { st = f.lstatSync(at); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+    if (!st) f.mkdirSync(at, { recursive: !part }); // the home's own parents are the root's, which workers do not write
+    else if (st.isSymbolicLink()) return `${at} is a link`;
+    else if (!st.isDirectory()) return `${at} is not a folder`;
   }
-  f.mkdirSync(path.posix.join(home, '.unity-mcp'), { recursive: true });
-  return seeded;
+  return undefined;
+}
+
+export function seedLinuxEditorHome(home: string, realHome: string, f: SeedFs = fs): SeedResult {
+  const r: SeedResult = { seeded: [], refused: [], safe: [] };
+  for (const rel of LINUX_PREFS_DIRS) {
+    const why = plainDirs(home, rel, f);
+    if (why) {
+      r.refused.push(why);
+      continue;
+    }
+    const to = path.posix.join(home, ...rel, 'prefs');
+    const from = path.posix.join(realHome, ...rel, 'prefs');
+    let st: fs.Stats | undefined;
+    try { st = f.lstatSync(to); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+    if (st?.isSymbolicLink() || (st && !st.isFile())) {
+      r.refused.push(`${to} is ${st.isSymbolicLink() ? 'a link' : 'not a file'}`);
+      continue;
+    }
+    if (!st && f.existsSync(from)) {
+      f.copyFileSync(from, to, fs.constants.COPYFILE_EXCL);
+      r.seeded.push(to);
+    }
+    r.safe.push(to);
+  }
+  const mcp = plainDirs(home, ['.unity-mcp'], f);
+  if (mcp) r.refused.push(mcp);
+  return r;
 }
 
 /** w5631: a Unity licensing client (the Hub's or an editor's) is among `ps -o command=` lines (this user's). */
@@ -605,13 +639,25 @@ export class MacUnity {
       // w5631: the Linux editor under the workers' Landlock write rules. Its home is moved, so with no licensing client
       // running it would start its own under that home, where no entitlement is: it starts unfenced then, and says why.
       const lc = this.d.launchFenced ? await this.d.licensingClient?.(bin).catch((e: Error) => `could not look for Unity's licensing client: ${e.message}`) : 'no fenced launcher here';
+      // A fenced launch that throws (the home's folders, the Burst check, the launcher) falls back to an unfenced start in
+      // warn mode, which refuses nothing anyway (w6354's review); enforced, the start fails with the reason instead, so
+      // a worker cannot plant a file in the editor's home to get an unfenced editor.
+      let failed: string | undefined;
+      let lpid: number | undefined;
       if (this.d.launchFenced && !lc) {
-        pid = await this.d.launchFenced(landlock, bin, args, this.repo, env);
-        this.fenced = { on: true, ...(landlock.warn ? { warn: true } : {}) };
-      } else {
-        this.fenced = { on: false, why: lc ?? 'no fenced launcher here' };
-        pid = await this.d.launch(bin, args, this.repo, env);
+        try {
+          lpid = await this.d.launchFenced(landlock, bin, args, this.repo, env);
+          this.fenced = { on: true, ...(landlock.warn ? { warn: true } : {}) };
+        } catch (e) {
+          if (!landlock.warn) throw e;
+          failed = `the fenced launch failed: ${(e as Error).message}`;
+        }
       }
+      if (lpid === undefined) {
+        this.fenced = { on: false, why: failed ?? lc ?? 'no fenced launcher here' };
+        lpid = await this.d.launch(bin, args, this.repo, env);
+      }
+      pid = lpid;
     } else if (fence && fencedBin && this.d.launchFenced) {
       bin = fencedBin;
       pid = await this.d.launchFenced(fence, bin, [...args, '-licensingIpc', fence.licensingIpc], this.repo, env);
@@ -632,7 +678,7 @@ export class MacUnity {
         : " inside the workers' Seatbelt profile (the worker fence)"
       : landlock
         ? this.fenced?.warn
-          ? " under the workers' Landlock write rules, warn-only (it refuses nothing)"
+          ? " under the workers' Landlock write rules, warn-only (it refuses no write; the signal scope, no_new_privs and the /proc block still apply)"
           : " inside the workers' Landlock write rules (the worker fence)"
         : ' at Low integrity (the worker fence)';
     const fenceNote = this.fenced ? (this.fenced.on ? onNote : ` unfenced (${this.fenced.why})`) : '';
@@ -723,12 +769,15 @@ export function realDeps(platform: UnityPlatform = 'darwin', log: (line: string)
         if (!isLandlockFence(fence)) throw new Error('only a Landlock fence applies on Linux');
         const home = fence.env.HOME;
         if (home) {
-          const seeded = seedLinuxEditorHome(home, os.homedir());
-          if (seeded.length) log(`editor fence: seeded ${seeded.join(', ')} from the person's home before the first fenced start (w5631)`);
-          const burst = await ensureBurstPrefOn({ ...realBurstPrefDeps('linux'), home });
-          if (burst) log(burst);
+          const seed = seedLinuxEditorHome(home, os.homedir());
+          if (seed.seeded.length) log(`editor fence: seeded ${seed.seeded.join(', ')} from the person's home before the first fenced start (w5631)`);
+          if (seed.refused.length) log(`editor fence: WARNING: left the editor's home as it is where it holds a link or a non-folder: ${seed.refused.join('; ')} (w5631)`);
+          // The Burst pref is written only through a chain of plain folders, and never through a link at the file itself.
+          if (seed.safe.includes(linuxPrefsPath(home))) {
+            const burst = await ensureBurstPrefOn({ ...realBurstPrefDeps('linux'), home, writeFile: (p, s) => { const fd = fs.openSync(p, fs.constants.O_WRONLY | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW); try { fs.writeFileSync(fd, s); } finally { fs.closeSync(fd); } } });
+            if (burst) log(burst);
+          }
         }
-        if (fence.env.UNITY_MCP_STATUS_DIR) fs.mkdirSync(fence.env.UNITY_MCP_STATUS_DIR, { recursive: true });
         // The .NET runtime's IPC folder the rules grant; the agents' spawner makes it too (writeLock.ts).
         const dotnet = fence.args.find((a, i) => fence.args[i - 1] === '--rw' && path.posix.basename(a) === DOTNET_DIR);
         if (dotnet) makeDotnetShm(dotnet);

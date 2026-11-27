@@ -4109,7 +4109,7 @@ export class Daemon {
         const probe = probeFence(['python3', FF_LANDLOCK, ...fence.args, '--', '/bin/true']);
         if (probe.ok) {
           addMcpStatusDir(fence.env.UNITY_MCP_STATUS_DIR);
-          log(`editor fence: sandbox editors start under the workers' Landlock write rules${fence.warn ? ', warn-only (it refuses nothing: Landlock has no report-only mode; editorFence true enforces)' : ''}, home <root>/home, from their next start`);
+          log(`editor fence: sandbox editors start under the workers' Landlock write rules${fence.warn ? ', warn-only (it refuses no write: Landlock has no report-only mode; still applied: its signal scope, no_new_privs, so setuid helpers run without their rights, and its block on /proc of processes outside the editor; editorFence true enforces)' : ''}, home <root>/home, from their next start`);
         } else {
           log(`editor fence: the editor's Landlock rules could not run a no-op (${probe.why}); sandbox editors start unfenced`);
           fence = undefined;

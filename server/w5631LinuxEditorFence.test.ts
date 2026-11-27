@@ -67,12 +67,32 @@ test('w5631: the moved home gets Unity\'s prefs folders and the person\'s prefs 
   const home = path.join(tmp, 'ffw', 'home');
   fs.mkdirSync(path.join(real, '.local', 'share', 'unity3d'), { recursive: true });
   fs.writeFileSync(path.join(real, '.local', 'share', 'unity3d', 'prefs'), '<unity_prefs version_major="1"/>');
-  assert.deepEqual(seedLinuxEditorHome(home, real), [path.join(home, '.local', 'share', 'unity3d', 'prefs')], 'only what the real home has');
+  assert.deepEqual(seedLinuxEditorHome(home, real).seeded, [path.join(home, '.local', 'share', 'unity3d', 'prefs')], 'only what the real home has');
   assert.ok(fs.statSync(path.join(home, '.config', 'unity3d')).isDirectory(), 'Unity makes this folder without its parents');
   assert.ok(fs.statSync(path.join(home, '.unity-mcp')).isDirectory());
   fs.writeFileSync(path.join(home, '.local', 'share', 'unity3d', 'prefs'), 'the editors\' own');
-  assert.deepEqual(seedLinuxEditorHome(home, real), []);
+  assert.deepEqual(seedLinuxEditorHome(home, real).seeded, []);
   assert.equal(fs.readFileSync(path.join(home, '.local', 'share', 'unity3d', 'prefs'), 'utf8'), 'the editors\' own');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('w6354 (review of w5631): the seeding follows no link a worker planted in the editor\'s home, and writes nothing outside it', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'w5631link-'));
+  const real = path.join(tmp, 'real');
+  const home = path.join(tmp, 'ffw', 'home');
+  const outside = path.join(tmp, 'outside');
+  for (const d of [path.join(real, '.local', 'share', 'unity3d'), path.join(real, '.config', 'unity3d'), outside, path.join(home, '.local', 'share', 'unity3d')]) fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(real, '.local', 'share', 'unity3d', 'prefs'), 'the person\'s editor prefs');
+  fs.writeFileSync(path.join(real, '.config', 'unity3d', 'prefs'), 'the person\'s global prefs');
+  fs.symlinkSync(outside, path.join(home, '.config'));
+  const dangling = path.join(outside, 'planted');
+  fs.symlinkSync(dangling, path.join(home, '.local', 'share', 'unity3d', 'prefs'));
+  const r = seedLinuxEditorHome(home, real);
+  assert.deepEqual(r.seeded, []);
+  assert.deepEqual(r.safe, [], 'no prefs file the daemon may write later');
+  assert.equal(r.refused.length, 2, r.refused.join('; '));
+  assert.deepEqual(fs.readdirSync(outside), [], 'nothing made through the .config link');
+  assert.ok(!fs.existsSync(dangling), 'the dangling link\'s target was not filled with the person\'s prefs');
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -83,7 +103,7 @@ test('w5631: any Unity licensing client of the user counts, the Hub\'s or an edi
   assert.ok(!linuxLicensingClientRunning(''));
 });
 
-function fakeLinux(fence: EditorFence | undefined, o: { fenced?: boolean; client?: string | undefined } = {}) {
+function fakeLinux(fence: EditorFence | undefined, o: { fenced?: boolean; client?: string | undefined; throws?: string } = {}) {
   const world = { procs: [] as Proc[], plain: [] as string[][], fenced: [] as { fence: EditorFence; bin: string; args: string[] }[], now: 0 };
   const launchAt = (bin: string, args: string[]) => {
     const pid = 7000 + world.procs.length;
@@ -94,7 +114,7 @@ function fakeLinux(fence: EditorFence | undefined, o: { fenced?: boolean; client
     procs: async () => [...world.procs],
     kill: () => undefined,
     launch: (bin, args) => (world.plain.push([bin, ...args]), launchAt(bin, args)),
-    ...(o.fenced !== false ? { launchFenced: async (f: EditorFence, bin: string, args: string[]) => (world.fenced.push({ fence: f, bin, args }), launchAt(bin, args)) } : {}),
+    ...(o.fenced !== false ? { launchFenced: async (f: EditorFence, bin: string, args: string[]) => { if (o.throws) throw new Error(o.throws); world.fenced.push({ fence: f, bin, args }); return launchAt(bin, args); } } : {}),
     licensingClient: async () => o.client,
     exists: () => false,
     remove: () => undefined,
@@ -143,4 +163,13 @@ test('w5631: the daemon reads <root>/home/.unity-mcp from its start on Linux too
   assert.ok(add > 0 && add < setup.indexOf("if (this.fence.state.state !== 'setting_up') return;"));
   const pick = src.slice(src.indexOf('private editorFence()'), src.indexOf('private macEditorMemo'));
   assert.match(pick, /if \(this\.cfg\.editorFence === false\) return undefined;\n\s+if \(process\.platform === 'darwin'\) return this\.macEditorFence\(\);\n\s+if \(process\.platform === 'linux'\) return this\.linuxEditorFence\(\);/);
+});
+
+test('w6354 (review of w5631): a fenced launch that throws starts the editor unfenced in warn and says why; enforced, the start fails', async () => {
+  const w = fakeLinux(linuxEditorFenceFor(RULES, ROOT, 'warn')!, { throws: 'EACCES: mkdir' });
+  assert.match(await w.u.start(), /unfenced \(the fenced launch failed: EACCES: mkdir\)/);
+  assert.deepEqual(w.world.plain[0], [BIN, '-projectPath', REPO]);
+  const e = fakeLinux(linuxEditorFenceFor(RULES, ROOT, 'enforce')!, { throws: 'EACCES: mkdir' });
+  await assert.rejects(e.u.start(), /EACCES: mkdir/);
+  assert.equal(e.world.plain.length, 0, 'never an unfenced editor once enforced');
 });
