@@ -161,3 +161,32 @@ test('w1688: the CliScrubber masks what is already on disk once a value is learn
   await s.sweep();
   assert.ok(lines.length >= 2 && lines.every((l) => !l.includes(v)), 'the log names files and counts, never the value');
 });
+
+test('w6479: a file replaced by a shorter one under its name is scanned whole, and a gone file is forgotten at the sweep', async (t) => {
+  t.after(reset);
+  reset();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-cliroot-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const v = fake(30);
+  addSecretValues([v]);
+  // in an extra folder (swept, not watched): no watch event forgets the old file before the sweep
+  const extra = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-cliextra-'));
+  t.after(() => fs.rmSync(extra, { recursive: true, force: true }));
+  const f = path.join(extra, 'tasks', 'a.txt');
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, JSON.stringify({ pad: 'x'.repeat(2_000) }) + '\n');
+  const s = new CliScrubber({ root, extraRoots: () => [extra], log: () => undefined, sweepMs: 3_600_000 }).start();
+  t.after(() => s.stop());
+  await s.sweep();
+  const read = (s as unknown as { read: Map<string, number> }).read;
+  assert.ok((read.get(f) ?? 0) > 2_000, 'the long file was read');
+  // replaced by a shorter file whose value sits before the old size: a scan from the old size would miss it
+  fs.rmSync(f);
+  fs.writeFileSync(f, JSON.stringify({ stdout: `now ${v}`, pad: 'y'.repeat(1_000) }) + '\n');
+  await s.sweep();
+  assert.ok(!fs.readFileSync(f, 'utf8').includes(v), 'the shorter file is scanned from its start');
+  s.stop();
+  fs.rmSync(f);
+  await s.sweep();
+  assert.equal(read.has(f), false, 'the sweep forgets a file the walk no longer finds');
+});

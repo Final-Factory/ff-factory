@@ -82,6 +82,34 @@ function textFiles(root: string): Map<string, number> {
   return out;
 }
 
+/**
+ * The same, by the thread pool (w6479): the 2-minute sweep's walk (beast's 2,000 transcript files, lstat and readdir) ran
+ * on the daemon's loop. One folder's entries at a time, so the loop only takes each answer.
+ */
+async function textFilesAsync(root: string): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const walk = async (p: string): Promise<void> => {
+    let st: fs.Stats;
+    try {
+      st = p === root ? await fs.promises.stat(p) : await fs.promises.lstat(p);
+    } catch {
+      return;
+    }
+    if (st.isSymbolicLink()) return;
+    if (st.isDirectory()) {
+      let names: string[] = [];
+      try {
+        names = await fs.promises.readdir(p);
+      } catch {
+        return;
+      }
+      for (const n of names) await walk(path.join(p, n));
+    } else if (st.isFile() && TEXT.test(p)) out.set(p, st.size);
+  };
+  await walk(root);
+  return out;
+}
+
 /** One pass's findings: paths and counts only. */
 export interface CliScrubReport {
   kind: 'secret-scrub';
@@ -204,10 +232,31 @@ export class CliScrubber {
     }
   }
 
-  /** The periodic check: watch again if the watcher was lost, and scan what grew or what a new value must be looked for in. */
+  /** The same by the thread pool (w6479), for the sweep and the back-scan, which run while the daemon serves. */
+  private async filesAsync(): Promise<Map<string, number>> {
+    const out = await textFilesAsync(this.o.root);
+    for (const r of this.o.extraRoots?.() ?? []) for (const [f, size] of await textFilesAsync(r)) out.set(f, size);
+    return out;
+  }
+
+  /**
+   * The periodic check: watch again if the watcher was lost, scan what grew or what a new value must be looked for in, and
+   * forget the files that are gone. w6479: the forgetting ran at the end of every pass, an existsSync of every file ever
+   * read (7 of the 11 stalls of 5-12.9 s on LothDesktop's daemon, 2026-11-27 18:06-18:59 UTC); a deletion the watcher sees
+   * is forgotten by its own pass (ENOENT), so only the files the walk no longer lists are looked at here, by the pool.
+   */
   async sweep(): Promise<void> {
     this.watch();
-    for (const [f, size] of this.files()) if ((this.read.get(f) ?? -1) !== size) this.dirty.add(f);
+    const now = await this.filesAsync();
+    for (const [f, size] of now) if ((this.read.get(f) ?? -1) !== size) this.dirty.add(f);
+    for (const f of [...this.read.keys()]) {
+      if (now.has(f)) continue;
+      try {
+        await fs.promises.access(f);
+      } catch {
+        this.read.delete(f);
+      }
+    }
     await this.pass('sweep');
   }
 
@@ -246,7 +295,7 @@ export class CliScrubber {
       return;
     }
     const report: CliScrubReport = { kind: 'secret-scrub', at: new Date().toISOString(), root: this.o.root, trigger: back || backAll ? 'back-scan' : trigger, scanned: 0, files: [], total: 0, errors: [] };
-    const files = back || backAll ? this.files() : new Map([...this.dirty].map((f) => [f, 0]));
+    const files = back || backAll ? await this.filesAsync() : new Map([...this.dirty].map((f) => [f, 0]));
     this.dirty.clear();
     for (const f of files.keys()) {
       try {
@@ -254,7 +303,9 @@ export class CliScrubber {
         let count = 0;
         // values learnt now: every byte already read, for them only; then the new bytes for every value
         if (back && prev > 0) count += (await scrubInPlace(f, back, 0)).count;
-        const r = await scrubInPlace(f, all, prev);
+        let r = await scrubInPlace(f, all, prev);
+        // w6479: shorter than what was read, it is another file by that name (forgotten only at the next sweep now): all of it
+        if (prev > 0 && r.size < prev) r = await scrubInPlace(f, all, 0);
         count += r.count;
         this.read.set(f, r.size);
         report.scanned++;
@@ -268,7 +319,6 @@ export class CliScrubber {
         else report.errors.push({ file: f, error: code ?? (e as Error).name });
       }
     }
-    for (const f of [...this.read.keys()]) if (!fs.existsSync(f)) this.read.delete(f);
     if (report.total || report.errors.length) {
       for (const x of report.files) this.o.log(`secrets: ${x.file}: masked ${x.count} secret value(s) in place (${report.trigger})`);
       for (const x of report.errors) this.o.log(`secrets: ${x.file}: not scrubbed (${x.error})`);
