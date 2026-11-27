@@ -26,7 +26,29 @@ export function hashText(s: string): string {
   return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
 }
 
-const hashOf = (v: unknown) => hashText(JSON.stringify(v ?? null));
+/**
+ * hashText by the JSON it hashes, for the parts and requests seen lately (w6382): a reconnect's parts are mostly as they
+ * were, and the server's cyrb53 of them took 25-48 ms of each state build on the portal (stall profiles 2026-11-27 14:31Z).
+ * A Map finds a long string by its length and contents, natively. Emptied when the JSON it holds passes HASH_MEMO_CHARS
+ * (one reconnect's parts were about 700 KB), so parts that changed long ago do not pile up, here or on the page.
+ */
+const hashMemo = new Map<string, string>();
+let hashMemoChars = 0;
+export const HASH_MEMO_CHARS = 4_000_000;
+export function hashOf(v: unknown): string {
+  const s = JSON.stringify(v ?? null);
+  let h = hashMemo.get(s);
+  if (h === undefined) {
+    h = hashText(s);
+    if (hashMemoChars + s.length > HASH_MEMO_CHARS) {
+      hashMemo.clear();
+      hashMemoChars = 0;
+    }
+    hashMemo.set(s, h);
+    hashMemoChars += s.length;
+  }
+  return h;
+}
 
 /** What a reconnecting page sends as `parts`: `reports:<hash>;...;work:<id>=<hash>,...`. Undefined when it has no state. */
 export function partsHave(app: AppState | null | undefined): string | undefined {

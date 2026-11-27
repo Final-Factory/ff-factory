@@ -14,7 +14,7 @@ import type { Config } from './config.ts';
 import type { Identity } from './identity.ts';
 import type { RunResult } from './proc.ts';
 import { ghRunner } from './githubTokens.ts';
-import { labelFailures, parseNunit, type RunInfo, type Source, type TestCase, type TestHistory } from './testHistory.ts';
+import { labelFailures, type RunInfo, type Source, type TestHistory } from './testHistory.ts';
 
 type Runner = (cmd: string, args: string[], opts?: { timeoutMs?: number; cwd?: string }) => Promise<RunResult>;
 
@@ -138,18 +138,17 @@ export function sourceOf(event: string, branch: string): Source {
 
 const readIf = (f: string) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : undefined);
 
-/** Ingest one downloaded artifact folder; answers how many test cases it brought. */
-export function ingestArtifact(h: TestHistory, repo: string, a: ArtifactRef, meta: RunMeta, dir: string): number {
+/**
+ * Ingest one downloaded artifact folder; answers how many test cases it brought. Its runs are recorded in the writer thread
+ * (addRunApart, w6415), each whole in one transaction; the small writes after them wait until that thread is idle.
+ */
+export async function ingestArtifact(h: TestHistory, repo: string, a: ArtifactRef, meta: RunMeta, dir: string): Promise<number> {
   const base: Omit<RunInfo, 'source' | 'key' | 'mode'> = {
     repo, ciRun: a.runId, attempt: meta.attempt, sha: a.sha, branch: a.branch, finished: new Date(a.created).toISOString(), url: meta.url,
     ...(meta.prs.length ? { pr: meta.prs[0] } : {}),
   };
   if (a.name === EDITMODE_ARTIFACT) {
-    const xml = readIf(path.join(dir, 'editmode-results.xml'));
-    if (!xml) return 0;
-    const tests = parseNunit(xml);
-    h.addRun({ ...base, source: sourceOf(meta.event, a.branch), key: `gh:${a.id}`, mode: 'EditMode' }, tests);
-    return tests.length;
+    return (await h.addNunitApart({ ...base, source: sourceOf(meta.event, a.branch), key: `gh:${a.id}`, mode: 'EditMode' }, path.join(dir, 'editmode-results.xml'))).tests;
   }
   // The master batch: its tip's full run, the smoke PlayMode test, its verdict and the coverage map.
   let verdict: Record<string, unknown> | undefined;
@@ -161,17 +160,20 @@ export function ingestArtifact(h: TestHistory, repo: string, a: ArtifactRef, met
   const tip = typeof verdict?.tip === 'string' ? verdict.tip : a.sha;
   let n = 0;
   for (const [file, mode] of [['00-full.xml', 'EditMode'], ['00-full-smoke.xml', 'PlayMode']] as const) {
-    const xml = readIf(path.join(dir, file));
-    if (!xml) continue;
-    const tests: TestCase[] = parseNunit(xml);
-    const { runId } = h.addRun({ ...base, sha: tip, source: 'master-batch', key: `gh:${a.id}:${file}`, mode, ...(typeof verdict?.verdict === 'string' ? { verdict: verdict.verdict } : {}) }, tests);
-    if (verdict) h.applyBatchVerdict(runId, verdict);
-    n += tests.length;
+    if (!fs.existsSync(path.join(dir, file))) continue;
+    const got = await h.addNunitApart({ ...base, sha: tip, source: 'master-batch', key: `gh:${a.id}:${file}`, mode, ...(typeof verdict?.verdict === 'string' ? { verdict: verdict.verdict } : {}) }, path.join(dir, file));
+    const runId = got.runId;
+    if (verdict && runId !== undefined) {
+      await h.idle();
+      h.applyBatchVerdict(runId, verdict);
+    }
+    n += got.tests;
   }
   try {
     const cov = obj(JSON.parse(readIf(path.join(dir, 'coverage.json')) ?? 'null'));
     // The newest coverage wins; an older batch's (a backfill) never replaces it.
     if (cov && typeof cov.sha === 'string' && obj(cov.classes) && a.created >= (h.meta('coverage_created') ?? '')) {
+      await h.idle();
       h.setCoverage(cov.sha, obj(cov.classes)!);
       h.setMeta('coverage_created', a.created);
     }
@@ -251,15 +253,17 @@ export class TestHistoryCi {
             }
           }
           if (older) {
+            await h.idle();
             if (!h.meta(`ci_oldest_done:${name}`)) h.setMeta(`ci_oldest_done:${name}`, cutoff);
             break;
           }
         }
       }
-      const oldest = h.all("SELECT min(finished) AS f FROM runs WHERE source <> 'local'")[0]?.f;
+      const oldest = (await h.allApart("SELECT min(finished) AS f FROM runs WHERE source <> 'local'"))[0]?.f;
+      await h.idle();
       if (typeof oldest === 'string') h.setMeta('ci_oldest', oldest);
       labelled = await labelFailures(h, this.prDiff, now);
-      h.prune();
+      await h.pruneApart();
       if (ingested || labelled) this.d.log?.(`test history: ${ingested} CI artifacts (${tests} test results), ${labelled} failures labelled`);
       this.lastError = '';
       return { ingested, tests, labelled };
@@ -280,10 +284,12 @@ export class TestHistoryCi {
     try {
       const meta = await this.gh.run(repo, a.runId);
       await this.gh.download(repo, a.runId, a.name, dir);
-      const n = ingestArtifact(h, repo, a, meta, dir);
+      const n = await ingestArtifact(h, repo, a, meta, dir);
+      await h.idle();
       h.markCiSeen(a.id, n ? 'ok' : 'empty');
       return n;
     } catch (e) {
+      await h.idle();
       const tries = h.ciTries(a.id) + 1;
       h.markCiSeen(a.id, tries >= 3 ? `failed: ${(e as Error).message.slice(0, 200)}` : undefined, tries);
       this.d.log?.(`test history: artifact ${a.id} (run ${a.runId}) not read (try ${tries}): ${(e as Error).message}`);
