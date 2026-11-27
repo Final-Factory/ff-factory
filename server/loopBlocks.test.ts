@@ -222,3 +222,50 @@ test('w6381: a drain delivers a message with no fresh start due inside its memo,
   assert.equal(freshAsked, 0, 'freshStart, which empties the memo, is not asked when none is due');
   assert.equal(frees, 1, 'the memo emptied once, for the send');
 });
+
+test('w6381: a drain checks a held computer\'s pause for each message inside its memo, emptying it only for a drop', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, sessions } = env;
+  putRequests(store, [
+    { id: 'w1', by: LOTH, status: 'active' },
+    { id: 'w2', by: LOTH, status: 'active' },
+    { id: 'w3', by: LOTH, status: 'active' },
+  ]);
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  const c = await startedFor(env, 'w3');
+  for (const x of [a, b, c]) sessions.sessions.get(x.id)!.stop(true);
+  await until('their processes stopped', () => [a, b, c].every((x) => !sessions.sessions.get(x.id)?.live));
+  const s = sessions as unknown as {
+    placementFree: <T>(fn: () => T) => T;
+    machineHold?: (h: unknown) => string | undefined;
+    pauseHeld?: (h: unknown, text: string) => boolean;
+    roomMove?: unknown;
+  };
+  const free0 = s.placementFree;
+  let frees = 0;
+  s.placementFree = (fn) => (frees++, free0(fn));
+  s.machineHold = () => 'pc is on hold (a test hold)';
+  s.roomMove = undefined;
+  let asked = 0;
+  let paused = false;
+  s.pauseHeld = (_h, text) => (asked++, paused && /^\[FF Factory\] PAUSE:/.test(text));
+  sessions.send(a.id, 'carry on.');
+  sessions.send(b.id, 'carry on too.');
+  assert.equal(sessions.queued().filter((q) => q.id === a.id || q.id === b.id).length, 2, 'both held');
+  asked = 0;
+  frees = 0;
+  sessions.drain();
+  assert.equal(asked, 2, 'each held message had its pause checked');
+  assert.equal(frees, 0, 'no check emptied the memo');
+  assert.equal(sessions.queued().filter((q) => q.id === a.id || q.id === b.id).length, 2, 'both still wait for the hold');
+  // A pause notice queued before the pause began is dropped by the drain, and only that drop empties the memo.
+  sessions.send(c.id, '[FF Factory] PAUSE: pc is paused.');
+  assert.equal(sessions.queued().filter((q) => q.id === c.id).length, 1, 'the notice is held too');
+  paused = true;
+  frees = 0;
+  sessions.drain();
+  assert.equal(frees, 1, 'the drop emptied it once');
+  assert.equal(sessions.queued().filter((q) => q.id === c.id).length, 0, 'the notice went');
+  assert.equal(sessions.queued().filter((q) => q.id === a.id || q.id === b.id).length, 2, 'the others still wait');
+});
