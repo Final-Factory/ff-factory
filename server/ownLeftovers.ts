@@ -64,7 +64,7 @@ async function children(dir: string): Promise<fs.Dirent[]> {
  */
 export function expandShortNames(cmd: string): string {
   if (!cmd.includes('~')) return cmd;
-  return cmd.replace(/[A-Za-z]:[\\/][^"'\s]*~[^"'\s]*/g, (t) => {
+  return cmd.replace(SHORT_NAMED, (t) => {
     const tail: string[] = [];
     let q = t;
     while (!fs.existsSync(q)) {
@@ -77,10 +77,51 @@ export function expandShortNames(cmd: string): string {
   });
 }
 
+const SHORT_NAMED = /[A-Za-z]:[\\/][^"'\s]*~[^"'\s]*/g;
+
+/**
+ * expandShortNames off the event loop (w6553): the same answer, with its existence checks and realpaths on the thread
+ * pool. BEAST's daemon held its loop 891 s in a sweep's synchronous realpaths (2026-11-27 22:06-22:21Z).
+ */
+export async function expandShortNamesAsync(cmd: string): Promise<string> {
+  if (!cmd.includes('~')) return cmd;
+  const exists = (q: string) => fs.promises.access(q).then(() => true, () => false);
+  let out = '';
+  let at = 0;
+  for (const m of cmd.matchAll(SHORT_NAMED)) {
+    const t = m[0];
+    const tail: string[] = [];
+    let q: string | undefined = t;
+    while (q !== undefined && !(await exists(q))) {
+      const d = path.win32.dirname(q);
+      if (d === q) q = undefined;
+      else {
+        tail.unshift(path.win32.basename(q));
+        q = d;
+      }
+    }
+    out += cmd.slice(at, m.index) + (q === undefined ? t : path.win32.join(await realAsync(q), ...tail));
+    at = m.index + t.length;
+  }
+  return out + cmd.slice(at);
+}
+
 /** Whether a command line names `p` or something inside it (not merely a longer name starting the same). */
 export function mentions(cmd: string, p: string): boolean {
-  const c = expandShortNames(cmd).replace(/\\/g, '/').toLowerCase();
-  for (const n of new Set([norm(p), norm(real(p))])) {
+  return named(expandShortNames(cmd), p, real(p));
+}
+
+/**
+ * mentions with its file system work done before, off the event loop (w6553): `expanded` is the command line through
+ * expandShortNamesAsync, `realP` is realAsync(p), worked out once for all the processes it is asked about.
+ */
+export function mentionsKnown(expanded: string, p: string, realP: string): boolean {
+  return named(expanded, p, realP);
+}
+
+function named(expanded: string, p: string, realP: string): boolean {
+  const c = expanded.replace(/\\/g, '/').toLowerCase();
+  for (const n of new Set([norm(p), norm(realP)])) {
     for (let i = c.indexOf(n); i >= 0; i = c.indexOf(n, i + 1)) if (i + n.length === c.length || /["'\s/]/.test(c[i + n.length])) return true;
   }
   return false;
@@ -197,6 +238,15 @@ const CLAUDE_WORKTREE = /\/\.claude\/worktrees\/[^/]+$/;
 export function real(p: string): string {
   try {
     return fs.realpathSync.native(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/** real() off the event loop (w6553): fs.promises.realpath is libuv's realpath, as realpathSync.native is. */
+export async function realAsync(p: string): Promise<string> {
+  try {
+    return await fs.promises.realpath(p);
   } catch {
     return path.resolve(p);
   }
