@@ -38,6 +38,8 @@ on:
       - 'server/firefox.test.ts'
       - 'server/hostWatch.test.ts'
       - 'server/junctionDelete.test.ts'
+      - 'server/junctionRmWarn.test.ts'
+      - 'server/junctionRmWarn.ts'
       - 'server/leftovers.test.ts'
       - 'server/machineDeploy.ts'
       - 'server/machineDeployWin.test.ts'
