@@ -139,7 +139,7 @@ above judged a slot free, but nothing acted on it while no worker needed a slot.
 for hours (BEAST slot3 for 5 h on 2026-11-26, w6179; BEAST slot3 and slot4 and m5 slot1 on 2026-11-27, 4 to 16 h), and a
 person filed a request each time to free them by hand. Now the daemon acts on its own slot report (`ffu-slot list --json`,
 every 2 min, `FFU_REPORT_MS`): when it names a stale slot, the stale-output setting `ffuSlotSweep`
-(`cleanup.staleOutput.ffuSlotSweep`) says what happens (`machine/ffuSlotAutoSweep.ts`):
+(`machines.cleanup.staleOutput.ffuSlotSweep`) says what happens (`machine/ffuSlotAutoSweep.ts`):
 
 - `warn` (the default, warn-only first): daemon.log says `ffu slots: auto sweep (warn-only, ffuSlotSweep warn): would free
   <slot> on <branch>: <why>`, once per slot and holder; nothing is freed.
@@ -153,6 +153,10 @@ holders). A running holder's stale slot (on no open request, or idle past 2 h) i
 and hands it over in one locked step: freed with no take behind it, the holder would go on writing in a released slot, and
 the next take's reset would drop that work with nothing to rescue (w6495's review of #1500, reproduced by a test).
 - `off`: nothing.
+
+A slot a sweep freed remembers its holder (`freedFrom` in slots.json). If that holder resumes (after waiting on CI, say)
+and writes in its old checkout, the slot's verdict becomes "released; ... saved on a rescue branch first", and the next take
+saves that work under the holder's name (and tells it) before it resets the checkout (w6510's review of #1500).
 
 The portal sets it, so turning it back off needs nobody at the machine. `ffu-slot sweep` no longer needs FF_SESSION_ID
 (the daemon's sweep has none; it holds no slot, so every holder is another's).

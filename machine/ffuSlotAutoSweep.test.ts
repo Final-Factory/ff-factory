@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { FfuSlotAutoSweep, staleSlotsOf, type FfuSlotSweepMode } from './ffuSlotAutoSweep.ts';
-import { runFfuSlotSweep } from './ffuSlots.ts';
+import { FFU_SLOT_SWEEP_KILL_MS, runFfuSlotSweep } from './ffuSlots.ts';
 import { staleOutputSettings } from '../server/staleOutput.ts';
 import type { FfuSlotsReport } from '../shared/types.ts';
 
@@ -94,4 +94,16 @@ test('w6484: runFfuSlotSweep runs the script with sweep and no session, and says
   assert.equal(ok.ok, true);
   assert.equal(ok.out.trim(), `ffu-slot: freed slot9: sweep "" ${dir}`);
   assert.equal((await runFfuSlotSweep({ root: dir, factsFile: 'x', max: 3, script })).ok, false);
+});
+
+test('w6484: the daemon sweep has no kill timer: killed inside the slots lock it would leave the lock held and its git running (w6495)', async (t) => {
+  assert.equal(FFU_SLOT_SWEEP_KILL_MS, 0);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w6484-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const script = path.join(dir, 'slow.mjs');
+  fs.writeFileSync(script, "setTimeout(() => { process.stdout.write('ffu-slot: no slot to free'); process.exit(0); }, 1500);");
+  // A short kill timer (as a test may set) does kill it; the default lets it finish.
+  assert.equal((await runFfuSlotSweep({ root: dir, factsFile: 'x', max: 4, script, timeoutMs: 200 })).ok, false);
+  const r = await runFfuSlotSweep({ root: dir, factsFile: 'x', max: 4, script });
+  assert.equal(r.ok, true, r.out);
 });

@@ -13,7 +13,7 @@
  *   off: nothing.
  * Only holders that no longer run are freed (sweepSlots skips running ones when it has no session); a running holder's stale
  * slot is left to the next take. The sweep runs in a child process, so a failure is a log line and never stops the daemon; the portal's
- * cleanup.staleOutput.ffuSlotSweep turns it off again with nobody at the machine.
+ * machines.cleanup.staleOutput.ffuSlotSweep turns it off again with nobody at the machine.
  */
 import type { FfuSlotsReport } from '../shared/types.ts';
 

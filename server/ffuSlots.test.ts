@@ -902,3 +902,33 @@ test("w6484: the daemon's sweep process (runFfuSlotSweep, no session) frees a fi
   assert.doesNotMatch(r.out, /freed slot2/);
   assert.deepEqual(readSlotState(root).slots.map((s) => s.holder), [undefined, 'bbbb2222']);
 });
+
+test('w6484: a holder that resumes after a sweep freed its slot keeps the work it wrote there: the next take rescues it first (w6510)', async (t) => {
+  const { root, remote } = world(t);
+  const OLD = NOW - 255 * 60_000;
+  assert.equal(takeSlot(at(root, 'aaaa1111', OLD, { max: 2 }), { branch: 'feat', remote }), 'slot1');
+  age(root, 'slot1', OLD);
+  // aaaa1111 waits on CI, stopped past the grace: the daemon's sweep (no session) frees its pushed slot with nothing to save
+  const owners = { aaaa1111: own('blocked'), bbbb2222: own('active') };
+  const sweeper = at(root, '', NOW, { live: ['bbbb2222'], owners, max: 2 });
+  Object.assign(sweeper.facts!, { resumable: ['aaaa1111'] });
+  assert.deepEqual(sweepSlots(sweeper), ['slot1']);
+  assert.deepEqual(readSlotState(root).rescues ?? [], []);
+  // aaaa1111 resumes and goes on in its old checkout: a commit on no branch of origin, and an uncommitted file
+  const wt = slotCheckout(root, 'slot1');
+  fs.writeFileSync(path.join(wt, 'committed.rs'), '// 1\n');
+  git(['add', 'committed.rs'], wt);
+  git(['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-m', 'resumed'], wt);
+  fs.writeFileSync(path.join(wt, 'uncommitted.rs'), '// 2\n');
+  const listed = slotsReport(at(root, 'bbbb2222', NOW, { live: ['aaaa1111', 'bbbb2222'], owners, max: 2 })).slots[0];
+  assert.ok(listed.free && !listed.stale && /released; its checkout has .* saved on a rescue branch first/.test(listed.why ?? ""), listed.why ?? "");
+  // another worker takes it: the work is saved under aaaa1111's name before the reset
+  assert.equal(takeSlot(at(root, 'bbbb2222', NOW, { live: ['aaaa1111', 'bbbb2222'], owners, max: 2 }), { branch: 'feat', remote }), 'slot1');
+  const r = readSlotState(root).rescues ?? [];
+  assert.equal(r.length, 1, JSON.stringify(r));
+  assert.ok(r[0].holder === 'aaaa1111' && r[0].pushed && r[0].branch.startsWith('rescue/ffu-slot/slot1-aaaa1111-'), JSON.stringify(r[0]));
+  const files = git(['ls-tree', '--name-only', r[0].branch], remote).split('\n');
+  assert.ok(files.includes('committed.rs') && files.includes('uncommitted.rs'), files.join(' '));
+  assert.ok(!fs.existsSync(path.join(wt, 'uncommitted.rs')), 'the checkout is reset for its new holder');
+  assert.equal(readSlotState(root).slots[0].freedFrom, undefined);
+});

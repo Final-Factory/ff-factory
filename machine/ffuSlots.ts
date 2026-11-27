@@ -81,6 +81,8 @@ export interface FfuSlot {
   branch?: string;
   takenAt?: string;
   usedAt?: string;
+  /** w6484: the holder a sweep freed it from, so work found in it later is rescued under that holder's name and told to it. */
+  freedFrom?: string;
 }
 
 /** w5885: work a freed slot's holder had left in it, kept on a branch of the shared clone (and pushed to origin when it could be). */
@@ -422,7 +424,12 @@ function holderRuns(d: FfuSlotDeps, holder: string): boolean {
  * is saved (rescueWork): a finished holder, or one stopped, waiting or idle past its limit (w5885).
  */
 export function slotFree(d: FfuSlotDeps, s: FfuSlot): { free: boolean; why: string; rescue?: string } {
-  if (!s.holder) return { free: true, why: 'released' };
+  if (!s.holder) {
+    // w6484 (w6510's review of #1500): a holder a sweep freed while it was stopped may resume and edit its old checkout, which
+    // the next take would reset; work found in a released slot is saved on a rescue branch first.
+    const left = s.freedFrom ? checkoutWork(d, s.id) : undefined;
+    return left ? { free: true, why: `released; ${left} (${s.freedFrom}'s, after a sweep freed it), saved on a rescue branch first`, rescue: left } : { free: true, why: 'released' };
+  }
   if (s.holder === d.session) return { free: true, why: `yours${s.branch ? ` (on ${s.branch})` : ''}` };
   const f = d.facts;
   if (!f || !f.at || d.now() - Date.parse(f.at) > FACTS_FRESH_MS) return { free: false, why: `held by ${s.holder} (whether it runs is not known: no fresh cleanup-facts.json)` };
@@ -478,7 +485,7 @@ export function slotsReport(d: FfuSlotDeps): FfuSlotsReport {
 export function rescueWork(d: FfuSlotDeps, s: FfuSlot): FfuRescue {
   const wt = slotCheckout(d.root, s.id);
   const repo = repoDir(d.root);
-  const holder = s.holder ?? 'unknown';
+  const holder = s.holder ?? s.freedFrom ?? 'unknown';
   const from = d.git(['symbolic-ref', '--quiet', '--short', 'HEAD'], wt).out.trim() || undefined;
   if (d.git(['status', '--porcelain', '--untracked-files=normal'], wt).out.trim()) {
     must(d.git(['add', '-A'], wt), 'git add');
@@ -706,6 +713,7 @@ export function takeSlot(d: FfuSlotDeps, o: TakeOptions = {}): string {
     const at = new Date(d.now()).toISOString();
     if (pick.holder !== d.session) pick.takenAt = at;
     pick.holder = d.session;
+    delete pick.freedFrom;
     pick.usedAt = at;
     // A rescue is listed a fortnight; its branch stays until someone deletes it.
     if (st.rescues) st.rescues = st.rescues.filter((r) => d.now() - Date.parse(r.at) < 14 * 24 * 3_600_000);
@@ -753,6 +761,7 @@ export function sweepSlots(d: FfuSlotDeps): string[] {
       if (!f.free) continue;
       if (f.rescue) (st.rescues ??= []).push(rescueWork(d, s));
       d.say(`ffu-slot: freed ${s.id}: ${f.why}\n`);
+      s.freedFrom = s.holder;
       delete s.holder;
       out.push(s.id);
     }
@@ -990,11 +999,14 @@ export function readFfuSlotsReport(o: { root: string; factsFile: string; max: nu
  * checkout. It ends by itself instead: its wait for the lock stops at LOCK_WAIT_MS and each git call at its own 20 min
  * timeout, and FfuSlotAutoSweep starts no second sweep while one runs. `timeoutMs` is for tests.
  */
+/** No kill timer on the daemon's sweep (0: never killed), for the reason above; a test holds it so. */
+export const FFU_SLOT_SWEEP_KILL_MS = 0;
+
 export function runFfuSlotSweep(o: { root: string; factsFile: string; max: number; script?: string; timeoutMs?: number }): Promise<{ ok: boolean; out: string }> {
   const env = { ...process.env, FF_WORKER_ROOT: o.root, FF_CLEANUP_FACTS: o.factsFile, FF_FFU_SLOTS_MAX: String(o.max), FF_SESSION_ID: '' };
   const args = [...process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), o.script ?? import.meta.filename, 'sweep'];
   return new Promise((resolve) => {
-    execFile(process.execPath, args, { env, timeout: o.timeoutMs ?? 0, windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(process.execPath, args, { env, timeout: o.timeoutMs ?? FFU_SLOT_SWEEP_KILL_MS, windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       const out = `${stdout ?? ''}${stderr ?? ''}`;
       resolve({ ok: !err, out: err && !out.trim() ? err.message : out });
     });
