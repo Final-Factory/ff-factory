@@ -40,6 +40,7 @@ import { readJsonDurable as readJsonFile } from '../../server/durable.ts';
 import { publishAgentTools } from '../../server/agentTools.ts';
 import { agentGitDir, ensureAgentGit } from '../../server/agentGit.ts';
 import { gitFence, isGit } from '../../server/safeGit.ts';
+import { daemonNodePinLine } from '../../shared/machineBaseline.ts';
 import { NODE_GROUP, agentNodeDir, agentNodeExe, ensureAgentNode, firewallCheckScript, parseFirewallCheck } from '../../server/agentNode.ts';
 import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
 import { isLink, removeLink } from '../../server/fsLink.ts';
@@ -822,7 +823,11 @@ async function syncSource(l: Layout, from: string) {
 }
 
 async function installDaemonWin(o: InstallOptions, l: Layout, id: string, probe: { node?: string; claude?: string; sid?: string; home: string }) {
-  const support = nodeSupport((await must('node --version', probe.node!, ['-p', 'process.versions.node'])).trim());
+  const nodeVersion = (await must('node --version', probe.node!, ['-p', 'process.versions.node'])).trim();
+  const support = nodeSupport(nodeVersion);
+  // w6603, warn only: the daemon is to run on the agents' pinned node; a later change registers it on that one.
+  const pin = daemonNodePinLine('win32', { tools: { daemonNode: nodeVersion }, flags: {} });
+  if (pin) say(`Daemon node (w6603, warn only): ${probe.node} is ${pin} (${agentNodeExe(l.root)}); the daemon stays on it for now.`);
   const config = JSON.stringify(daemonJson(o, l, id, probe.claude), null, 2);
   const service = { task: o.service, only: true };
   const tgz = path.join(os.tmpdir(), `ff-worker-${process.pid}.tgz`);

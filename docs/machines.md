@@ -655,6 +655,10 @@ thresholds) and its folders may differ. Each daemon reports, in its hello (probe
   similar; sandboxCacheTrim only as `on`/`off`, its numbers being sizing), each as JSON with paths under its root written
   `<root>`; `unset` when absent. Every other DaemonConfig key is listed in `NON_FEATURE_KEYS`, and a test fails on a new key
   in neither list. The report is taken at each hello (a link that stays up keeps the one from its connect).
+- with the flags, the helpers the installer put outside its root, from root.json's outside list (`installHelpersOf`,
+  machine/installSsh.ts): `install.firewallGroups` (how many Windows Firewall groups firewall.ps1 made; it also writes
+  player-slots.json) and `install.portalSsh` (`yes` when the portal's ssh key is authorized). A PC that joined with the
+  worker join (join.ps1, w1596) has neither by design, so a 0 and a `no` there are drift to decide, not a broken install.
 
 list_machines compares each machine with every other machine of its OS that has a report (an offline one by its last
 report), adding the portal's own sandbox
@@ -662,6 +666,15 @@ settings for it (Library seed set or not, editors below normal, slot repos, comm
 `baseline (w6603, warn only): off its Windows PC baseline: <key> <its value> (<other value> on <machines>)`. A key only one
 machine reports is no drift. It changes and refuses nothing: the fix for a difference is the installer/updater or the
 portal setting, never a hand edit on one machine.
+
+**The daemon's node (w6603, warn only).** Each OS has one node its daemon is to run on, `PINNED_DAEMON_NODE` in
+shared/machineBaseline.ts: on Windows the agents' pinned node (`AGENT_NODE` in server/agentNode.ts, v24.22.1, at
+`<root>\tools\node\node.exe`; a test keeps the two equal). Mac and Linux have no pin yet and are compared with their peers
+only. A daemon on another node shows first in that line (`daemon node 22.17.0, not the pinned 24.22.1`), even when every
+machine of its OS agrees, and the installer's Windows daemon step says `Daemon node (w6603, warn only): ...` and leaves the
+daemon on the node it found (`installDaemonWin`, scripts/worker/worker.ts). Moving the daemon onto the pinned node is a
+separate change with its own recovery (lothsahn, 2026-11-27: "Python being in the work folder, and any other tools, should
+be part of the install process").
 
 ## The daemon's logs
 
