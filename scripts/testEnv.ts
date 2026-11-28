@@ -4,9 +4,25 @@
 // load this file first (`node --import ./scripts/testEnv.ts --test ...`): it deletes every credential variable from the
 // test runner's environment, which the runner copies into each test file's process, and again in each of those processes.
 // A test that needs a token sets a fake one itself. scripts/testEnv.test.ts proves a planted token does not get through.
+import fs from 'node:fs';
+import os from 'node:os';
 import { secretEnvNames } from '../shared/secretShapes.ts';
 
 for (const name of secretEnvNames(process.env)) delete process.env[name];
+// w6759: the tests' temp folder is its real, long path on Windows. A GitHub Windows runner's TEMP is the 8.3 short name
+// C:\Users\RUNNER~1\AppData\Local\Temp, and the code under test rightly refuses or re-names a path its realpath rewrites:
+// longRuns' readEnvFile wants the sandbox to be itself (realpath equal to the path), git names a submodule's folder by
+// the long path. So the daily all-tests run failed there and nowhere else (runs 46129930043, 45973023428 ...). A worker's
+// folders are never short names (FF_WORKER_ROOT is D:\work\ffw, F:\ffw or V:\ffw), so the tests now see the same kind of
+// path the fences see in use; the fences themselves are unchanged. Every program a test starts inherits it.
+if (process.platform === 'win32') {
+  try {
+    const real = fs.realpathSync.native(os.tmpdir());
+    if (real !== os.tmpdir()) process.env.TEMP = process.env.TMP = real;
+  } catch {
+    // A temp folder that cannot be resolved stays as it is; the tests that need it fail and say where.
+  }
+}
 // Tests never scrub the real Claude Code transcripts (server/cliScrub.ts, w1688); a test that checks it turns it on.
 process.env.FF_CLI_SCRUB ??= 'off';
 // w6003: an in-process test daemon on Windows never runs whoami.exe to measure its agents' level (it would read the test
