@@ -183,6 +183,16 @@ function remoteAddFetches(rest: string[]): boolean {
   return false;
 }
 
+/**
+ * The arguments from a subcommand's own verb on (`remote -v add -f c u` gives `add -f c u`): `remote` takes `-v`/`--verbose`
+ * ahead of its verb (w6652's review of PR #1534: `remote -v add -f`, `remote -v update` and `remote -v show` went past both
+ * checks). Every leading argument that starts with `-` is skipped, `--` included; `remote -v` alone gives none.
+ */
+const fromVerb = (rest: string[]) => {
+  const i = rest.findIndex((a) => !a.startsWith('-'));
+  return i < 0 ? [] : rest.slice(i);
+};
+
 /** The remote (or group) a fetch or pull names, or undefined when it names none. */
 function remoteArg(rest: string[]): string | undefined {
   for (let i = 0; i < rest.length; i++) {
@@ -228,11 +238,12 @@ export function uploadReach(args: string[], rows: { key: string; value: string }
     return rows.some((r) => r.key === `remotes.${remote.toLowerCase()}`) ? 'uncovered' : 'covered';
   }
   if (name === 'push' || name === 'submodule') return 'uncovered';
-  const verb = rest[0] ?? '';
+  const own = fromVerb(rest);
+  const verb = own[0] ?? '';
   if (name === 'remote') {
     if (/^(show|prune|update)$/.test(verb)) return 'uncovered';
-    if (verb === 'set-head' && rest.some((a) => a === '-a' || isOpt(a, '--auto'))) return 'uncovered';
-    if (remoteAddFetches(rest)) return 'uncovered';
+    if (verb === 'set-head' && own.some((a) => a === '-a' || isOpt(a, '--auto'))) return 'uncovered';
+    if (remoteAddFetches(own)) return 'uncovered';
   }
   if (name === 'lfs' && /^(fetch|pull|push|pre-push|prune)$/.test(verb)) return 'uncovered';
   return 'none';
@@ -287,7 +298,7 @@ export function refusal(args: string[], rows: { scope: string; key: string; valu
   // (`includeIf "hasconfig:remote.*.url:..."` holding an uploadpack or an insteadOf) is not in the scan made before the call,
   // and the child fetch ran a planted uploadpack (measured by w6649's review on git 2.56.1). Refused in every checkout: no
   // FF Factory caller passes it, and adding the remote, then fetching it, is the same work with each step scanned.
-  if (args[sub] === 'remote' && remoteAddFetches(args.slice(sub + 1)))
+  if (args[sub] === 'remote' && remoteAddFetches(fromVerb(args.slice(sub + 1))))
     return "refused by FF Factory (w6650): `git remote add` with --fetch fetches the new remote after writing its URL, past the fence's scan of the config (an includeIf on that URL switches on only then); run `git remote add` without -f, then `git fetch <name>`";
   const bad = rows.find((r) => !TRUSTED_SCOPES.has(r.scope) && isUrlRewrite(r.key));
   if (!bad || !NETWORK.has(args[splitGlobal(args).sub] ?? '')) return firstWinsRefusal(args, rows);

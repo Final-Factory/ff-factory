@@ -279,9 +279,11 @@ test('w6570: a repository-set upload or receive program goes to the transport as
   ] as [string[], typeof up][])
     assert.equal(firstWinsRefusal(a, r), undefined, a.join(' '));
   // Calls that start no upload program (measured by the review): never refused, they run with lazy fetch off.
-  for (const a of [['remote', '-v'], ['remote', 'get-url', 'origin'], ['lfs', 'env'], ['clone', 'x', 'y'], ['archive', '--remote', 'origin', 'HEAD']])
+  for (const a of [['remote', '-v'], ['remote', '--verbose'], ['remote'], ['remote', '-v', 'get-url', 'origin'], ['remote', 'get-url', 'origin'], ['lfs', 'env'], ['clone', 'x', 'y'], ['archive', '--remote', 'origin', 'HEAD']])
     assert.equal(firstWinsRefusal(a, up), undefined, a.join(' '));
-  for (const a of [['remote', 'show', 'origin'], ['remote', 'prune', 'origin'], ['remote', 'set-head', 'origin', '--auto'], ['remote', 'set-head', 'origin', '--a'], ['remote', 'add', '-f', 'x', 'u'], ['remote', 'add', '--f', 'x', 'u'], ['lfs', 'fetch']])
+  for (const a of [['remote', 'show', 'origin'], ['remote', 'prune', 'origin'], ['remote', 'set-head', 'origin', '--auto'], ['remote', 'set-head', 'origin', '--a'], ['remote', 'add', '-f', 'x', 'u'], ['remote', 'add', '--f', 'x', 'u'], ['lfs', 'fetch'],
+    // remote's own -v before the verb (w6652's review of PR #1534).
+    ['remote', '-v', 'update'], ['remote', '-v', 'show', 'origin'], ['remote', '--verbose', 'prune', 'origin'], ['remote', '--v', 'set-head', 'origin', '-a'], ['remote', '-v', 'add', '-f', 'x', 'u']])
     assert.match(firstWinsRefusal(a, up) ?? '', /refused by FF Factory \(w6570\)/, a.join(' '));
   assert.deepEqual(scannedOverrides(group), [], 'a remote group is read, never overridden');
   assert.deepEqual(scannedOverrides(parseScan('local\0fetch.all\ntrue\0')), [], 'fetch.all is read, never overridden');
@@ -542,6 +544,11 @@ test('w6650: remote add with its fetch is refused in every checkout, in any spel
     ['remote', 'add', '-tmaster', '-f', 'c', 'u'],
     ['remote', 'add', 'c', 'u', '-f'],
     ['-C', 'd', 'remote', 'add', '--tags', '-f', 'c', 'u'],
+    // remote's own -v before the verb (w6652's review of PR #1534).
+    ['remote', '-v', 'add', '-f', 'c', 'u'],
+    ['remote', '--verbose', 'add', '-f', 'c', 'u'],
+    ['remote', '--v', 'add', '--fetch', 'c', 'u'],
+    ['remote', '--', 'add', '-f', 'c', 'u'],
   ])
     assert.match(refusal(a, []) ?? '', /refused by FF Factory \(w6650\)/, a.join(' '));
   for (const a of [
@@ -711,8 +718,8 @@ test('w6650: an uploadpack that an includeIf switches on only after remote add w
     git(main, 'remote', 'remove', 'c');
     fs.rmSync(f.marker, { force: true });
 
-    for (const o of ['-f', '--fetch', '-ftmaster']) {
-      const a = ['remote', 'add', o, 'c', slash(c2)];
+    for (const o of [['add', '-f'], ['add', '--fetch'], ['add', '-ftmaster'], ['-v', 'add', '-f']]) {
+      const a = ['remote', ...o, 'c', slash(c2)];
       const sync = gitSpawnSync(a, { cwd: main, encoding: 'utf8', timeout: 30_000 });
       const proc = await run('git', ['-C', main, ...a]);
       const off = await gitOffThread(a, { cwd: main, timeoutMs: 30_000 });
