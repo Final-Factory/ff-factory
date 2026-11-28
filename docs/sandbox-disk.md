@@ -252,7 +252,8 @@ Installed and updated like the other helper tasks
 back to confirm the ACE is gone. Neither is a lasting off switch: the next `devdrive.ps1 ensure` or elevated worker update
 registers the task again in repair mode.
 A read the repair cannot make fails loudly (`ok=false`): an event log it may not read, or a volume task whose state
-the Task Scheduler refuses it (`unreadable`), is never taken as "nothing to repair" or "repaired". It reads the task and
+the Task Scheduler refuses it (`unreadable`), is never taken as "nothing to repair" or "repaired". Nor is a volume task that is there but has no next run time
+(Disabled, or no trigger): it is reported (`ok=false`) without a restart, which would not change the task (w6799). It reads the task and
 the service through their APIs (the Task Scheduler's `Schedule.Service`, the service controller), not the text of
 `schtasks` or `sc query`, whose words are translated on a non-English Windows; "missing" is the Task Scheduler's own
 not-found code, 0x80070002 or 0x80070003 (w6796).

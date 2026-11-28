@@ -127,7 +127,7 @@ try {
   $ev6 = Newest6 $mp
   $dm = Events 'Microsoft-Windows-ReFS/Operational' 303 200 { $_.Message -match [regex]::Escape($guid) } | Select-Object -First 1
   $end = Events $Log 4, 13 60 { (MountPoints $_) -contains $mp } | Select-Object -First 1
-  $task = TaskStatus $tn
+  $info0 = TaskInfo $tn; $task = $info0.state
 
   if ($dm -and (-not $ev6 -or $ev6.TimeCreated -lt $dm.TimeCreated)) {
     $r.reasons += "not watched: no 'started monitoring' (event 6) for $mp since its dismount at $($dm.TimeCreated.ToUniversalTime().ToString('s'))Z"
@@ -145,7 +145,10 @@ try {
   }
   if ($Mode -eq 'force') { $r.reasons += "forced test (-Mode force): repair whatever the state (task $task, service $(ServiceState))" }
   if (-not $r.reasons.Count -and $task -like 'unreadable*') { $r.ok = $false; $r.state = "healthy by the event logs, but the volume task's state is $task, so a stuck task cannot be seen"; Save }
-  if (-not $r.reasons.Count) { $r.state = "healthy (service $(ServiceState), task $task)"; Save }
+  # A task that is there but will never run (Disabled, or no trigger) is no nightly job: reported, not repaired, since a
+  # service restart does not change a task's settings (w6799 F1).
+  if (-not $r.reasons.Count -and -not $info0.next -and $task -ne 'Running' -and $task -ne 'missing') { $r.ok = $false; $r.state = "the volume task $tn is $task with no next run time, so no nightly dedup job (not restarting: a restart does not change the task)"; Save }
+  if (-not $r.reasons.Count) { $r.state = "healthy (service $(ServiceState), task $task, next run $(if ($info0.next) { "$($info0.next.ToUniversalTime().ToString('s'))Z" } else { 'none' }))"; Save }
   if ($Mode -eq 'check') { $r.state = 'broken (check only: nothing changed)'; $r.ok = $false; Save }
   # Back off (w6796): a volume task still missing after a repair whose restart did not bring it back (dedup turned off on
   # V:, say) is restarted for once, not every night. Until V: is next dismounted, each run only reports it (ok=false, so the
