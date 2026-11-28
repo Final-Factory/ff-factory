@@ -1005,7 +1005,7 @@ export function workerRules(w: Pick<WorkItem, 'id' | 'source' | 'brief' | 'triag
       '<the full brief, as merge-review.md\'s templates write it>',
       'END-NIGHTLY-JOB',
       '```',
-      'then one line `REVIEWED-THROUGH: <the full sha of the newest origin/master commit you reviewed>`, then `RESOLVED: nightly review <date>: <n> jobs (<the PRs they cover>)`. A night with nothing to check still ends with REVIEWED-THROUGH and RESOLVED: `RESOLVED: nightly review <date>: nothing to check`. The portal files the jobs once; a resent block is not filed twice.',
+      'then one line `REVIEWED-THROUGH: <the full sha of the newest origin/master commit you reviewed>`, then `RESOLVED: nightly review <date>: <n> jobs (<the PRs they cover>)`. Every final report repeats the REVIEWED-THROUGH line, including a short closing report sent after a follow-up or a resume: the portal keeps the newest one it finds, but never leave it out. A night with nothing to check still ends with REVIEWED-THROUGH and RESOLVED: `RESOLVED: nightly review <date>: nothing to check`. The portal files the jobs once; a resent block is not filed twice.',
     ].join('\n');
   }
   if (s.kind === 'master-batch' && s.masterBatch?.kind === 'gate-miss') {

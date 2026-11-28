@@ -1578,6 +1578,8 @@ export class IntakeManager {
       const closed = w && !isOpen(w) && now - Date.parse(w.updatedAt) > NIGHTLY_CLOSED_GRACE_MS;
       const stale = x.firedAt && now - Date.parse(x.firedAt) > 20 * 3_600_000;
       if (!closed && !stale && w) continue;
+      // w6767: the line may sit in an earlier report of the request (a closing report sent after it left it out).
+      if (w && this.recoverReviewedThrough(x, w)) continue;
       x.status = 'missing';
       x.cause = !w ? 'its request is gone' : closed ? `its request ${w.id} ended (${w.status}) without a REVIEWED-THROUGH line` : `${w.id} has not reviewed anything 20 hours after the fire`;
       this.reviewAlarm(x, `The nightly merge review of ${x.date}${x.workId ? ` (${x.workId})` : ''}: ${x.cause}. The merges since ${x.since ? x.since.slice(0, 9) : 'the last review'} have no regression check yet.`);
@@ -1620,7 +1622,7 @@ export class IntakeManager {
    */
   onNightlyWorkerTurn(workIds: readonly string[], text: string): void {
     const x = this.reviews().find((r) => r.workId && workIds.includes(r.workId));
-    if (!x || !/NIGHTLY-JOB:|REVIEWED-THROUGH/.test(text)) return;
+    if (!x || (!/NIGHTLY-JOB:|REVIEWED-THROUGH/.test(text) && x.status !== 'running')) return;
     const { jobs, reviewedThrough } = parseNightlyJobs(text);
     const owner = this.d.identity.requester(unattributedPerson(this.d.cfg, 'nightly')) ?? this.d.identity.systemPayer();
     const filed: string[] = [];
@@ -1643,8 +1645,9 @@ export class IntakeManager {
         if (x.workId) this.d.orchestrators.noteIntake(x.workId, `nightly review: job "${cleanLine(j.title, 80)}" not filed: ${cleanLine((e as Error).message, 160)}`);
       }
     });
-    if (reviewedThrough) {
-      x.reviewedThrough = reviewedThrough;
+    const kept = reviewedThrough ?? (x.reviewedThrough ? undefined : this.keptReviewedThrough(x));
+    if (kept) {
+      x.reviewedThrough = kept;
       x.status = 'done';
       x.cause = undefined;
     }
@@ -1653,6 +1656,29 @@ export class IntakeManager {
     }
     for (const id of filed) this.record({ source: 'nightly-review', action: 'filed', title: this.d.store.work.get(id)?.title ?? id, workId: id, why: `the nightly merge review of ${x.date}` });
     this.changed();
+  }
+
+  /** w6767: the newest REVIEWED-THROUGH sha in a request's reports (Findings / outcome record) or its outcome. */
+  private keptReviewedThrough(x: NightlyReview): string | undefined {
+    const w = x.workId ? this.d.store.work.get(x.workId) : undefined;
+    if (!w) return undefined;
+    const texts = [...(w.findings ?? []).map((f) => f.text).reverse(), w.outcome ?? ''];
+    for (const t of texts) {
+      const sha = /REVIEWED-THROUGH/.test(t) ? parseNightlyJobs(t).reviewedThrough : undefined;
+      if (sha) return sha;
+    }
+    return undefined;
+  }
+
+  private recoverReviewedThrough(x: NightlyReview, _w: unknown): boolean {
+    const sha = this.keptReviewedThrough(x);
+    if (!sha) return false;
+    x.reviewedThrough = sha;
+    x.status = 'done';
+    x.cause = undefined;
+    if (x.workId) this.d.orchestrators.noteIntake(x.workId, `nightly review: reviewed through master ${sha.slice(0, 9)} (read from an earlier report)`);
+    this.changed();
+    return true;
   }
 
   private reviews(): NightlyReview[] {

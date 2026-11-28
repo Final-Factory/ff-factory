@@ -1875,6 +1875,27 @@ test('nightly merge review (w905): its worker\'s jobs are filed as the Sentry\'s
   assert.match(next.brief, /The last review got to master `eeeeeeee/);
 });
 
+test('nightly merge review (w6767): a closing report without REVIEWED-THROUGH does not lose the one an earlier report had', (t) => {
+  const { intake, clock, work, store } = reviewClock(t);
+  clock.now = NY_0600_EDT - 60_000;
+  intake.checkNightlyReview();
+  clock.now = NY_0600_EDT + 60_000;
+  intake.checkNightlyReview();
+  const review = work().find((w) => w.source?.kind === 'nightly-review')!;
+  // The review report was kept in the request's record, but the portal never saw it as a turn end (w6764's sequence).
+  const at = new Date(clock.now).toISOString();
+  store.putWork({ ...store.work.get(review.id)!, findings: [{ at, by: 'abc', text: REVIEW_REPORT }] });
+  const closing = 'The follow-up is filed; nothing waits on it.';
+  intake.onNightlyWorkerTurn([review.id], closing);
+  const [x] = intake.summary().nightly!.reviews!;
+  assert.deepEqual([x.status, x.reviewedThrough], ['done', 'e'.repeat(40)]);
+  // The closing report alone, on a request that ended: the grace-period check reads the record too.
+  clock.now = NY_0600_EDT + 86_400_000 + 60_000;
+  intake.checkNightlyReview();
+  const next = work().find((w) => w.source?.kind === 'nightly-review' && w.id !== review.id)!;
+  assert.equal(next.source?.nightlyReview?.since, 'e'.repeat(40));
+});
+
 test('nightly merge review (w905): a review that ends without reviewing tells its person', (t) => {
   const { intake, clock, work, store, heard, o } = reviewClock(t);
   clock.now = NY_0600_EDT - 60_000;
