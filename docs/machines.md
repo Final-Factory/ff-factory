@@ -1473,6 +1473,7 @@ file; `--no-ext-diff --no-textconv` on `diff`/`log`/`show`; and keys a repositor
 diff `textconv`, a merge driver, a credential helper, `core.sshCommand`, git-lfs transfer agents) read by one `git config`
 call and set back to the user's or system's value, else a neutral one (git-lfs's own filter for `filter.lfs.*`).
 That last part has a race: a key written between the scan and the call wins, so it narrows the gap without closing it.
+A scan that does not end by itself (its output over 4 MiB, its 15 s timeout, a signal, an unexpected exit) refuses the call (w6632): rows read before a cut are not the whole config.
 A repository-set `url.<base>.insteadOf` cannot be overridden by value (the longest prefix wins and the repository's entry
 wins a tie), so a fetch, push, clone or ls-remote in a checkout that sets one is refused (w5573). git keeps the first value
 of `remote.<name>.uploadpack`, `remote.<name>.receivepack` and `core.gitProxy` (w6570), so an override does nothing for them:
