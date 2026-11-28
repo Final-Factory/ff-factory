@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FIXED_GIT_CONFIG, HOOKS, SUBMODULE_GIT_CONFIG, submoduleRecursion, submoduleSign, submoduleWarning, fenceArgs, firstWinsArgs, firstWinsRefusal, gitExecFileSync, gitFenceSync, gitSpawnSync, isGit, lazyFetchOff, needsScan, parseScan, refusal, scannedOverrides, splitGlobal, withConfigFirst } from './safeGit.ts';
+import { FIXED_GIT_CONFIG, HOOKS, SUBMODULE_GIT_CONFIG, submoduleRecursion, submoduleSign, submoduleWarning, fenceArgs, firstWinsArgs, firstWinsRefusal, gitExecFileSync, gitFenceSync, gitOffThread, gitSpawnSync, isGit, lazyFetchOff, needsScan, parseScan, refusal, scanCut, scannedOverrides, splitGlobal, withConfigFirst } from './safeGit.ts';
 import { readGitStatus } from './gitStatus.ts';
 import { run } from './proc.ts';
 
@@ -253,6 +253,13 @@ test('w6570: a repository-set upload or receive program goes to the transport as
   for (const [a, r] of [
     [['fetch', '--all'], up],
     [['fetch', '--multiple', 'b', 'c'], up],
+    [['fetch', '-m', 'origin', 'b'], up],
+    [['fetch', '-qm', 'origin', 'b'], up],
+    [['fetch', '-vmq', 'origin', 'b'], up],
+    // git takes any unique prefix of a long option, down to one letter (w6638's review of PR #1534).
+    ...['--m', '--mu', '--mul', '--mult', '--multi', '--multip', '--multipl'].map((o) => [['fetch', o, 'origin', 'b'], up]),
+    [['fetch', '--al'], up],
+    [['pull', '--al'], up],
     [['fetch', '--prune', 'both'], group],
     [['fetch', '--prune', 'origin'], group],
     [['pull', 'origin', 'master'], group],
@@ -265,13 +272,18 @@ test('w6570: a repository-set upload or receive program goes to the transport as
     [['fetch', '--prune', 'origin'], all],
     [['fetch', '--no-all'], all],
     [['fetch', '--depth', '1', 'b'], group],
+    [['fetch', '-j', 'm'], up],
+    [['fetch', '-jm', 'origin'], up],
+    [['pull', '-q', 'origin'], up],
     [['-C', 'd', 'fetch', '--quiet', 'origin', 'master'], up],
   ] as [string[], typeof up][])
     assert.equal(firstWinsRefusal(a, r), undefined, a.join(' '));
   // Calls that start no upload program (measured by the review): never refused, they run with lazy fetch off.
-  for (const a of [['remote', '-v'], ['remote', 'get-url', 'origin'], ['lfs', 'env'], ['clone', 'x', 'y'], ['archive', '--remote', 'origin', 'HEAD']])
+  for (const a of [['remote', '-v'], ['remote', '--verbose'], ['remote'], ['remote', '-v', 'get-url', 'origin'], ['remote', 'get-url', 'origin'], ['lfs', 'env'], ['clone', 'x', 'y'], ['archive', '--remote', 'origin', 'HEAD']])
     assert.equal(firstWinsRefusal(a, up), undefined, a.join(' '));
-  for (const a of [['remote', 'show', 'origin'], ['remote', 'prune', 'origin'], ['remote', 'set-head', 'origin', '--auto'], ['remote', 'add', '-f', 'x', 'u'], ['lfs', 'fetch']])
+  for (const a of [['remote', 'show', 'origin'], ['remote', 'prune', 'origin'], ['remote', 'set-head', 'origin', '--auto'], ['remote', 'set-head', 'origin', '--a'], ['remote', 'add', '-f', 'x', 'u'], ['remote', 'add', '--f', 'x', 'u'], ['lfs', 'fetch'],
+    // remote's own -v before the verb (w6652's review of PR #1534).
+    ['remote', '-v', 'update'], ['remote', '-v', 'show', 'origin'], ['remote', '--verbose', 'prune', 'origin'], ['remote', '--v', 'set-head', 'origin', '-a'], ['remote', '-v', 'add', '-f', 'x', 'u']])
     assert.match(firstWinsRefusal(a, up) ?? '', /refused by FF Factory \(w6570\)/, a.join(' '));
   assert.deepEqual(scannedOverrides(group), [], 'a remote group is read, never overridden');
   assert.deepEqual(scannedOverrides(parseScan('local\0fetch.all\ntrue\0')), [], 'fetch.all is read, never overridden');
@@ -522,6 +534,80 @@ test('w5573: a repository-set url.insteadOf refuses the daemon’s push and fetc
   }
 });
 
+test('w6650: remote add with its fetch is refused in every checkout, in any spelling; a plain remote add passes', () => {
+  for (const a of [
+    ['remote', 'add', '-f', 'c', 'u'],
+    ['remote', 'add', '--f', 'c', 'u'],
+    ['remote', 'add', '--fe', 'c', 'u'],
+    ['remote', 'add', '--fetch', 'c', 'u'],
+    ['remote', 'add', '-ftmaster', 'c', 'u'],
+    ['remote', 'add', '-tmaster', '-f', 'c', 'u'],
+    ['remote', 'add', 'c', 'u', '-f'],
+    ['-C', 'd', 'remote', 'add', '--tags', '-f', 'c', 'u'],
+    // remote's own -v before the verb (w6652's review of PR #1534).
+    ['remote', '-v', 'add', '-f', 'c', 'u'],
+    ['remote', '--verbose', 'add', '-f', 'c', 'u'],
+    ['remote', '--v', 'add', '--fetch', 'c', 'u'],
+    ['remote', '--', 'add', '-f', 'c', 'u'],
+  ])
+    assert.match(refusal(a, []) ?? '', /refused by FF Factory \(w6650\)/, a.join(' '));
+  for (const a of [
+    ['remote', 'add', 'origin', 'u'],
+    ['remote', 'add', '-tf', 'c', 'u'],
+    ['remote', 'add', '-mf', 'c', 'u'],
+    ['remote', 'add', '--no-fetch', 'c', 'u'],
+    ['remote', 'add', '--tags', 'c', 'u'],
+    ['remote', 'add', 'c', '--', '-f'],
+    ['remote', 'set-url', 'c', '-f'],
+  ])
+    assert.equal(refusal(a, []), undefined, a.join(' '));
+});
+
+test('w6632: only a scan that read the whole config passes; a cut-short scan refuses', () => {
+  assert.equal(scanCut(0, '', 'local\0x\ny\0'), undefined);
+  assert.equal(scanCut(1, '', ''), undefined, 'no such key');
+  assert.equal(scanCut(128, '', ''), undefined, 'not a repository: git fails the call itself');
+  assert.equal(scanCut(null, 'ENOENT', ''), undefined, 'no git or no folder: the call fails the same way');
+  assert.equal(scanCut(null, 'ENOBUFS', 'local\0x\ny\0'), 'ENOBUFS');
+  assert.equal(scanCut(null, 'ETIMEDOUT', ''), 'ETIMEDOUT');
+  assert.equal(scanCut(null, 'SIGKILL', ''), 'SIGKILL');
+  assert.equal(scanCut(128, '', 'local\0x\ny\0'), 'exit 128', 'a scan that died after printing rows read only part');
+  assert.equal(scanCut(3, '', ''), 'exit 3');
+});
+
+test('w6632: a scanned key past the scan’s output limit runs on plain git, never through the fence', { skip }, async () => {
+  const f = fixture();
+  try {
+    const { main, wt } = worktree(f);
+    const origin = path.join(f.root, 'origin.git');
+    const theirs = path.join(f.root, 'theirs.git');
+    git(f.root, 'init', '-q', '--bare', origin);
+    git(f.root, 'init', '-q', '--bare', theirs);
+    git(main, 'remote', 'add', 'origin', slash(origin));
+    // 5 MiB of a scanned key ahead of the plant (w6629's repro): the scan prints more than SCAN_MAX_BUFFER and is cut short.
+    const cfg = path.join(main, '.git', 'config');
+    fs.appendFileSync(cfg, `[remotes]\n\tpad = ${'x'.repeat(5 * 1024 * 1024)}\n[url "${slash(theirs)}"]\n\tinsteadOf = ${slash(origin)}\n`);
+    // Control: plain git follows the plant.
+    git(wt, 'push', '-q', 'origin', 'sandbox/x');
+    git(f.root, '--git-dir', theirs, 'update-ref', '-d', 'refs/heads/sandbox/x');
+    const sync = gitSpawnSync(['push', 'origin', 'sandbox/x'], { cwd: wt, encoding: 'utf8', timeout: 60_000 });
+    const proc = await run('git', ['-C', wt, 'push', 'origin', 'sandbox/x']);
+    const off = await gitOffThread(['push', 'origin', 'sandbox/x'], { cwd: wt, timeoutMs: 60_000 });
+    for (const [name, code, err] of [['gitSpawnSync', sync.status, sync.stderr], ['run', proc.code, proc.stderr], ['gitOffThread', off.code, off.stderr]] as const) {
+      assert.notEqual(code, 0, name);
+      assert.match(String(err), /refused-by-FF-Factory-\(w6632\)/, `${name}: ${err}`);
+    }
+    assert.equal(spawnSync('git', ['--git-dir', theirs, 'rev-parse', '--verify', '--quiet', 'refs/heads/sandbox/x']).status, 1, 'nothing reached the planted remote');
+    assert.match(String(gitSpawnSync(['status'], { cwd: wt, encoding: 'utf8', timeout: 60_000 }).stderr), /w6632/, 'every scanned call fails closed');
+    // Without the padding the same push is refused by w5573, which the cut scan hid.
+    fs.writeFileSync(cfg, fs.readFileSync(cfg, 'utf8').replace(/\[remotes\]\n\tpad = x+\n/, ''));
+    const plain = gitSpawnSync(['push', 'origin', 'sandbox/x'], { cwd: wt, encoding: 'utf8', timeout: 60_000 });
+    assert.match(String(plain.stderr), /refused-by-FF-Factory-\(w5573\)/);
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
 test('w6570: a clone’s planted uploadpack and receivepack run on plain git, never through the fence', { skip }, async () => {
   const f = fixture();
   try {
@@ -609,6 +695,48 @@ test('w6570: a repository-set protocol.ext.allow runs an ext:: command on plain 
     assert.notEqual(r.code, 0);
     assert.match(r.stderr, /transport 'ext' not allowed/);
     assert.equal(f.ran(), '', 'the fence ran no ext:: command');
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('w6650: an uploadpack that an includeIf switches on only after remote add writes the URL runs on plain git, never through the fence', { skip }, async () => {
+  const f = fixture();
+  try {
+    const { main } = worktree(f);
+    const c2 = path.join(f.root, 'c2.git');
+    git(f.root, 'clone', '-q', '--bare', '--no-local', slash(main), c2);
+    const pack = slash(path.join(f.root, 'pack.sh'));
+    fs.writeFileSync(pack, `#!/bin/sh\necho "pack $*" >> '${f.marker}'\nexit 1\n`, { mode: 0o755 });
+    const plant = slash(path.join(f.root, 'plant.cfg'));
+    fs.writeFileSync(plant, `[remote "c"]\n\tuploadpack = ${pack}\n`);
+    fs.appendFileSync(path.join(main, '.git', 'config'), `[includeIf "hasconfig:remote.*.url:**/c2.git"]\n\tpath = ${plant}\n`);
+    // Control (w6649's repro): plain git's remote add -f runs the plant, which the scan before the call cannot see.
+    assert.equal(gitFenceSync(['remote', 'add', 'c', slash(c2)], { cwd: main }).args.some((a) => /refused/.test(a)), false, 'nothing to see before');
+    spawnSync('git', ['-C', main, 'remote', 'add', '-f', 'c', slash(c2)], { encoding: 'utf8', timeout: 30_000 });
+    assert.match(f.ran(), /pack /, 'plain git remote add -f ran the planted uploadpack');
+    git(main, 'remote', 'remove', 'c');
+    fs.rmSync(f.marker, { force: true });
+
+    for (const o of [['add', '-f'], ['add', '--fetch'], ['add', '-ftmaster'], ['-v', 'add', '-f']]) {
+      const a = ['remote', ...o, 'c', slash(c2)];
+      const sync = gitSpawnSync(a, { cwd: main, encoding: 'utf8', timeout: 30_000 });
+      const proc = await run('git', ['-C', main, ...a]);
+      const off = await gitOffThread(a, { cwd: main, timeoutMs: 30_000 });
+      for (const [name, code, err] of [['gitSpawnSync', sync.status, sync.stderr], ['run', proc.code, proc.stderr], ['gitOffThread', off.code, off.stderr]] as const) {
+        assert.notEqual(code, 0, `${name} ${o}`);
+        assert.match(String(err), /refused-by-FF-Factory-\(w6650\)/, `${name} ${o}: ${err}`);
+      }
+      assert.ok(gitFenceSync(a, { cwd: main }).args.some((x) => /refused-by-FF-Factory-\(w6650\)/.test(x)), `gitFenceSync ${o}`);
+    }
+    assert.equal(f.ran(), '', 'no planted program ran');
+    assert.equal(spawnSync('git', ['-C', main, 'remote'], { encoding: 'utf8' }).stdout.split(/\r?\n/).includes('c'), false, 'no remote was added');
+    // The same work in two steps, each scanned: the plain remote add passes, and the fetch then sees the plant and is refused.
+    const add = gitSpawnSync(['remote', 'add', 'c', slash(c2)], { cwd: main, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(add.status, 0, add.stderr);
+    const fetch = gitSpawnSync(['fetch', '--all'], { cwd: main, encoding: 'utf8', timeout: 30_000 });
+    assert.match(String(fetch.stderr), /w6570/);
+    assert.equal(f.ran(), '', 'no planted program ran on the two-step route');
   } finally {
     fs.rmSync(f.root, { recursive: true, force: true });
   }
