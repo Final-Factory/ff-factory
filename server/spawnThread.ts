@@ -8,15 +8,18 @@
  * Behaviour is execFile's: the same options, error, stdout and stderr reach the callback. When the thread cannot start or keeps
  * dying, programs start on the calling thread again, as before (logged once), so nothing here can keep a program from running.
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import fs from 'node:fs';
 import { Worker } from 'node:worker_threads';
 
 /** The thread's code, plain JavaScript so it runs from the source tree and from the installed app alike. */
 const THREAD = `
 const { parentPort } = require('node:worker_threads');
-const { execFile } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
+const fs = require('node:fs');
 const kids = new Map();
 parentPort.on('message', (m) => {
+  if (m.launch !== undefined) return launch(m);
   if (m.kill !== undefined) {
     const c = kids.get(m.kill);
     if (c) c.kill();
@@ -36,6 +39,24 @@ parentPort.on('message', (m) => {
   // The program's pid, so the main side can end it if this thread dies first: its timeout timer would die with the thread.
   if (c.pid) parentPort.postMessage({ started: m.id, pid: c.pid });
 });
+// w6639: an agent host, detached, its output appended to its log and its start written to its stdin (launchDetached).
+function launch(m) {
+  let log;
+  try {
+    log = fs.openSync(m.log, 'a');
+    const c = spawn(m.cmd, m.args, { cwd: m.cwd, detached: true, stdio: ['pipe', log, log], windowsHide: true, env: m.env });
+    c.on('error', () => undefined);
+    c.stdin.on('error', () => undefined);
+    c.stdin.end(m.input);
+    c.unref();
+    if (!c.pid) throw new Error(m.noPid);
+    parentPort.postMessage({ launched: m.launch, pid: c.pid });
+  } catch (e) {
+    parentPort.postMessage({ launched: m.launch, err: e.message });
+  } finally {
+    if (log !== undefined) try { fs.closeSync(log); } catch {}
+  }
+}
 `;
 
 /**
@@ -64,6 +85,8 @@ let nextId = 1;
 const pending = new Map<number, ExecCallback>();
 /** The pids of pending programs, by call id: a thread that dies leaves them running, with no timeout left to end them. */
 const pids = new Map<number, number>();
+/** w6639: detached starts waiting for their pid, by call id. A thread that dies answers them an error; their hosts are left be. */
+const launches = new Map<number, (err: Error | null, pid: number) => void>();
 let deaths: number[] = [];
 let say: (line: string) => void = (l) => console.warn(l);
 
@@ -103,6 +126,10 @@ function settle(why: string) {
   const cbs = [...pending.values()];
   pending.clear();
   for (const cb of cbs) cb(err, '', '');
+  // A detached start is not ended: if it started, it is a host meant to outlive this thread (the host watch looks after it).
+  const starts = [...launches.values()];
+  launches.clear();
+  for (const cb of starts) cb(err, 0);
 }
 
 function lost(why: string) {
@@ -121,7 +148,14 @@ function thread(): Worker | undefined {
   try {
     const w = new Worker(THREAD, { eval: true });
     w.unref();
-    w.on('message', (m: { started?: number; pid?: number; id: number; err: { message: string; code?: number | string; signal?: string | null; killed?: boolean } | null; stdout: string; stderr: string }) => {
+    w.on('message', (m: { launched?: number; started?: number; pid?: number; id: number; err: { message: string; code?: number | string; signal?: string | null; killed?: boolean } | null; stdout: string; stderr: string }) => {
+      if (m.launched !== undefined) {
+        const cb = launches.get(m.launched);
+        launches.delete(m.launched);
+        if (!pending.size && !launches.size) w.unref();
+        cb?.(m.err ? new Error(m.err as unknown as string) : null, m.pid ?? 0);
+        return;
+      }
       if (m.started !== undefined) {
         if (m.pid && pending.has(m.started)) pids.set(m.started, m.pid);
         return;
@@ -130,7 +164,7 @@ function thread(): Worker | undefined {
       pids.delete(m.id);
       if (!cb) return;
       pending.delete(m.id);
-      if (!pending.size) w.unref();
+      if (!pending.size && !launches.size) w.unref();
       cb(m.err ? Object.assign(new Error(m.err.message), { code: m.err.code, signal: m.err.signal, killed: m.err.killed }) : null, m.stdout, m.stderr);
     });
     w.on('error', (e: Error) => worker === w && lost(e.message));
@@ -175,7 +209,7 @@ export function execFileOffThread(cmd: string, args: string[], opts: ThreadExecO
     w.postMessage({ id, cmd, args, opts: { ...rest, env: { ...(rest.env ?? process.env) }, encoding: rest.encoding ?? 'utf8' } });
   } catch (e) {
     pending.delete(id);
-    if (!pending.size) w.unref();
+    if (!pending.size && !launches.size) w.unref();
     finish(Object.assign(new Error(`spawn thread: ${(e as Error).message}`), { code: -1 }), '', '');
     return;
   }
@@ -188,4 +222,55 @@ export function execFileOffThread(cmd: string, args: string[], opts: ThreadExecO
 /** Tests: end the thread as a crash would (its pending programs answer code -1, the next one starts a new thread). */
 export function endSpawnThreadForTest(): Promise<number> | undefined {
   return worker?.terminate();
+}
+
+/** What launchDetached starts: `cmd args` in `cwd`, its stdout and stderr appended to `log`, `input` written to its stdin. */
+export interface DetachedStart {
+  cmd: string;
+  args: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  log: string;
+  input: string;
+  /** The error's message when no pid comes back. */
+  noPid: string;
+}
+
+/** Starts it on the calling thread (the thread off, or as a fallback): what launchHost did before w6639. */
+export function launchDetachedHere(s: DetachedStart): number {
+  const log = fs.openSync(s.log, 'a');
+  try {
+    const child = spawn(s.cmd, s.args, { cwd: s.cwd, detached: true, stdio: ['pipe', log, log], windowsHide: true, env: s.env });
+    child.on('error', () => undefined);
+    child.stdin!.on('error', () => undefined);
+    child.stdin!.end(s.input);
+    child.unref();
+    if (!child.pid) throw new Error(s.noPid);
+    return child.pid;
+  } finally {
+    fs.closeSync(log);
+  }
+}
+
+/**
+ * w6639: a detached program (an agent host) started from the spawn thread: on BEAST its start held the daemon's loop 24.7 s
+ * (2026-11-27 23:55Z, launchHost) and 14.7 s. Answers its pid. With the thread off, the start runs here and the answer is the
+ * same number, synchronously (no promise). A thread that dies before answering answers an error; the program, if it started,
+ * is not ended, as a host must outlive the daemon.
+ */
+export function launchDetached(s: DetachedStart): number | Promise<number> {
+  const w = enabled ? thread() : undefined;
+  if (!w) return launchDetachedHere(s);
+  const id = nextId++;
+  return new Promise<number>((resolve, reject) => {
+    launches.set(id, (err, pid) => (err ? reject(err) : resolve(pid)));
+    w.ref();
+    try {
+      w.postMessage({ launch: id, cmd: s.cmd, args: s.args, cwd: s.cwd, env: { ...s.env }, log: s.log, input: s.input, noPid: s.noPid });
+    } catch (e) {
+      launches.delete(id);
+      if (!pending.size && !launches.size) w.unref();
+      reject(new Error(`spawn thread: ${(e as Error).message}`));
+    }
+  });
 }

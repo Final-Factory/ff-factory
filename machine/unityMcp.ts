@@ -5,7 +5,7 @@ import { claudeJsonFiles } from '../server/claudeHome.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { readStatusFiles, syncStatusDir } from '../server/unityMcp.ts';
+import { readStatusFiles, syncStatusDir, syncStatusDirAsync, type StatusFile } from '../server/unityMcp.ts';
 import { mcpStatusDirs } from '../server/unityHang.ts';
 import { normProject } from '../server/unityHang.ts';
 import type { StdioServer } from '../server/launch.ts';
@@ -185,9 +185,40 @@ export class McpScopes {
     this.home = home;
   }
 
+  /** The folders it reads status files from (w6639: the daemon reads them off the loop, readStatusFilesAsync, and passes them to sync). */
+  statusDirs(): string | string[] {
+    return this.home ?? mcpStatusDirs();
+  }
+
   /** One look: `places` maps a place key to its project folder and its editor's pid (undefined: not running). */
-  sync(appDir: string, places: McpPlace[], now: number, log: (line: string) => void = () => undefined) {
-    const files = readStatusFiles(this.home ?? mcpStatusDirs());
+  sync(appDir: string, places: McpPlace[], now: number, log: (line: string) => void = () => undefined, read?: StatusFile[]) {
+    const files = read ?? readStatusFiles(this.statusDirs());
+    const { dirs, gone } = this.look(appDir, places, now);
+    for (const d of dirs) {
+      try {
+        syncStatusDir(d.dir, d.project, d.editor, files, d.clones);
+      } catch (e) {
+        log(`unity mcp ${d.place}: status folder ${d.dir}: ${(e as Error).message}`);
+      }
+    }
+    for (const dir of gone) fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  /**
+   * sync off the loop (w6639): the same look, its folders written with fs.promises (syncStatusDirAsync), from status files
+   * read off the loop too (readStatusFilesAsync). The daemon's 5 s refreshMcpScopes runs this.
+   */
+  async syncAsync(appDir: string, places: McpPlace[], now: number, log: (line: string) => void, files: StatusFile[]): Promise<void> {
+    const { dirs, gone } = this.look(appDir, places, now);
+    await Promise.all(
+      dirs.map((d) => syncStatusDirAsync(d.dir, d.project, d.editor, files, d.clones).catch((e) => log(`unity mcp ${d.place}: status folder ${d.dir}: ${(e as Error).message}`))),
+    );
+    await Promise.all(gone.map((dir) => fs.promises.rm(dir, { recursive: true, force: true }).catch(() => undefined)));
+  }
+
+  /** The look's bookkeeping (what `seen` keeps), and the folders to bring up to date and to remove. */
+  private look(appDir: string, places: McpPlace[], now: number) {
+    const dirs: { place: string; dir: string; project: string; editor?: { since?: number; strict?: boolean }; clones: { project: string; since: number }[] }[] = [];
     for (const p of places) {
       const st = this.seen.get(p.place) ?? {};
       if (p.pid && p.pid !== st.pid) st.since = st.lookedAt ?? (p.fromInstance ? now : 0);
@@ -205,19 +236,17 @@ export class McpScopes {
       const cloneSince = (p.clones ?? []).map((c) => ({ project: c.project, since: clones.get(`${normProject(c.project)}#${c.pid}`)!.since }));
       // Each folder on its own: a failed first one must not leave the home copy with a stale `reloading: true` (w5677).
       for (const dir of [mcpStatusDir(appDir, p.place), mcpHomeStatusDir(appDir, p.place)]) {
-        try {
-          syncStatusDir(dir, p.project, p.pid ? { since: st.since, strict: st.strict } : undefined, files, cloneSince);
-        } catch (e) {
-          log(`unity mcp ${p.place}: status folder ${dir}: ${(e as Error).message}`);
-        }
+        dirs.push({ place: p.place, dir, project: p.project, editor: p.pid ? { since: st.since, strict: st.strict } : undefined, clones: cloneSince });
       }
     }
     // A deleted sandbox: its folder goes too.
+    const gone: string[] = [];
     for (const k of [...this.seen.keys()]) {
       if (places.some((p) => p.place === k)) continue;
       this.seen.delete(k);
-      fs.rmSync(mcpStatusDir(appDir, k), { recursive: true, force: true });
+      gone.push(mcpStatusDir(appDir, k));
     }
+    return { dirs, gone };
   }
 }
 

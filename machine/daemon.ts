@@ -67,6 +67,7 @@ import { liveRunGuardModeOf } from './liveRunGuard.ts';
 import { gitPackagesModeOf } from './gitPackages.ts';
 import { UnitySlots, editorInstancePid, editorInstancePidAsync, gamePlayers, unityProcesses, writeShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
 import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
+import { readStatusFilesAsync, type StatusFile } from '../server/unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
 import { cliProjectsDir } from '../server/cliTranscript.ts';
@@ -1987,7 +1988,9 @@ export class Daemon {
   }
 
   /** Bring every place's Unity MCP status folder up to date, from the editor pids the watches know. */
-  syncMcpScopes() {
+  syncMcpScopes(files?: StatusFile[]): void;
+  syncMcpScopes(files: StatusFile[], offLoop: true): Promise<void>;
+  syncMcpScopes(files?: StatusFile[], offLoop?: true): void | Promise<void> {
     const alive = (pid?: number) => {
       if (!pid) return undefined;
       try {
@@ -2000,7 +2003,8 @@ export class Daemon {
     // w6595: the pids refreshMcpScopes read off the loop (at most 5 s old); a sandbox not read yet is read here once.
     const instancePid = (project: string) => (this.mcpInstancePids.has(project) ? this.mcpInstancePids.get(project) : editorInstancePid(project));
     const places = mcpPlaces(this.pool.list(), alive, instancePid, this.mcpEditors);
-    this.mcpScopes.sync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line));
+    if (offLoop && files) return this.mcpScopes.syncAsync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line), files);
+    this.mcpScopes.sync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line), files);
   }
 
   /**
@@ -2008,6 +2012,19 @@ export class Daemon {
    * sandbox's project (mcpPlaces), then sync. A failed read forgets the list: no such pid counts until the next one.
    */
   async refreshMcpScopes() {
+    // w6639: one at a time: its reads and writes are async now, and a look on a slow disk may outlast the 5 s timer.
+    if (this.mcpRefreshing) return;
+    this.mcpRefreshing = true;
+    try {
+      await this.refreshMcpScopesOnce();
+    } finally {
+      this.mcpRefreshing = false;
+    }
+  }
+
+  private mcpRefreshing = false;
+
+  private async refreshMcpScopesOnce() {
     try {
       this.mcpEditors = unityProcesses(await this.procs(), machinePlatformOf(process.platform));
     } catch (e) {
@@ -2019,7 +2036,9 @@ export class Daemon {
     const projects = this.pool.list().map((sb) => sb.path);
     const pids = await Promise.all(projects.map((p) => editorInstancePidAsync(p)));
     this.mcpInstancePids = new Map(projects.map((p, i) => [p, pids[i]]));
-    this.syncMcpScopes();
+    // w6639: the editors' status files are read and the status folders written off the loop too (in sync, the read held
+    // BEAST's loop 10.8 s on 2026-11-28 00:49Z, and syncStatusDir's writes up to 10.8 s).
+    await this.syncMcpScopes(await readStatusFilesAsync(this.mcpScopes.statusDirs()), true);
   }
 
   get connected() {
