@@ -277,6 +277,11 @@ static class FfReadLog
 
     // EVENT_RECORD: EVENT_HEADER (80 bytes: ProcessId at 12, TimeStamp at 16, ProviderId at 24, EventDescriptor.Id at 40), then
     // UserData at 96.
+    // FFREADLOG_TRACE=<text>: each decision about a followed pid, and opens by other pids of paths containing <text>, as trace
+    // lines (the real-ETW CI test's evidence when it sees nothing). Unset in the daemon.
+    static readonly string TraceFilter = Environment.GetEnvironmentVariable("FFREADLOG_TRACE");
+    static void Tr(string s) { if (!string.IsNullOrEmpty(TraceFilter)) Say("{\"event\":\"trace\",\"msg\":\"" + Esc(s) + "\"}"); }
+
     static void OnRecord(IntPtr rec)
     {
         try
@@ -294,7 +299,11 @@ static class FfReadLog
                 lock (Gate)
                 {
                     Entry e;
-                    if (!Tracked.TryGetValue(pid, out e) || e.Root == pid) return;
+                    if (!Tracked.TryGetValue(pid, out e) || e.Root == pid)
+                    {
+                        if (!string.IsNullOrEmpty(TraceFilter) && e == null) { string p = Text(rec, NameFileName); if (p != null && p.Contains(TraceFilter)) Tr("open by unfollowed pid " + pid + " ts " + ts + ": " + p); }
+                        return;
+                    }
                 }
                 string path = Dos(Text(rec, NameFileName));
                 if (path != null) OnOpen(pid, path, ts);
@@ -306,12 +315,14 @@ static class FfReadLog
                 {
                     uint parent = Number(rec, NameParentId);
                     lock (Gate) if (!Tracked.ContainsKey(parent)) return;
+                    Tr("start of " + Number(rec, NameProcessId) + " by " + parent + " created " + Long(rec, NameCreateTime) + " ts " + ts);
                     OnStart(Number(rec, NameProcessId), parent, Long(rec, NameCreateTime), Dos(Text(rec, NameImage)) ?? Text(rec, NameImage) ?? "", ts);
                 }
                 else if (id == 2)
                 {
                     uint gone = Number(rec, NameProcessId);
                     lock (Gate) if (!Tracked.ContainsKey(gone)) return;
+                    Tr("stop of " + gone + " created " + Long(rec, NameCreateTime) + " ts " + ts);
                     OnStop(gone, Long(rec, NameCreateTime), ts);
                 }
             }
@@ -331,6 +342,7 @@ static class FfReadLog
     static void When(uint pid, Entry e, long ts, Action act)
     {
         bool live = StartOfFn(pid) == e.Start;
+        Tr("when pid " + pid + " ts " + ts + " from " + e.From + " exit " + e.Exit + " start " + e.Start + " live " + live + " waiting " + e.Waiting.Count);
         lock (Gate)
         {
             if (ts < e.From) return;
@@ -373,6 +385,7 @@ static class FfReadLog
             Entry e;
             Roots.Remove(gone);
             if (!Tracked.TryGetValue(gone, out e)) return;
+            Tr("stop: entry start " + e.Start + " from " + e.From + " waiting " + e.Waiting.Count);
             if (created == 0 || created != e.Start || ts < e.From) { Tracked.Remove(gone); e.Waiting.Clear(); return; }
             e.Exit = ts;
             foreach (KeyValuePair<long, Action> w in e.Waiting) if (w.Key <= ts) run.Add(w);
@@ -458,6 +471,7 @@ static class FfReadLog
                 Roots.Add(r.Key);
                 Tracked[r.Key] = new Entry { Root = r.Key, RootAt = given[r.Key], Start = r.Value, Image = "", From = NowFn() };
                 fresh.Add(r.Key);
+                Tr("root " + r.Key + " start " + r.Value + " from " + Tracked[r.Key].From);
             }
         }
         if (fresh.Count > 0) Seed(fresh);

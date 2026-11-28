@@ -189,6 +189,7 @@ export class ReadLog {
       else if (m.event === 'error') error = String(m.why);
       else if (m.event === 'read') this.onRead(m as unknown as ReadLine);
       else if (m.event === 'stat') this.onStat(m as unknown as ReadStat);
+      else if (m.event === 'trace') this.d.log(`read log trace: ${String(m.msg)}`);
       else if (m.event === 'root-refused') this.d.log(`read log: agent host ${String(m.root)} not followed: ${String(m.why)}`);
     });
     child.on('exit', (code) => {

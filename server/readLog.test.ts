@@ -181,6 +181,8 @@ test('w6599: the real ETW helper reports a file a host\'s child opens outside th
   // the root waits for "go", then has cmd read both files
   const hostAt = Date.now();
   const host = spawn(process.execPath, ['-e', `process.stdin.once('data', () => { const r = require('child_process').spawnSync('cmd.exe', ['/d', '/c', 'type', ${JSON.stringify(outside)}, '&', 'type', ${JSON.stringify(inside)}], { stdio: 'ignore' }); process.exit(r.status ?? 1); });`], { stdio: ['pipe', 'ignore', 'ignore'] });
+  // the helper's decisions about followed pids, shown if the read is not seen
+  process.env.FFREADLOG_TRACE = 'outside-secret';
   const lines: string[] = [];
   const r = new ReadLog({ appDir, root, mode: 'warn', platform: 'win32', hosts: () => [{ session: 'test-session', pid: host.pid!, startedAt: hostAt }], log: (l) => (lines.push(l), t.diagnostic(l)), helper: () => exe });
   try {
@@ -204,6 +206,7 @@ test('w6599: the real ETW helper reports a file a host\'s child opens outside th
     const rows = fs.readFileSync(path.join(appDir, 'logs', file), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { path: string });
     assert.ok(!rows.some((x) => x.path.toLowerCase() === inside.toLowerCase()), 'a file under the root is not reported');
   } finally {
+    delete process.env.FFREADLOG_TRACE;
     r.stop();
     host.kill();
     await new Promise((res) => setTimeout(res, 1500));
