@@ -59,7 +59,7 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
-    Partial<Pick<Orchestrators, 'cutDefaultPairs' | 'tellPrConflict' | 'prWorker' | 'handPrGate' | 'recordReportedWait' | 'retellReportWaits' | 'noticeLongOffline' | 'noteCiRead' | 'noteReadPaused' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'pairDidNotCompile' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'keepMergeReport' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
+    Partial<Pick<Orchestrators, 'cutDefaultPairs' | 'tellPrConflict' | 'prWorker' | 'handPrGate' | 'recordReportedWait' | 'retellReportWaits' | 'noticeLongOffline' | 'noteCiRead' | 'noteReadPaused' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'pairDidNotCompile' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'keepMergeReport' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait' | 'auditExclusions'>>;
   /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
   benchResume?: () => [string, string][];
   /** w2544: work waiting on a computer away (offline or paused) past the grace moves elsewhere (Agents.moveAwayWork). */
@@ -437,6 +437,13 @@ export class BlockerWatch {
       for (const id of this.d.orchestrators.timedLegBound?.() ?? []) did.set(id, 'timed leg: started, pre-empted or re-queued (w2055)');
       // A Steam pair run on a fleet short of computers signed in to Steam (w2459): Blocked on that, not Queued.
       for (const id of this.d.orchestrators.holdSteamPairs?.() ?? []) did.set(id, 'blocked: too few computers signed in to Steam for its pair run (w2459)');
+      // w6687 stage 1: machine exclusions that cite no live hold, config rule, capability or person's words are logged, not dropped.
+      // Its own catch (w6697 review): a throw in the audit must not skip the pair cut and the room flag below.
+      try {
+        for (const id of this.d.orchestrators.auditExclusions?.() ?? []) did.set(id, 'logged: an exclusion enforcing would drop (w6687, warn-only)');
+      } catch (e) {
+        console.warn(`blocker watch: exclusion audit (w6687): ${(e as Error).message}`);
+      }
       // w4618: a Queued pair run that one computer runs (no reason to need computers at once) is cut to one leg, once.
       for (const id of this.d.orchestrators.cutDefaultPairs?.() ?? []) did.set(id, 'cut to one leg: a pair run with no reason to need computers at once (w4618)');
       // Queued with room (w643): the same room test the page and decide_work queue read, for game work and for agent-slot work (w1098).
