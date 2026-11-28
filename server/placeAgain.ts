@@ -1169,13 +1169,24 @@ export class PlaceAgain {
   private lightSweep(did: string[]) {
     if (!this.d.dropLight || !this.d.machines) return;
     const now = this.now();
+    // w6769: the store's sessions grouped by machine and folder once, in store order: a copy and filter of every session per
+    // light folder was the release pass's largest own time (lightSweep 21 s of its 267 s of blocks, 05-12Z on 2026-11-28).
+    // Nothing below moves a session to another machine or folder, so the groups hold for the whole sweep.
+    let byFolder: Map<string, SessionInfo[]> | undefined;
+    const sessionsIn = (machineId: string, sandbox: string): SessionInfo[] => {
+      if (!byFolder) {
+        byFolder = new Map();
+        for (const s of this.d.sessions()) if (s.machineId && s.machineSandbox) (byFolder.get(`${s.machineId}\0${s.machineSandbox}`) ?? byFolder.set(`${s.machineId}\0${s.machineSandbox}`, []).get(`${s.machineId}\0${s.machineSandbox}`)!).push(s);
+      }
+      return byFolder.get(`${machineId}\0${sandbox}`) ?? [];
+    };
     for (const m of this.d.machines()) {
       if (!this.d.online(m.id) || !this.d.light?.(m.id)) continue;
       for (const sb of m.sandboxes ?? []) {
         if (!isLight(sb) || sb.status !== 'ready') continue;
         const key = `${m.id}/${sb.id}`;
         if (this.dropping.has(key) || now - Date.parse(sb.createdAt) < LIGHT_GRACE_MS || now - (this.dropRefused.get(key) ?? -Infinity) < LIGHT_RETRY_MS) continue;
-        const here = [...this.d.sessions()].filter((s) => s.machineId === m.id && s.machineSandbox === sb.id);
+        const here = sessionsIn(m.id, sb.id);
         if (here.some((s) => this.d.isLive(s.id) || s.status !== 'stopped' || s.pendingPermissions.length > 0 || !this.d.workOver(s))) continue;
         for (const s of here) {
           if (s.placeReleased) continue;
