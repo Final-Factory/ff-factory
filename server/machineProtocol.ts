@@ -58,6 +58,8 @@ import type { AttachmentRef, BenchLock, FfuSlotsReport, BenchPriority, BenchQueu
  * `steam_upload`, sent only to a daemon that offered it.
  * Also (w5551, no bump): `steamUpload` in the hello and `steam_upload`, sent only to a daemon that offered it, answered by
  * `steam_upload_state`, which an older portal drops.
+ * Also (w6727, no bump): `steamStart` in the hello and `steam_start`, sent only to a daemon that offered it, answered by
+ * `steam_start_result`, which an older portal never asks for.
  */
 export const PROTOCOL_VERSION = 9;
 
@@ -354,6 +356,12 @@ export type ToDaemon =
    * by steam_upload_state. Sent only to a daemon whose hello offered `steamUpload`.
    */
   | { type: 'steam_upload'; id: string; action: 'check' | 'upload' | 'install'; session: string; sandbox?: string; version?: string; app?: 'main' | 'demo'; runs?: Partial<Record<'windows' | 'mac' | 'linux', string>>; live?: string; preview?: boolean; secrets: Record<string, string>; guardCode?: string; githubToken?: string; account?: string }
+  /**
+   * Start the machine's installed Steam client in the logged-in desktop session at Medium (w6727, machine/steamStart.ts,
+   * docs/machines.md "Starting the Steam client"): a person's named operation (ops_worker steam_start). It names no path and
+   * no arguments; `why` is only logged. Answered by steam_start_result. Sent only to a daemon whose hello offered `steamStart`.
+   */
+  | { type: 'steam_start'; id: string; why?: string }
   /** GitHub App installation tokens for this machine's runs (w1519, docs/github-apps.md): the whole set, each time it changes. */
   | { type: 'gh_app_tokens'; tokens: GhAppToken[] }
   /**
@@ -431,6 +439,8 @@ export type FromDaemon =
       liveRestage?: boolean;
       /** It writes a kept Live view knob into the sandbox's .mat on request (w1839, `live` op keep). An older portal ignores it. */
       liveKeep?: boolean;
+      /** w6727: it starts the installed Steam client in its desktop session on a person's ask (steam_start). */
+      steamStart?: boolean;
       /**
        * The live views it runs now (w1509): a portal that restarted takes them back, and one whose views are missing here
        * (this daemon restarted) starts them again. An older daemon sends none; an older portal ignores it.
@@ -554,6 +564,8 @@ export type FromDaemon =
   | { type: 'transcribe_result'; id: string; ok: boolean; error?: string; text?: string; audioSeconds?: number; seconds?: number; model?: string; device?: string; loadSeconds?: number }
   /** The answer to a `live` (w1398): the command's result text (JSON for look.material.list), or why not. */
   | { type: 'live_result'; id: string; ok: boolean; text: string }
+  /** The answer to a `steam_start` (w6727): already running, started, refused or failed, and what the daemon saw. */
+  | { type: 'steam_start_result'; id: string; ok: boolean; state: 'already' | 'started' | 'refused' | 'failed'; text: string }
   /**
    * The machine's own gh login (w1463, machine/ghLogin.ts): the account and its token's scope names, never the token. After
    * each reading (at start, every 30 minutes, when gh's hosts file changes) and after each hello. An older portal drops it.

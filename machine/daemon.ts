@@ -153,6 +153,7 @@ import { TrayHost, trayInstance } from './tray.ts';
 import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
+import { SteamStarter, realSteamStartDeps, steamStartMsgProblem, type SteamStartDeps } from './steamStart.ts';
 import { DaemonRpc, legacyRpcInfoFile, loadRpcKey, makeToken, rpcInfoFile, rpcKeyFile, RPC_ENV, TOKEN_ENV, type RpcHandler } from './daemonRpc.ts';
 import { BenchProxy } from './benchProxy.ts';
 import { MEDIUM_AGENT_VAR, fixUserPath, planMediumCaches, planMediumFolders, type MediumCaches, type MediumCachesMode, type MediumFolders, type MediumFoldersMode } from './mediumFolders.ts';
@@ -601,6 +602,8 @@ export interface Probes {
   gh?: GhLoginDeps['run'];
   /** The Steam client's keys, files and process (w2459, machine/steamClient.ts). Tests leave it out: the host's Steam is not theirs. */
   steam?: () => SteamClientDeps;
+  /** Starting the installed Steam client in the desktop session (w6727, machine/steamStart.ts), Windows only. Tests leave it out. */
+  steamStart?: (log: (line: string) => void) => SteamStartDeps;
 }
 
 const REAL_PROBES: Probes = {
@@ -610,6 +613,7 @@ const REAL_PROBES: Probes = {
   bashTmp: () => ensureGitBashTmp(),
   gh: run,
   steam: realSteamDeps,
+  steamStart: realSteamStartDeps,
 };
 
 /** Builds a session; the real one is an AgentSession, tests pass a fake. */
@@ -777,6 +781,8 @@ export class Daemon {
   private ghLogin?: GhLoginWatch;
   /** The machine's Steam client: installed, running, signed in, as which account (w2459, machine/steamClient.ts). */
   private steamClient?: SteamClientWatch;
+  /** Starts the installed Steam client in the desktop session: a person's steam_start and the players broker's self-healing (w6727). */
+  private steamStarterMade?: SteamStarter;
   /** Claude Code's own transcripts on this computer, kept free of the secret values this daemon knows (w1688). */
   private cliScrub?: CliScrubber;
   /** The secrets named so far as too short to mask by value (logged once each, by name). */
@@ -2934,6 +2940,8 @@ export class Daemon {
       // w5924: it makes, reports and deletes light agent folders (machine/lightFolders.ts).
       lightFolders: true,
       ...(this.cfg.root ? { steamUpload: true, steamInstall: true } : {}),
+      // w6727: it starts the installed Steam client in its desktop session on a person's ask (Windows).
+      ...(this.steamStarter() ? { steamStart: true } : {}),
       // Its owner's pause (w1532): a paused machine is held and its workers hand their requests back.
       pause: this.pause.current(),
       // It updates, restarts and unloads itself on the portal's word over this link (w1596): a worker root install.
@@ -4183,6 +4191,7 @@ export class Daemon {
     const root = this.cfg.root;
     if (!root || this.sharedLock === 'off') return {};
     let fence: PlayerFence | undefined;
+    const launcher = brokerLauncher({ root, playerFence: () => (fence ??= playerFenceFor()), lowNode: () => this.lowMake(process.execPath) });
     // w6274: each call is a daemon write (slot.json, leases, the copy), so the shared-lock watch counts it as the daemon's.
     const handlers = playersRpcHandlers({
       root,
@@ -4194,7 +4203,12 @@ export class Daemon {
       removeTree: async (dir) => {
         await this.sharedWrite(() => removeTree(dir), [dir]);
       },
-      launch: brokerLauncher({ root, playerFence: () => (fence ??= playerFenceFor()), lowNode: () => this.lowMake(process.execPath) }),
+      launch: async (l) => {
+        // w6727: self-healing; a Windows launch finds Steam not running and starts it first, bounded (machine/steamStart.ts).
+        const steam = await this.steamStarter()?.beforePlayer(`${l.session} in ${l.sandbox}`);
+        if (steam && 'refused' in steam) return { refused: steam.refused };
+        return launcher(l);
+      },
       // w6549: a lease whose pid a later process took is dead (one Win32_Process or ps query per check of a slot).
       startedAt: (pids) => processStartTimes(pids),
       // w5615: under "on" workers cannot write players: the copy is staged in the caller's own cache folder, then locked in.
@@ -4202,6 +4216,12 @@ export class Daemon {
       log: (l) => log(l),
     });
     return Object.fromEntries(Object.entries(handlers).map(([k, h]): [string, RpcHandler] => [k, (c, b) => this.sharedWrite(() => h(c, b), [path.join(root, 'players')])]));
+  }
+
+  /** The daemon's Steam starter (w6727): Windows only, and only with the probe (tests leave it out). */
+  private steamStarter(): SteamStarter | undefined {
+    if (process.platform !== 'win32' || !this.probes.steamStart) return undefined;
+    return (this.steamStarterMade ??= new SteamStarter(this.probes.steamStart((line) => log(line))));
   }
 
   /** w6367: the long-run route (machine/longRuns.ts), behind daemon.json `longRuns` (warn by default). */
@@ -5519,6 +5539,22 @@ export class Daemon {
       case 'lab_fixture_upload':
         void this.labFixture(msg);
         return;
+      case 'steam_start': {
+        // w6727 (machine/steamStart.ts): a person's named operation; the message names no path and no arguments.
+        const reply = (ok: boolean, state: 'already' | 'started' | 'refused' | 'failed', text: string) => this.send({ type: 'steam_start_result', id: msg.id, ok, state, text });
+        const problem = steamStartMsgProblem(msg as unknown as Record<string, unknown>);
+        const starter = this.steamStarter();
+        if (problem || !starter) {
+          const text = problem ?? 'this daemon does not start Steam (not a Windows machine)';
+          log(`steam start: refused: ${text}`);
+          return reply(false, 'refused', text);
+        }
+        void starter.manual(`asked by ${String(msg.why ?? 'a person').slice(0, 200)}`).then(
+          (r) => reply(r.state === 'already' || r.state === 'started', r.state, r.said),
+          (e) => reply(false, 'failed', (e as Error).message),
+        );
+        return;
+      }
       case 'steam_upload': {
         // w5551 (machine/steamUpload.ts): the urgent lane's Steam step, with the credential no worker holds.
         if (!this.cfg.root) return this.send({ type: 'steam_upload_state', id: msg.id, state: 'failed', error: 'this daemon has no worker root' });

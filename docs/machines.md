@@ -565,6 +565,42 @@ log on again. A deploy while nobody is logged on installs everything and says so
   `app_dir`) is protected in every spelling (`C:\Users\x\.ff-factory`, `~/.ff-factory`, `%USERPROFILE%`,
   `$env:USERPROFILE`, Git Bash's `/c/Users/...`; `D:\work\.ff-factory`, `D:/work/...`, `/d/work/...`).
 
+### Starting the Steam client (w6727)
+
+One narrow, named operation of the Windows daemon (`machine/steamStart.ts`, lothsahn 2026-11-27: "Great.  Do it"): start the
+installed Steam client in the desktop session. Workers run at Low, where Steam stops at its "registry not writable, Repair?"
+dialog, and ssh lands in session 0, off the desktop; the daemon runs at Medium as the logged-in user in that user's session,
+so it is the one place a Steam can start the way a person's double-click starts it.
+
+- **What it starts.** Only the exe named by Steam's own install record (`HKCU\Software\Valve\Steam` `SteamExe`, else
+  `SteamPath\steam.exe`), which must be an absolute path to a `steam.exe` that exists. The `steam_start` message carries
+  `id` and a short `why` and nothing else: a path, arguments or any other field is refused. Steam gets no arguments.
+- **When it refuses.** Unless the daemon runs at Medium (never Low, never High or System) in a session other than 0, and
+  Windows' own `quser` shows that session as the daemon's own user's, logged in. Anything it cannot read refuses too.
+- **Already running:** it does nothing and says so.
+- **How it starts it.** It hands the exe to the user's Explorer in that session (`explorer.exe <steam.exe>`), so Steam starts
+  outside the daemon's scheduled-task job, as the shell starts a program. If no Explorer runs there (it had crashed on BEAST,
+  2026-11-27), the daemon starts the exe itself, detached, in Steam's folder, with the daemon's environment less FF Factory's
+  own variables and anything named like a credential. It then waits, bounded (2 min for a person's call), for steam.exe and
+  its sign-in, hands it off once more if no steam.exe showed in 20 s, and answers what it saw: signed in as whom, connected
+  or not, and any Steam or crash-reporter window title that is up. It reads windows and never clicks one: never press Repair.
+- **Nothing lasting.** No scheduled task, service, registry value, file, firewall or network change; it reads with `reg
+  query`, `tasklist`, `whoami` and `quser`, and starts nothing but that exe.
+- **Who calls it.** A person's orchestrator, through `ops_worker` action `steam_start` with `machine` and one of that
+  person's own open requests in `work_ids` (docs/ops-worker.md). The daemon offers it in its hello (`steamStart`).
+
+**Self-healing.** Before the players broker starts a player on a Windows PC (`players/launch`: every players run and pair
+run), the daemon checks Steam. Installed but not running, it starts it as above and waits up to 45 s, inside the game
+repo's 120 s broker wait. One start runs at a time (a person's call and launches share it). A try that leaves Steam not
+running refuses that launch with a clear error; the next automatic try waits 2, then 10, then 30 minutes, and there are at
+most 4 in 6 hours, until Steam is seen running again or a person starts it. A launch that cannot try (no desktop user,
+Steam not installed, backing off, at the cap) starts the player as before. The daemon log has a line for every try.
+
+Left out, on purpose: clicking or closing any Steam dialog (never press Repair; driving another program's window is
+not safe to do blind); ending a Steam that hangs (it may be updating, or be a person's own Steam); timed runs (a start
+would skew the timing, and solo runs need no Steam); and a watcher that restarts Steam whenever it stops (it would restart
+a Steam a person closed on purpose, on their own PC).
+
 ### Setting up a Windows PC (for its owner)
 
 Once, on the PC, as the user whose desktop the agents should run in. Commands are for an **administrator**
