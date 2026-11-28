@@ -136,6 +136,18 @@ const RESUME_WITHIN_MS = 6 * 3_600_000;
  * 4 to 13 hours after each crash, with workers stranded on it, and nobody heard). Exported for tests.
  */
 export const OFFLINE_ALERT_MS = { value: 30 * 60_000 };
+/**
+ * The offline backstop (w6784): a daemon offline BACKSTOP_MS while its computer answers ssh, which the offline redeploy
+ * leaves alone (a worker root install such as BEAST, or one with agents running), gets one `machine_daemon restart` at
+ * most every 30 minutes; on Windows that asks its supervisor for a fresh daemon (docs/machines.md, "A daemon stuck
+ * mid-exit"). BEAST on 2026-11-28 stayed offline from 07:41Z until a person acted. Warn-only first: 'warn' says what it
+ * would do; 'enforce' does it; 'off'. FF_DAEMON_BACKSTOP overrides. Exported for tests.
+ */
+export const DAEMON_BACKSTOP = { mode: 'warn' as 'off' | 'warn' | 'enforce', afterMs: 10 * 60_000, everyMs: 30 * 60_000 };
+export function backstopMode(): 'off' | 'warn' | 'enforce' {
+  const env = process.env.FF_DAEMON_BACKSTOP;
+  return env === 'off' || env === 'warn' || env === 'enforce' ? env : DAEMON_BACKSTOP.mode;
+}
 /** A daemon's words for a worker's agent host that died under it (machine/agentHost.ts HostedSession, w2884). Exported for tests. */
 export const HOST_DIED = /^its agent host (stopped unexpectedly|is gone|gave no heartbeat|made no progress)/;
 /** How long after a host's death its worker's resume goes out (the daemon's teardown of the old host first); tests shorten it. */
@@ -687,6 +699,8 @@ export class MachineManager {
   /** When each machine was last seen going offline (or this server started without it). */
   private offlineSince = new Map<string, number>();
   private lastAutoDeploy = new Map<string, number>();
+  /** w6784: when the offline backstop last acted (or, warn-only, said it would) per machine. */
+  private lastBackstop = new Map<string, number>();
   /** The outside-watch config for a machine (null: it does not watch; wired by index.ts). */
   outsideWatchFor?: (machineId: string) => OutsideWatchConfig | null;
 
@@ -1138,10 +1152,14 @@ export class MachineManager {
       this.alertOffline(m, now);
       if (m.daemonStopped) continue; // stopped on purpose (machine_daemon stop): it stays down until started
       if (m.relocatedTo) continue; // sent to another portal (relocate): a redeploy from here would pull it back
-      if (m.root) continue; // a worker root install (w513) is started and updated on its computer, never over ssh
       if (m.awaitingInstall) continue; // a record waiting for its worker installer (add_machine worker_install, w676)
-      const why = redeployDue({ status: m.status, deploying: this.deploying.has(m.id), liveAgents: this.liveCount(m.id) }, now - this.offlineSince.get(m.id)!, now - (this.lastAutoDeploy.get(m.id) ?? 0));
-      if (!why) continue;
+      // A worker root install (w513) is started and updated on its computer, never redeployed over ssh; the backstop
+      // below may still restart it.
+      const why = m.root ? undefined : redeployDue({ status: m.status, deploying: this.deploying.has(m.id), liveAgents: this.liveCount(m.id) }, now - this.offlineSince.get(m.id)!, now - (this.lastAutoDeploy.get(m.id) ?? 0));
+      if (!why) {
+        await this.backstop(m, now, reachable, done);
+        continue;
+      }
       // The portal's own host needs no ssh: it is always there when this code runs.
       if (!m.local && !(await reachable(m.host))) continue;
       this.lastAutoDeploy.set(m.id, now);
@@ -1154,6 +1172,32 @@ export class MachineManager {
       }
     }
     return done;
+  }
+
+  /**
+   * The offline backstop (w6784, DAEMON_BACKSTOP): one `machine_daemon restart` for a daemon offline afterMs while ssh
+   * answers, which the redeploy above left alone; at most every everyMs. Warn-only says what it would run.
+   */
+  private async backstop(m: Machine, now: number, reachable: (host: string) => Promise<boolean>, done: string[]) {
+    const mode = backstopMode();
+    if (mode === 'off' || m.local) return;
+    if (this.deploying.has(m.id) || m.status === 'deploying') return;
+    const offline = now - this.offlineSince.get(m.id)!;
+    if (offline < DAEMON_BACKSTOP.afterMs || now - (this.lastBackstop.get(m.id) ?? 0) < DAEMON_BACKSTOP.everyMs) return;
+    if (!(await reachable(m.host))) return;
+    this.lastBackstop.set(m.id, now);
+    const mins = Math.round(offline / 60_000);
+    if (mode === 'warn') {
+      this.report?.(`[machines] backstop (w6784, warn-only): ${m.id} has been offline ${mins} min while ssh reaches it; enforced, the portal would run machine_daemon restart on it now (docs/machines.md, "The offline backstop").`);
+      return;
+    }
+    try {
+      const said = await this.controlDaemon(m.id, 'restart');
+      done.push(m.id);
+      this.report?.(`[machines] backstop (w6784): ${m.id} was offline ${mins} min while ssh reached it; ran machine_daemon restart: ${said}`);
+    } catch (e) {
+      this.report?.(`[machines] backstop (w6784): ${m.id} is offline ${mins} min while ssh reaches it, and machine_daemon restart failed: ${(e as Error).message}`);
+    }
   }
 
   /**

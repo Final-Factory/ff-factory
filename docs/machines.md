@@ -67,7 +67,7 @@ restarts on every exit but 75, 10 s later after a run of over 5 minutes (`server
 has KeepAlive true and ThrottleInterval 10 (`server/machineDeploy.ts`); Linux's unit has `Restart=always`, `RestartSec=10`
 and `KillMode=process` (`server/machineDeployLinux.ts`). Agent hosts run detached in their own process group, so they and
 their editors run on and the fresh daemon finds them, as after a daemon update. `freezeWatch: { exitMin: false }` or
-`FF_FREEZE_WATCH=log` only logs; `freezeWatch: false` or `FF_FREEZE_WATCH=off` turns the watch off. If a daemon still has not come back 2 minutes after the portal started or after it
+`FF_FREEZE_WATCH=log` only logs; `freezeWatch: false` or `FF_FREEZE_WATCH=off` turns the watch off. Before BEAST froze (2026-11-28) agent hosts failed to start three times in eleven minutes, so the daemon counts its agent hosts' starts across all sandboxes (`machine/startStreak.ts`, w6784): 3 failed in a row (an error from the spawn, or no heartbeat in 60 s) log one `early warning (w6784, warn-only)` line in daemon.log, again every 3 further failures, and a host that comes alive logs `early warning cleared`. It only logs. If a daemon still has not come back 2 minutes after the portal started or after it
 dropped, and its Mac answers ssh, the portal redeploys it by itself (as `add_machine` does), at most
 every 30 minutes and never while its agents are running. So after a restart, give daemons a minute
 before redeploying by hand.
@@ -156,6 +156,15 @@ lines on the real machines look right (lothsahn's lockout rule).
 - Workers gain nothing: the supervisor runs at the user's own level from its logon task, takes no command from a file or the
   link, and its script has no reboot call at all in warn mode (a test checks it); a worker's shutdown command stays refused
   by the guard (`runsPowerOff`).
+
+**The offline backstop (w6784).** The offline redeploy above leaves two kinds of machine alone: a worker root install
+(BEAST, started on its computer, never redeployed over ssh) and one with agents running. BEAST stayed offline from 07:41Z
+on 2026-11-28 until a person acted. So for such a daemon, offline 10 minutes while its computer answers ssh, the portal
+runs one `machine_daemon restart` at most every 30 minutes (`server/machines.ts` `backstop`, `DAEMON_BACKSTOP`); on
+Windows that asks its supervisor for a fresh daemon, as above. It is warn-only first: it posts `[machines] backstop
+(w6784, warn-only): ... would run machine_daemon restart` instead. `FF_DAEMON_BACKSTOP=enforce` in the portal's
+environment (or `DAEMON_BACKSTOP.mode`) makes it act, `off` turns it off. A daemon stopped on purpose, relocated, or
+waiting for its installer is left alone, and so is a computer ssh does not reach.
 
 **The probe guard (w6784, `server/probeGuard.ts`).** Every program run with a timeout through `execFileOffThread`
 (`server/spawnThread.ts`, so `run()` too) or `runOffThread` (`server/hostProbe.ts`) is a probe of a kind: its `probe` name,

@@ -23,6 +23,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { launchDetached } from '../server/spawnThread.ts';
+import { childStarts, type StartStreak } from './startStreak.ts';
 import { pathToFileURL } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { createHash, randomUUID } from 'node:crypto';
@@ -419,6 +420,8 @@ export interface HostDeps {
   log: (line: string) => void;
   /** Starts a host process; tests may replace it. Returns its pid. */
   launch?: (dir: string, start: HostStart) => number | Promise<number>;
+  /** w6784: the counter of failed starts in a row (tests); the daemon's shared one by default. */
+  starts?: StartStreak;
   /** The machine's hands on host processes (start time, ending a tree); tests replace them. */
   procs?: HostProcs;
   /** Its host's tree is being stopped (true) or is gone (false): its sandbox is not free meanwhile (w799). */
@@ -495,6 +498,8 @@ export class HostedSession implements SessionHandle {
   private tail?: LineTail;
   private polls = 0;
   private launchedAt = 0;
+  /** w6784: this start is not yet told to the streak counter (it is once the host is alive, or failed). */
+  private startUntold = false;
   /** w6639: which start of the host a launch's late answer is for: an answer for an earlier start is dropped. */
   private launchGen = 0;
   private timer?: NodeJS.Timeout;
@@ -805,6 +810,7 @@ export class HostedSession implements SessionHandle {
     this.running = true;
     this.launchedAt = Date.now();
     this.progressAt = this.launchedAt;
+    this.startUntold = true;
     this.hang = undefined;
     this.staleSince = undefined;
     this.pid = undefined;
@@ -825,6 +831,7 @@ export class HostedSession implements SessionHandle {
       this.timer = undefined;
       Object.assign(this.info, { status: 'error', statusDetail: error });
       this.deps.log(`agent ${this.info.id}: ${error}`);
+      this.tellStart(false, error);
       this.deps.out({ type: 'failed', sessionId: this.info.id, error, reason: 'host_start' });
     };
     let pid: number | Promise<number>;
@@ -918,6 +925,7 @@ export class HostedSession implements SessionHandle {
     if (++this.polls % 20 !== 0 || !this.running) return;
     switch (hostLook(this.files.dir)) {
       case 'alive':
+        this.tellStart(true);
         if (this.staleSince !== undefined) this.deps.log(`agent host ${this.info.id}: its heartbeat is back after ${Math.round((Date.now() - this.staleSince) / 1000)} s`);
         this.staleSince = undefined;
         this.watchProgress();
@@ -927,7 +935,10 @@ export class HostedSession implements SessionHandle {
         if (this.running) this.endGone();
         return;
       case 'starting':
-        if (Date.now() - this.launchedAt > START_MS) this.ended(`its agent host did not start (see ${this.files.log})`);
+        if (Date.now() - this.launchedAt > START_MS) {
+          this.tellStart(false, `its agent host wrote no heartbeat in ${START_MS / 1000} s`);
+          this.ended(`its agent host did not start (see ${this.files.log})`);
+        }
         return;
       case 'stale':
         this.onStale();
@@ -1271,6 +1282,16 @@ export class HostedSession implements SessionHandle {
   }
 
   /** Its host is gone: the session is not live. `why` (a host that did not close by itself) goes in its record. */
+  /** w6784: one start's outcome, once, to the daemon's counter of failed starts in a row (warn-only). */
+  private tellStart(ok: boolean, why = '') {
+    if (!this.startUntold) return;
+    this.startUntold = false;
+    const starts = this.deps.starts ?? childStarts;
+    const what = `agent host ${this.info.id}`;
+    const line = ok ? starts.started(what) : starts.failed(what, why);
+    if (line) this.deps.log(line);
+  }
+
   private ended(why: string | undefined) {
     const was = this.liveNow;
     this.running = false;
