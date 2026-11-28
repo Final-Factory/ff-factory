@@ -586,7 +586,7 @@ test('requests: a question goes to its filer, whose answer brings it back; closi
   assert.equal(store.work.get('w1')!.status, 'question');
   // w1378: a question for a person comes as [needs you], in full, with how to answer it.
   await until('Lothsahn hears the question', () => heard(loth.id, '[needs you]').length === 1);
-  assert.match(heard(loth.id, '[needs you]')[0].text, /^\[needs you\] w1 "Playtest the new tutorial"\nQuestion \(the dispatcher asks Lothsahn\):\n\nSingle-player or co-op\?\n\n(Ask it with ask_person[^]*?\n\n)?To answer: /);
+  assert.match(heard(loth.id, '[needs you]')[0].text, /^\[needs you\] w1 "Playtest the new tutorial"\nQuestion \(the dispatcher asks Lothsahn\):\n\nSingle-player or co-op\?\n\n(Its card asks it[^]*?\n\n)?To answer: /);
   assert.equal(heard(loth.id, '[dispatch]').length, 0, 'not a second message as [dispatch]');
   // w3161: the answer is Lothsahn's own, in a turn of theirs (a note in the [needs you] turn would leave the question open).
   sessions.send(loth.id, 'Single-player', 'human', undefined, { requestedBy: LOTH });

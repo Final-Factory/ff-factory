@@ -114,8 +114,9 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
   // Everything waiting on a person, in one queue (w1228): the tab, its count and the links to it count the same items.
   const reviewer = !!app.me && !!app.intake?.reviewerIds.some((id) => id.toLowerCase() === app.me!.userId.toLowerCase());
   const queue = app.me ? waitingItems(open, live, { userId: app.me.userId, displayName: app.me.displayName, reviewer }) : [];
-  // w1868: and the viewer's orchestrator's open questions, each a card of its own.
-  const asks = app.me ? orchestratorAsks(app.sessions, work, app.me) : [];
+  // w1868: and the viewer's orchestrator's open questions, each a card of its own; one is left out only where its request's
+  // own card on this tab asks it (w6813).
+  const asks = app.me ? orchestratorAsks(app.sessions, work, app.me, new Set(queue.map((i) => i.w.id))) : [];
   // w6436: one count of the queue and the cards together, for the tab, its badge, its tooltip and the banner.
   const totals = waitingTotals(queue, asks);
   const onMe = totals.onMe;

@@ -3967,9 +3967,18 @@ orchestrator asks every question to its person with **`ask_person`**, one at a t
   line shows the question alone (`questionOf`), not the options.
 - **Typing still works** as ever: a message of theirs is read by the orchestrator whether or not buttons were shown.
 - **With the rest.** A reaction (w1039) still answers a yes-or-no proposal; `ask_person` is for choosing, and the brief says
-  to propose one action per sentence when a 👍 should do. A `[needs you]` (w1378) is asked with `ask_person` too: the worker's
-  own options, or the orchestrator's, as the buttons with its recommendation first, and the answer (the clicked label or the
-  typed words) is the `update_work` note as before. One question at a time: with two, ask the one that unblocks the other.
+  to propose one action per sentence when a 👍 should do. A `[needs you]` (w1378) that lists its answers is already a card with
+  them as buttons on the person's Waiting tab, so the orchestrator does not ask it again (w6813: its reworded `ask_person`
+  copies were second cards of the same question, w6778's #152099 and w6792's #152081; `cardCopyRefusal` refuses one once,
+  while the request is not blocked). One with no answers listed, or on a blocked request, is asked with `ask_person`: the
+  worker's options, or the orchestrator's, as the buttons with its recommendation first. The answer (the clicked label or the
+  typed words) is the `update_work` note as before, and it closes every open card that asks what the `[needs you]` asked,
+  whatever request the card names (`closeAsksAnsweredBy`, w6813). A reply to a card that only asks back (ends in a question
+  mark, quotes none of its answers: `onlyAsksBack`) leaves the card open (w6813: lothsahn's "What do you mean? …" closed
+  #152055 and "Can check run on any other machines?" closed #150635, and neither was asked again). Every open card shows,
+  whatever its request's state: a stalled or closed request's card says so (`orchestratorAsks`, w6813: six cards about
+  stalled, done and blocked requests were open in the store and on no tab). One question at a time: with two, ask the one
+  that unblocks the other.
 - **Tests:** `server/ask.test.ts` (the question's shape; a click is the person's message, attributed to them, in their own
   turn, and approves what they clicked; the lock after one choice; "chat more" sends nothing and settles nothing; the brief),
   `e2e/ask.spec.ts` (desktop and iPhone-sized: the card, the click and its lock over a reload, "chat more", the API's refusals).
