@@ -27,6 +27,24 @@ const IMAGE_INPUT = /^image\//;
  * the camera and files for one input, and a desktop has no camera, so they keep the single picker.
  */
 const ANDROID = /Android/i.test(navigator.userAgent);
+
+// The page is going away (a reload, a close, a link): a send cut off by it is not put back in the box or the draft (w893).
+// The old page may run on a moment after pagehide (w6763: its saved copy is written then), long enough for the cut-off
+// send's failure to land and its 400 ms draft save to bring the message back on the next load.
+// The send can fail as early as beforeunload, before pagehide; a beforeunload that does not end the page (a download
+// link) clears the mark after a moment, since a page that goes away runs no timer.
+let leaving = false;
+let leavingTimer: ReturnType<typeof setTimeout> | undefined;
+addEventListener('beforeunload', () => {
+  leaving = true;
+  clearTimeout(leavingTimer);
+  leavingTimer = setTimeout(() => (leaving = false), 3000);
+});
+addEventListener('pagehide', () => {
+  leaving = true;
+  clearTimeout(leavingTimer);
+});
+addEventListener('pageshow', () => (leaving = false));
 /** What each picker takes: photos and videos (the photo picker), the camera, or any file (saves, zips, logs too). */
 const PICKERS = {
   photos: { accept: 'image/*,video/*', multiple: true },
@@ -305,6 +323,7 @@ ${cur}` : t));
         if (res?.note) toast(res.note);
       } catch (e) {
         failedSend.current = { sig, id };
+        if (leaving) return;
         putBack(t, sentImages, sentFiles, sentReply);
         if (!(e instanceof UnauthorizedError)) {
           const why = e instanceof Error ? e.message : String(e);
