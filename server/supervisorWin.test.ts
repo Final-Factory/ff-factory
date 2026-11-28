@@ -34,6 +34,15 @@ if (what === 'linkedstuck') {
   fs.writeFileSync(path.join(dir, 'logs', '${DAEMON_ALIVE}'), JSON.stringify({ pid: process.pid, at: new Date().toISOString(), linked: true }));
   setTimeout(() => fs.writeFileSync(path.join(dir, 'logs', '${DAEMON_ENDING_MARKER}'), JSON.stringify({ pid: process.pid, at: new Date().toISOString(), why: 'test: stuck' })), 1000);
 }
+// \`unreachable\` works but cannot reach the portal: its last failed try is now while portal-down.txt is there, and stays at
+// the last one once it is gone (machine/daemon.ts portalUnreachable).
+if (what === 'unreachable') {
+  let at = new Date().toISOString();
+  setInterval(() => {
+    if (fs.existsSync(path.join(dir, 'portal-down.txt'))) at = new Date().toISOString();
+    fs.writeFileSync(path.join(dir, 'logs', '${DAEMON_ALIVE}'), JSON.stringify({ pid: process.pid, at: new Date().toISOString(), linked: false, portalUnreachable: { at, why: 'no link: test: ECONNREFUSED' } }));
+  }, 100);
+}
 if (what === 'linked') setInterval(() => fs.writeFileSync(path.join(dir, 'logs', '${DAEMON_ALIVE}'), JSON.stringify({ pid: process.pid, at: new Date().toISOString(), linked: true })), 100);
 setInterval(() => {
   if (fs.existsSync(path.join(dir, 'stop.txt'))) process.exit(75);
@@ -66,7 +75,27 @@ function readState(file: string) {
 const NOT_ELIGIBLE_PS = "param($taskName) [pscustomobject]@{ eligible = $false; why = 'test: not eligible'; task = $null }";
 const ELIGIBLE_PS = "param($taskName) [pscustomobject]@{ eligible = $true; why = 'test: eligible'; task = $true }";
 
-function rig(t: { after: (fn: () => void) => void }, plan: string, opts: { delay?: number; rebootAfterS?: number } = {}): Rig {
+// w6792: the reboot itself is never reachable from a test ("Reboot no machine while building or testing this"): shutdown.exe's
+// call and NtShutdownSystem's are replaced by fakes, the native helper's source is blanked, and the rig refuses a script that
+// still has either. Run-Shutdown appends its comment to shutdown.txt and answers shutdown-code.txt (0 when there is none,
+// "hang" for no answer); Nt-Reboot appends to nt.txt and answers as a refused NtShutdownSystem would.
+const FAKE_SHUTDOWN = `function Run-Shutdown($comment) { Add-Content -LiteralPath (Join-Path $F 'shutdown.txt') -Value $comment; $c = Get-Content -LiteralPath (Join-Path $F 'shutdown-code.txt') -Raw -ErrorAction SilentlyContinue; if (-not $c) { return 0 }; if ($c.Trim() -eq 'hang') { return $null }; [int]$c.Trim() }
+function Nt-Reboot { Add-Content -LiteralPath (Join-Path $F 'nt.txt') -Value 'nt'; 'test: NtShutdownSystem answered 0xC0000061' }`;
+const REAL_REBOOT = [/shutdown\.exe'/i, /\[FFSelfReboot\]::Reboot/, /NtShutdownSystem\(/, /DllImport/, /Restart-Computer|InitiateSystemShutdown|ExitWindowsEx/i];
+
+interface RigOpts {
+  delay?: number;
+  rebootAfterS?: number;
+  // The live switch: off (warn only) unless a test asks, whatever SUPERVISOR_REBOOT_LIVE says.
+  live?: boolean;
+  youngS?: number;
+  portalHoldS?: number;
+  rebootFallbackS?: number;
+  eligWaitS?: number;
+  eligEveryS?: number;
+}
+
+function rig(t: { after: (fn: () => void) => void }, plan: string, opts: RigOpts = {}): Rig {
   // The fake daemons end before the folder goes (after hooks run in the order they were added): Windows keeps a live
   // process's files, and the removal failed with EPERM on CI.
   let dir = '';
@@ -87,6 +116,16 @@ function rig(t: { after: (fn: () => void) => void }, plan: string, opts: { delay
 `, `$rebootAfterS = ${opts.rebootAfterS ?? win.SUPERVISOR_REBOOT_AFTER_S}
 `);
   swap('.AddScript($eligCheck)', ".AddScript((Get-Content -LiteralPath (Join-Path $F 'elig.ps1') -Raw))");
+  swap(`$rebootLive = $${win.SUPERVISOR_REBOOT_LIVE}\n`, `$rebootLive = $${opts.live ?? false}\n`);
+  swap(`$youngS = ${win.SUPERVISOR_PORTAL_HOLD_S}\n`, `$youngS = ${opts.youngS ?? 0}\n`);
+  swap(`$portalHoldS = ${win.SUPERVISOR_PORTAL_HOLD_S}\n`, `$portalHoldS = ${opts.portalHoldS ?? win.SUPERVISOR_PORTAL_HOLD_S}\n`);
+  swap(`$rebootFallbackS = ${win.SUPERVISOR_REBOOT_FALLBACK_S}\n`, `$rebootFallbackS = ${opts.rebootFallbackS ?? win.SUPERVISOR_REBOOT_FALLBACK_S}\n`);
+  swap('$eligWaitS = 120\n', `$eligWaitS = ${opts.eligWaitS ?? 120}\n`);
+  swap(`$eligEveryS = ${win.SUPERVISOR_ELIGIBLE_EVERY_S}\n`, `$eligEveryS = ${opts.eligEveryS ?? win.SUPERVISOR_ELIGIBLE_EVERY_S}\n`);
+  s = s.replace(/^function Run-Shutdown\(\$comment\) \{[\s\S]*?\n\}\n/m, '').replace(/^function Nt-Reboot \{.*$/m, FAKE_SHUTDOWN);
+  s = s.replace(/^\$nativeSrc = @'\n[\s\S]*?\n'@$/m, "$nativeSrc = ''");
+  for (const real of REAL_REBOOT) assert.doesNotMatch(s, real, 'no test can reach a real reboot');
+  assert.ok(s.includes("Join-Path $F 'shutdown.txt'") && s.includes("Join-Path $F 'nt.txt'"), 'the reboot calls are fakes');
   s = s.replace(/^function Idle-S \{.*$/m, "function Idle-S { [double](Get-Content -LiteralPath (Join-Path $F 'idle.txt') -Raw) }");
   s = s.replace(/^function Console-Why \{.*$/m, "function Console-Why { $c = Get-Content -LiteralPath (Join-Path $F 'console.txt') -Raw -ErrorAction SilentlyContinue; if ($c) { $c.Trim() } }");
   assert.ok(s.includes("Join-Path $F 'idle.txt'") && s.includes("Join-Path $F 'console.txt'"), 'the console readers are stubbed');
@@ -197,6 +236,8 @@ test('windows (real PowerShell): a restart over ssh asks the live supervisor, wi
   const restarted = await ps('restart');
   assert.match(restarted, /restartedBy=supervisor daemonPid=\d+/, restarted);
   assert.doesNotMatch(restarted, /stopped=|started=/, 'neither Stop-FFDaemon nor the task ran');
+  // The fresh daemon writes its pid once node has started, which can come after the supervisor's answer on a loaded machine.
+  await until('the fresh daemon', () => r.pids().length >= 2);
   const fresh = r.pids()[1];
   assert.equal(fresh.what, 'yield');
   assert.match(winControlAnswer(restarted), new RegExp(`its supervisor \\(pid \\d+\\) started a fresh daemon, pid ${fresh.pid}, in place of pid ${live}, without the Task Scheduler`));
@@ -315,6 +356,8 @@ test('windows (real PowerShell): a stuck episode with no working daemon 15 minut
   const waited = (Date.parse(st.last.at) - Date.parse(st.last.stuckSince)) / 1000;
   assert.ok(waited >= REBOOT_AFTER_S && waited < REBOOT_AFTER_S + 10, `answered ${waited} s after the stuck state began`);
   assert.equal(st.stuckSince, st.last.stuckSince, 'the episode is still going on');
+  assert.equal(st.lastLiveAt, undefined, 'a warning is no reboot: the rate guard does not count it');
+  assert.ok(!fs.existsSync(path.join(r.dir, 'shutdown.txt')) && !fs.existsSync(path.join(r.dir, 'nt.txt')), 'warn only calls neither reboot');
 });
 
 test('windows (real PowerShell): a fresh daemon that says it works ends the stuck episode: no reboot (w6792)', { skip }, async (t) => {
@@ -404,11 +447,141 @@ test('windows (real PowerShell): at most one automatic reboot in 6 hours, and su
   await stopRun(r, again);
 });
 
-test('windows: the warn-only stage has no way to reboot, and its switch is off (w6792)', () => {
-  assert.equal(win.SUPERVISOR_REBOOT_LIVE, false);
+// w6792, the live stage: the same episodes with the switch on; the fakes stand in for the reboot (see FAKE_SHUTDOWN).
+const lines = (file: string) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split(/\r?\n/) : []);
+
+test('windows (real PowerShell): live, a stuck episode 15 minutes on reboots through shutdown.exe once, its reason written first (w6792)', { skip }, async (t) => {
+  const r = rig(t, 'stuck,live', { rebootAfterS: REBOOT_AFTER_S, live: true });
+  fs.writeFileSync(path.join(r.dir, 'elig.ps1'), ELIGIBLE_PS);
+  const done = r.run({ noKill: true });
+  await until('the reboot', () => r.log().includes('shutdown.exe started the reboot'));
+  await new Promise((res) => setTimeout(res, 1500));
+  await stopRun(r, done);
+  const log = r.log();
+  const [stuck] = r.pids();
+  assert.match(log, /self-reboot: eligible: test: eligible; mode live \(w6792\)/);
+  assert.match(log, /this machine reboots if it may \(w6792\)/);
+  assert.match(log, new RegExp(`self-reboot: rebooting now, reason: the daemon was stuck \\d+ min \\(pid ${stuck.pid} said it ends \\(test: stuck\\) and did not exit\\) and this supervisor's own recovery brought back no working daemon \\(w6792\\)`));
+  assert.ok(log.indexOf('rebooting now') < log.indexOf('shutdown.exe started the reboot'));
+  assert.doesNotMatch(log, /would reboot now|NtShutdownSystem/);
+  const asked = lines(path.join(r.dir, 'shutdown.txt'));
+  assert.equal(asked.length, 1, 'once per episode');
+  assert.match(asked[0], /^FF Factory: the daemon was stuck \d+ min and its supervisor reboots this machine \(w6792\)$/);
+  assert.ok(!fs.existsSync(path.join(r.dir, 'nt.txt')));
+  const st = rebootState(r.dir);
+  assert.equal(st.mode, 'live');
+  assert.equal(st.last.mode, 'live');
+  assert.equal(st.last.failed, undefined);
+  assert.equal(Date.parse(st.lastLiveAt), Date.parse(st.last.at), 'the rate guard counts it');
+  const waited = (Date.parse(st.last.at) - Date.parse(st.last.stuckSince)) / 1000;
+  assert.ok(waited >= REBOOT_AFTER_S && waited < REBOOT_AFTER_S + 10, `rebooted ${waited} s after the stuck state began`);
+});
+
+test('windows (real PowerShell): live, shutdown.exe refusing or not answering falls back to NtShutdownSystem, and a failure is kept for the portal (w6792)', { skip }, async (t) => {
+  for (const [code, said] of [
+    ['1190', 'shutdown.exe answered exit code 1190'],
+    ['hang', 'shutdown.exe did not answer in 60 s'],
+  ]) {
+    const r = rig(t, 'stuck,live', { rebootAfterS: REBOOT_AFTER_S, live: true });
+    fs.writeFileSync(path.join(r.dir, 'elig.ps1'), ELIGIBLE_PS);
+    fs.writeFileSync(path.join(r.dir, 'shutdown-code.txt'), code);
+    const done = r.run({ noKill: true });
+    await until('the fallback', () => r.log().includes('this machine did not reboot'));
+    await new Promise((res) => setTimeout(res, 1000));
+    await stopRun(r, done);
+    const log = r.log();
+    assert.ok(log.includes(`self-reboot: ${said}; rebooting through NtShutdownSystem (w6792)`), log);
+    assert.match(log, /self-reboot: this machine did not reboot: test: NtShutdownSystem answered 0xC0000061 \(w6792\)/);
+    assert.equal(lines(path.join(r.dir, 'shutdown.txt')).length, 1);
+    assert.equal(lines(path.join(r.dir, 'nt.txt')).length, 1, 'tried once, never again this episode');
+    const st = rebootState(r.dir);
+    assert.equal(st.last.failed, `${said}, and test: NtShutdownSystem answered 0xC0000061`);
+    assert.ok(st.lastLiveAt, 'a failed try counts for the rate guard too');
+  }
+});
+
+test('windows (real PowerShell): live, still up after shutdown.exe said yes reboots through NtShutdownSystem, unless someone used the console since (w6792)', { skip }, async (t) => {
+  for (const used of [false, true]) {
+    const r = rig(t, 'stuck,live', { rebootAfterS: REBOOT_AFTER_S, live: true, rebootFallbackS: 2 });
+    fs.writeFileSync(path.join(r.dir, 'elig.ps1'), ELIGIBLE_PS);
+    const done = r.run({ noKill: true });
+    await until('the reboot', () => r.log().includes('shutdown.exe started the reboot'));
+    if (used) fs.writeFileSync(path.join(r.dir, 'idle.txt'), '0');
+    await until('the fallback check', () => /did not reboot|no fallback/.test(r.log()));
+    await new Promise((res) => setTimeout(res, 1000));
+    await stopRun(r, done);
+    const log = r.log();
+    if (used) {
+      assert.match(log, /self-reboot: this machine is still up 0 min after shutdown\.exe started the reboot, but someone used the console since; no fallback \(w6792\)/);
+      assert.ok(!fs.existsSync(path.join(r.dir, 'nt.txt')));
+    } else {
+      assert.match(log, /self-reboot: this machine is still up 0 min after shutdown\.exe started the reboot; rebooting through NtShutdownSystem \(w6792\)/);
+      assert.equal(lines(path.join(r.dir, 'nt.txt')).length, 1, 'once');
+      assert.match(rebootState(r.dir).last.failed, /^this machine is still up 0 min after shutdown\.exe started the reboot, and test: NtShutdownSystem answered/);
+    }
+  }
+});
+
+test('windows (real PowerShell): a daemon that works but cannot reach the portal holds the reboot until its last failed try is 2 minutes old (w6809 review)', { skip }, async (t) => {
+  const r = rig(t, 'stuck,unreachable', { rebootAfterS: REBOOT_AFTER_S, live: true, portalHoldS: 2 });
+  fs.writeFileSync(path.join(r.dir, 'elig.ps1'), ELIGIBLE_PS);
+  fs.writeFileSync(path.join(r.dir, 'portal-down.txt'), '');
+  const done = r.run({ noKill: true });
+  await until('portal held', () => r.log().includes('no reboot: the daemon works but cannot reach the portal (no link: test: ECONNREFUSED); a reboot would not bring the portal back'));
+  await new Promise((res) => setTimeout(res, 1500));
+  assert.ok(!fs.existsSync(path.join(r.dir, 'shutdown.txt')), 'held while the portal is down');
+  assert.match(rebootState(r.dir).skip.why, /cannot reach the portal/);
+  // The portal answers again but this daemon never links: its last failed try ages out, and the reboot goes ahead.
+  fs.rmSync(path.join(r.dir, 'portal-down.txt'));
+  await until('the reboot', () => r.log().includes('shutdown.exe started the reboot'));
+  await stopRun(r, done);
+  assert.doesNotMatch(r.log(), /the episode is over/, 'unlinked is not working');
+  assert.equal(lines(path.join(r.dir, 'shutdown.txt')).length, 1);
+});
+
+test('windows (real PowerShell): a daemon started under 2 minutes ago gets its time to link before the reboot (w6792)', { skip }, async (t) => {
+  const r = rig(t, 'stuck,live', { rebootAfterS: REBOOT_AFTER_S, live: true, youngS: 600 });
+  fs.writeFileSync(path.join(r.dir, 'elig.ps1'), ELIGIBLE_PS);
+  const done = r.run({ noKill: true });
+  await until('young held', () => /no reboot: the daemon running now, pid \d+, started \d+ s ago; it gets 600 s to link to the portal/.test(r.log()));
+  await new Promise((res) => setTimeout(res, 1000));
+  await stopRun(r, done);
+  const [, fresh] = r.pids();
+  assert.match(r.log(), new RegExp(`the daemon running now, pid ${fresh.pid}, started`));
+  assert.ok(!fs.existsSync(path.join(r.dir, 'shutdown.txt')));
+});
+
+test('windows (real PowerShell): an eligibility check that hangs is stopped and let go, and none starts beside it until it has stopped (w6809 review)', { skip }, async (t) => {
+  const r = rig(t, 'live', { eligWaitS: 1, eligEveryS: 1 });
+  // A .NET wait a pipeline stop cannot cut short, as a hung registry or schtasks call would be: the stop takes 4 s.
+  fs.writeFileSync(path.join(r.dir, 'elig.ps1'), "param($taskName) [Threading.Thread]::Sleep(4000); [pscustomobject]@{ eligible = $true; why = 'test: late'; task = $true }");
+  const done = r.run();
+  await until('let go', () => r.log().includes('the eligibility check that hung has stopped (Stopped) and is let go'), 20_000);
+  await stopRun(r, done);
+  const log = r.log();
+  assert.match(log, /self-reboot: its eligibility check has not answered in 1 s; stopped, and tried again in 0 min \(w6792\)/);
+  assert.equal(log.match(/has not stopped yet; no new one starts beside it/g)?.length, 1, 'said once while it hangs');
+  assert.ok(log.indexOf('has not stopped yet') < log.indexOf('is let go'));
+  assert.doesNotMatch(log, /eligible: test: late/, 'a stopped check answers nothing');
+});
+
+test('windows: the live stage reboots through one named step, and nothing a worker, a file or the portal sends asks for it (w6792)', () => {
+  assert.equal(win.SUPERVISOR_REBOOT_LIVE, true);
   const s = win.supervisorScript('C:\\node\\node.exe', false);
-  assert.match(s, /^\$rebootLive = \$false$/m);
-  assert.doesNotMatch(s, /shutdown|Restart-Computer|NtShutdownSystem|InitiateSystemShutdown|ExitWindowsEx/i);
+  assert.match(s, /^\$rebootLive = \$true$/m);
+  // The one reboot command, and the one fallback, each called from one place (counted in the code, not its comments).
+  const code = s.replace(/^\s*#.*$/gm, '');
+  assert.equal(code.match(/shutdown\.exe'/g)?.length, 1);
+  assert.match(code, /'\/r \/f \/t 0 \/d u:0:5 \/c "'/);
+  assert.doesNotMatch(s, /Restart-Computer|InitiateSystemShutdown|ExitWindowsEx|Stop-Computer/i);
+  assert.equal(code.match(/\bRun-Shutdown\b/g)?.length, 2, 'defined, and called by Reboot-Now');
+  assert.equal(code.match(/\bNt-Reboot\b/g)?.length, 2, 'defined, and called by Nt-Now');
+  assert.equal(code.match(/\bReboot-Now\b/g)?.length, 2, 'defined, and called by Watch-RebootStep after its guards');
+  assert.equal(code.match(/\bNt-Now\b/g)?.length, 3, 'defined, and called by Reboot-Now and by the fallback');
+  // The restart request a worker or the portal may write (w6784) never reaches it.
+  const take = /function Take-Request \{[\s\S]*?\n\}\n/.exec(s)?.[0];
+  assert.ok(take);
+  assert.doesNotMatch(take, /Reboot|shutdown/i);
   // The eligibility check reads the Winlogon key's values by name, never the stored password's.
   const e = win.selfRebootEligibilityScript();
   assert.doesNotMatch(e, /GetValue\('DefaultPassword'\)|Get-ItemProperty/);
@@ -435,7 +608,9 @@ test('windows (real PowerShell): a machine is eligible only when it would come b
     { name: 'another name', fakes: winlogon("$w.user = 'guest'"), eligible: false, why: /^automatic logon names another account than this daemon's user \(BEAST\\rydin\)$/ },
     { name: 'another domain', fakes: winlogon("$w.domain = 'CORP'"), eligible: false, why: /names another account/ },
     // A Microsoft account: its address, matched by the group SID this user's token carries; a DefaultPassword value by its name.
-    { name: 'Microsoft account', fakes: `${winlogon("$w.user = 'me@example.com'; $w.domain = 'MicrosoftAccount'; $w.names += 'DefaultPassword'")}\nfunction Read-Logon { throw 'never asked' }`, eligible: true, task: true, why: /^automatic logon to this daemon's user \(BEAST\\rydin\), its password stored \(a DefaultPassword value, not read\), and the FFFactoryDaemon logon task$/ },
+    { name: 'Microsoft account', fakes: winlogon("$w.user = 'me@example.com'; $w.domain = 'MicrosoftAccount'; $w.names += 'DefaultPassword'"), eligible: true, task: true, why: /^automatic logon to this daemon's user \(BEAST\\rydin\), its password stored \(a DefaultPassword value, not read; the last boot logged this user on by itself 11 s after it started, 2\.3 s after the console connected, and AutoAdminLogon stayed 1\), and the FFFactoryDaemon logon task$/ },
+    // A DefaultPassword value can be stale or wrong: the last boot must still have logged on by itself (w6809's review).
+    { name: 'DefaultPassword, logon typed', fakes: `${winlogon("$w.names += 'DefaultPassword'")}\nfunction Read-Logon { @(300, 40) }`, eligible: false, why: /^the last boot did not log this user on by itself: a DefaultPassword value is there \(not read\), but this user's logon came 300 s after the last boot and 40 s after the console connected \(by itself: within 120 s and 5 s\)$/ },
     { name: 'a slow logon', fakes: 'function Read-Logon { @(300, 40) }', eligible: false, why: /^no stored password for automatic logon can be seen: no DefaultPassword value, and this user's logon came 300 s after the last boot and 40 s after the console connected \(by itself: within 120 s and 5 s\); one in the LSA only an administrator can check$/ },
     { name: 'a quick logon typed late', fakes: 'function Read-Logon { @(60, 30) }', eligible: false, why: /no stored password/ },
     { name: 'no logon times', fakes: 'function Read-Logon { $null }', eligible: false, why: /this session's logon times could not be read/ },

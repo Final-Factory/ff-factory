@@ -3101,7 +3101,7 @@ export class MachineManager {
         const was = m.selfReboot;
         this.update(id, { selfReboot });
         if (!was || selfRebootEligibility(was) !== selfRebootEligibility(selfReboot)) console.log(`machine ${id}: ${selfRebootEligibility(selfReboot)}`);
-        if (selfReboot.last && selfReboot.last.at !== was?.last?.at) console.log(`machine ${id}: ${selfRebootEventLine(selfReboot.last)}`);
+        if (selfReboot.last && (!was?.last || selfRebootEventLine(selfReboot.last) !== selfRebootEventLine(was.last))) console.log(`machine ${id}: ${selfRebootEventLine(selfReboot.last)}`);
         if (selfReboot.skip && selfReboot.skip.why !== was?.skip?.why) console.log(`machine ${id}: self-reboot held: ${selfReboot.skip.why}`);
         return;
       }
