@@ -120,6 +120,10 @@ try {
   if ($task -eq 'Running' -and $lastStart -lt (Get-Date).AddHours(-$StuckHours)) {
     $r.reasons += "stuck: $tn Running, last job start $($lastStart.ToUniversalTime().ToString('s'))Z"
   }
+  if ($task -eq 'missing' -and $AsOf -eq [datetime]::MinValue) {
+    # A service stopped and not started again leaves V: with no volume task, so no nightly job (w6791 N1).
+    $r.reasons += "no volume task: $tn is missing, so the nightly dedup job has no trigger"
+  }
   if ($Mode -eq 'force') { $r.reasons += "forced test (-Mode force): repair whatever the state (task $task, service $(ServiceState))" }
   if (-not $r.reasons.Count -and $task -like 'unreadable*') { $r.ok = $false; $r.state = "healthy by the event logs, but the volume task's state is $task, so a stuck task cannot be seen"; Save }
   if (-not $r.reasons.Count) { $r.state = "healthy (service $(ServiceState), task $task)"; Save }
@@ -139,25 +143,40 @@ try {
       $x = Native $schtasks @('/end', '/tn', $tn)
       $r.did += "schtasks /end $tn (exit $($x.code)$(if ($x.code) { ": $($x.out)" }))"
     } elseif ($ts -eq 'missing') {
-      $r.did += 'volume task gone after the stop (expected: the service makes it again when it starts)'
+      $r.did += 'volume task gone after the stop (the service registers it again when it starts; checked below)'
     }
   } finally {
     $x = Native $sc @('start', $Service)
     $r.did += "sc start $Service (exit $($x.code)$(if ($x.code) { ": $($x.out)" }))"
-    [void](WaitService 'RUNNING' 60)
+    if (-not (WaitService 'RUNNING' 60)) {
+      # One more try (w6791 N2): a stop still pending after 60 s refuses the first start.
+      [void](WaitService 'STOPPED' 60)
+      $x = Native $sc @('start', $Service)
+      $r.did += "sc start $Service again (exit $($x.code)$(if ($x.code) { ": $($x.out)" }))"
+      [void](WaitService 'RUNNING' 60)
+    }
     $r.did += "service $(ServiceState)"
   }
-  $seen = $null
-  for ($i = 0; $i -lt 60 -and -not $seen; $i++) {
-    $n = Newest6 $mp
-    if ($n -and $n.TimeCreated -ge $t0) { $seen = $n } else { Start-Sleep -Seconds 2 }
+  # The stop deletes V:'s volume task, and that task is the nightly job's trigger. Success needs it back (w6791 N1): the
+  # service registers it again when it starts and watches the volume. This script never makes it itself (no dedup setting
+  # is changed here); if it does not come back the run fails, and the watch reports it.
+  $seen = $null; $task = 'missing'
+  for ($i = 0; $i -lt 60 -and (-not $seen -or $task -eq 'missing'); $i++) {
+    if (-not $seen) { $n = Newest6 $mp; if ($n -and $n.TimeCreated -ge $t0) { $seen = $n } }
+    $task = TaskStatus $tn
+    if (-not $seen -or $task -eq 'missing') { Start-Sleep -Seconds 2 }
   }
-  $task = TaskStatus $tn
-  if ($seen -and $task -ne 'Running' -and $task -notlike 'unreadable*') {
-    $r.state = "repaired: the service watches $mp again (event 6 at $($seen.TimeCreated.ToUniversalTime().ToString('s'))Z), task $task"
+  $next = ''
+  if ($task -ne 'missing' -and $task -notlike 'unreadable*') {
+    $q = Native $schtasks @('/query', '/tn', $tn, '/fo', 'list')
+    $next = [regex]::Match($q.out, 'Next Run Time:\s+(.+?)\s+Status:').Groups[1].Value
+  }
+  if ($seen -and $task -ne 'Running' -and $task -ne 'missing' -and $task -notlike 'unreadable*') {
+    $r.state = "repaired: the service watches $mp again (event 6 at $($seen.TimeCreated.ToUniversalTime().ToString('s'))Z), volume task back ($task, next run $next)"
   } else {
     $r.ok = $false
-    $r.state = "repair did not finish: event 6 $(if ($seen) { 'seen' } else { 'not seen within 120 s' }), service $(ServiceState), task $task"
+    $why = if ($task -eq 'missing') { "the volume task $tn is not back, so the nightly job has no trigger" } else { "task $task" }
+    $r.state = "repair did not finish: event 6 $(if ($seen) { 'seen' } else { 'not seen within 120 s' }), service $(ServiceState), $why"
   }
   Save
 } catch {

@@ -253,8 +253,12 @@ back to confirm the ACE is gone. Neither is a lasting off switch: the next `devd
 registers the task again in repair mode.
 A read the repair cannot make fails loudly (`ok=false`): an event log it may not read, or a volume task whose state
 `schtasks /query` refuses it (`unreadable`), is never taken as "nothing to repair" or "repaired".
-Once it has stopped the service it always starts it again, whatever fails after the stop. Stopping the service
-deletes the volume task, so a missing task after the stop is expected; the service makes it again when it starts. (The
+Once it has stopped the service it always starts it again (a second try if the first start is refused), whatever fails
+after the stop. Stopping the service deletes the volume task, and that task is the nightly job's trigger, so "repaired"
+needs it back: the run waits up to 120 s for the service to register it again and fails (`ok=false`) if it does not. The
+script never makes the task itself. A missing volume task is also a reason to repair on its own. (Measured on LothDesktop,
+2026-11-28: after the ops worker's stop and start the task was back, registered anew (never run, next run 02:00); on
+windows-latest, which watches no volume, it stays missing.) (The
 first forced test on LothDesktop, 2026-11-28, left the service stopped: `schtasks /query` of the deleted task wrote to
 stderr, which Windows PowerShell 5.1 treats as a terminating error under `Stop`. Native commands now run through a helper
 that keeps their stderr as text.)
@@ -262,13 +266,19 @@ that keeps their stderr as text.)
 **The forced test.** Starting the volume task by hand does not trigger a repair: it logs a fresh job start, and a task is
 stuck only after 3 hours Running. The test mode does: `install-privileged-helpers.ps1 -Actions deduprepair -DedupRepairMode
 force` registers the task to repair whatever the state. Then, elevated:
-1. `schtasks /run /tn "\Microsoft\Windows\ReFsDedupSvc\{<volume GUID>}"` and check it shows Running (a real dedup job
-   starts; the repair cancels it, which is safe). This makes the test cover ending a Running task.
+0. Check no dedup job is running on V: (the volume task is not Running and the newest ReFsDedupSvc event is not a
+   start, 3).
+1. `schtasks /run /tn "\Microsoft\Windows\ReFsDedupSvc\{<volume GUID>}"` and check it shows Running. A real dedup job
+   starts and the repair's service stop cuts it short; the next nightly job runs as usual.
+   This makes the test cover a Running task.
 2. `schtasks /run /tn ffsb-helper-deduprepair`, wait until it is not Running, and read `dedup-repair.json`. Want `did` to
-   list the stop, the task gone or ended, the start and `service RUNNING`; `state` "repaired" with a new event 6; and the
-   volume task not Running.
+   list the stop, the task gone or ended, the start and `service RUNNING`; `state` "repaired" with a new event 6 and
+   "volume task back"; and then check it yourself: `schtasks /query /tn "\Microsoft\Windows\ReFsDedupSvc\{<volume GUID>}"
+   /fo list` answers, not Running, with a Next Run Time (the nightly trigger).
 3. `install-privileged-helpers.ps1 -Actions deduprepair` again, which puts it back in repair mode. Never leave it in force
    mode: it would restart the service every night.
+If it goes wrong: elevated, `sc.exe start refsdedupsvc`, then wait for event 6 for V: and check the volume task answers
+with a Next Run Time as in step 2. If the task is still missing, stop there and ask: making it again is a dedup setting.
 The Dev Drive e2e runs force mode as the task (LOCAL SERVICE) on windows-latest, and runs the script elevated with
 `-FailAfterStop` to prove the service is started again after a fault.
 

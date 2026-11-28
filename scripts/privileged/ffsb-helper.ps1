@@ -80,12 +80,15 @@ function Test-DedupWatch {
     # The repair task (w6597, install-privileged-helpers.ps1 -Actions deduprepair): run it now rather than waiting for the night.
     $rt = 'ffsb-helper-deduprepair'
     $rj = Join-Path $PSScriptRoot 'results\dedup-repair\dedup-repair.json'
-    & schtasks.exe /query /tn $rt *> $null
-    if ($LASTEXITCODE -eq 0) {
+    # schtasks under 'Stop': its stderr ("cannot find" when the task is not registered) would throw in WinPS 5.1 (w6791 N3).
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $rq = @(& schtasks.exe /query /tn $rt /fo csv /nh 2>$null); $rqCode = $LASTEXITCODE } finally { $ErrorActionPreference = $eap }
+    if ($rqCode -eq 0) {
       $t0 = (Get-Date).ToUniversalTime()
       # A run already going (IgnoreNew drops ours): take its result, from any start within the task's 15-minute limit (w6623 M2).
-      if ("$(& schtasks.exe /query /tn $rt /fo csv /nh 2>$null | Select-Object -Last 1)" -match '"Running"$') { $t0 = $t0.AddMinutes(-15) }
-      & schtasks.exe /run /tn $rt *> $null
+      if ("$($rq | Select-Object -Last 1)" -match '"Running"$') { $t0 = $t0.AddMinutes(-15) }
+      $ErrorActionPreference = 'Continue'
+      try { & schtasks.exe /run /tn $rt *> $null } finally { $ErrorActionPreference = $eap }
       for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep -Seconds 3
         try { $res = Get-Content -Raw $rj | ConvertFrom-Json } catch { $res = $null }

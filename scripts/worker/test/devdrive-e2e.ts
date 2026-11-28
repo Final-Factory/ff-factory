@@ -186,6 +186,9 @@ $log = Join-Path $env:ProgramData 'ffsb-helpers\\results\\dedup-repair\\dedup-re
     const odid = (fo.result?.did ?? []).join(' | ');
     check(fo.result?.mode === 'force' && /sc stop refsdedupsvc \(exit 0\)/.test(odid) && /sc start refsdedupsvc \(exit 0\)/.test(odid) && /service RUNNING/.test(odid) && fo.result?.state !== 'check failed',
       'the repair task (LOCAL SERVICE) stops and starts refsdedupsvc in force mode and the service is RUNNING right after its start', force);
+    // "repaired" needs the volume task back (w6791 N1). This runner watches no volume, so it stays missing and the run must fail.
+    check(fo.result?.ok ? /volume task back/.test(fo.result?.state ?? '') : /not back|not seen/.test(fo.result?.state ?? ''),
+      'the repair only says repaired with the volume task (the nightly trigger) back', fo.result?.state ?? '');
     console.log(`note: force-mode repair on this runner: ${fo.result?.state}; the service now ${fo.svc} (it may stop by itself when it watches nothing); trace ${JSON.stringify((fo as { trace?: string[] }).trace ?? [])}`);
     const back = ps(`& '${helpersPs}' -Vhdx '${vhdx}' -Letter ${letter} -Actions deduprepair | Out-Null; (Get-ScheduledTask -TaskName ffsb-helper-deduprepair).Actions[0].Arguments`).stdout.trim();
     check(/-Mode repair$/.test(back), 'reinstalling puts the repair task back in repair mode', back);
