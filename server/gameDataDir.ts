@@ -101,17 +101,18 @@ const covers = (checked: readonly string[], h: string) => {
  * Only that shape; "ac80d7b0 is 0.50.0.47" or "Steam 0.50.0.47" still name a build no commit is. w6686 (w6682's review of
  * PR #1543): the bracket must close right after the version, so "dc4643b4c2 (0.50.0.47 installed)" names a build; and a
  * published, installed, Steam, release or shipped word up to two words before the sha ("the published dc4643b4c2
- * (0.50.0.47)") makes it a build too. `at` and `end` bound the version (VERSION_WORD, a leading "v" included).
+ * (0.50.0.47)") makes it a build too, as do downloaded, live, retail and public (w6688). At most three spaces sit around the
+ * "(" (w6688: a 120-character window with an open gap would have excused a sha 100 spaces away, which #1543 did not). `at` and `end` bound the version (VERSION_WORD, a leading "v" included).
  */
 const versionOfChecked = (said: string, at: number, end: number, checked: readonly string[]): boolean => {
   if (!/^\s*\)/.test(said.slice(end, end + 20))) return false;
   const before = said.slice(Math.max(0, at - 120), at);
-  const m = /\b([0-9a-f]{7,40})\s*\(\s*$/i.exec(before);
+  const m = /\b([0-9a-f]{7,40})\s{0,3}\(\s{0,3}$/i.exec(before);
   if (!m || !isSha(m[1]) || !covers(checked, m[1])) return false;
   return !INSTALLED_WORD_BEFORE.test(before.slice(0, m.index));
 };
 /** w6686: a word that makes the sha after it a build players run, with at most two words between them. */
-const INSTALLED_WORD_BEFORE = /\b(?:published|installed|steam|releases?|released|shipped)\b\W*(?:[\w.-]+\W+){0,2}$/i;
+const INSTALLED_WORD_BEFORE = /\b(?:published|installed|downloaded|steam|releases?|released|shipped|live|retail|public)\b\W*(?:[\w.-]+\W+){0,2}$/i;
 /**
  * A 0.50.x.y version as otherPlayerIn reads one. w6686: a leading "v" counts ("v0.50.0.47"); before it, `\b0\.50` could not
  * match after the "v", so such a version was no version at all.

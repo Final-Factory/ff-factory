@@ -239,5 +239,7 @@ test('w6686: a version that does not close its bracket, a published word before 
   assert.match(otherPlayerIn('dc4643b4c2 (0.50.0.47 installed)', '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.47/);
   assert.match(otherPlayerIn('client runs the published dc4643b4c2 (0.50.0.47)', '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.47/);
   assert.match(otherPlayerIn('the Steam pre-1.0 dc4643b4c2 (0.50.0.47)', '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.47/);
+  assert.match(otherPlayerIn('the downloaded dc4643b4c2 (0.50.0.47)', '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.47/);
+  assert.match(otherPlayerIn(`${W6678_A}${' '.repeat(20)}(0.50.0.120)`, '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.120/, 'a sha far from the bracket keeps it (w6688)');
   assert.match(otherPlayerIn('client is v0.50.0.47', '718a14689a', 'legacy_data', read) ?? '', /names build v0\.50\.0\.47/);
 });
