@@ -28,8 +28,9 @@
  *   so no override by value works (w6570). fetch, pull and ls-remote get `--upload-pack=`, push `--receive-pack=`
  *   (firstWinsArgs); the calls that option cannot cover are refused (firstWinsRefusal).
  * - SUBMODULES: a call that recurses into submodules runs each submodule's own config, which the scan never reads (w6630,
- *   SUBMODULE_GIT_CONFIG: forcing it stops some routes, not all); the fence warns on such calls, and on any call in a
- *   repository that shows signs of submodules, until it enforces (submoduleWarning).
+ *   SUBMODULE_GIT_CONFIG); every scanned call runs with SUBMODULE_GIT_CONFIG forced, and the calls it cannot stop are
+ *   refused: those that recurse by their own option or setting (submoduleRecursion), and `git add`/`git rm` whose pathspec
+ *   covers a submodule (gitlinkCovered).
  * - `diff`, `log`, `show` and `whatchanged` also get `--no-ext-diff --no-textconv`: `diff.external` cannot be overridden
  *   by value (an empty one makes every `git diff` fail, measured by w5514 on git 2.50.1), and the flags need no scan.
  *
@@ -49,7 +50,6 @@ import {
   type SpawnOptions,
   type SpawnSyncOptions,
 } from 'node:child_process';
-import fs from 'node:fs';
 import path from 'node:path';
 import { runOffThread } from './hostProbe.ts';
 import { execFileOffThread, type ThreadExecOptions } from './spawnThread.ts';
@@ -85,7 +85,7 @@ export const FIXED_GIT_CONFIG: [string, string][] = [
 
 /** Keys a repository may name a program in, read per call (canonical names: section and key lower case). */
 export const SCANNED_KEYS =
-  '^(filter\\..+\\.(clean|smudge|process)|merge\\..+\\.driver|diff\\..+\\.(command|textconv)|hook\\..+\\.command|remote\\..+\\.(uploadpack|receivepack|vcs)|submodule\\..+\\.(update|url|active)|submodule\\.active|diff\\.submodule|lfs\\.customtransfer\\..+\\.path|lfs\\.extension\\..+\\.(clean|smudge)|lfs\\.standalonetransferagent|core\\.(sshcommand|askpass|gitproxy)|gpg\\.(.+\\.)?program|credential\\.(.+\\.)?helper|url\\..+\\.(insteadof|pushinsteadof)|protocol\\..+\\.allow|remotes\\..+|fetch\\.all)$';
+  '^(filter\\..+\\.(clean|smudge|process)|merge\\..+\\.driver|diff\\..+\\.(command|textconv)|hook\\..+\\.command|remote\\..+\\.(uploadpack|receivepack|vcs)|submodule\\..+\\.update|lfs\\.customtransfer\\..+\\.path|lfs\\.extension\\..+\\.(clean|smudge)|lfs\\.standalonetransferagent|core\\.(sshcommand|askpass|gitproxy)|gpg\\.(.+\\.)?program|credential\\.(.+\\.)?helper|url\\..+\\.(insteadof|pushinsteadof)|protocol\\..+\\.allow|remotes\\..+|fetch\\.all)$';
 
 /** Scopes no worker writes: the user's and system's config, the caller's own command line (`unknown` is Apple git's Xcode config). */
 const TRUSTED_SCOPES = new Set(['system', 'global', 'command', 'unknown']);
@@ -147,13 +147,7 @@ export function firstWinsArgs(args: string[], rows: { scope: string; key: string
  * Keys scanned only to read, never overridden (w6570 review): a remote group (`remotes.<group>`) and `fetch.all` make a fetch
  * or pull start one child `git fetch` per remote, and the injected `--upload-pack=` never reaches those children.
  */
-const isReadOnly = (key: string) => /^remotes\..+$/.test(key) || key === 'fetch.all' || isSubmoduleMark(key) || key === 'diff.submodule';
-
-/**
- * Keys a repository with initialized submodules has in its own config (w6630): scanned only to see that it has some. Not a
- * reliable sign alone: a populated submodule whose keys were removed still recurses (w6648), so submoduleSign also looks on disk.
- */
-const isSubmoduleMark = (key: string) => /^submodule\..+\.(url|active)$/.test(key) || key === 'submodule.active';
+const isReadOnly = (key: string) => /^remotes\..+$/.test(key) || key === 'fetch.all';
 
 /**
  * w6630: a call that recurses into submodules starts a child git in each one, and the child reads that submodule's own config
@@ -164,18 +158,20 @@ const isSubmoduleMark = (key: string) => /^submodule\..+\.(url|active)$/.test(ke
  * `submodule update --remote`, `diff --submodule=diff` and `status` (measured, git 2.56.1.windows.1). Scanning submodule
  * configs was not taken: a submodule's `.git` file can point at any folder, and a linked worktree keeps its own `modules/`.
  *
- * SUBMODULE_GIT_CONFIG is what the enforcing step forces on every scanned call (not only in repositories that look like they
- * have submodules: a populated submodule whose keys were removed from the superproject's config still recursed, w6648). It
+ * SUBMODULE_GIT_CONFIG is forced on every scanned call (not only in repositories that look like they have submodules: a
+ * populated submodule whose keys were removed from the superproject's config still recursed, w6648). It
  * stopped a default fetch and pull, `status`, a working-tree diff, `stash`, `commit -a`, and (with diff.submodule=short) a
  * diff between commits, which otherwise runs the submodule's diff.external, smudge filter and, in a partial clone, a lazy
  * fetch through its core.sshCommand (measured by w6648 and here). It does not stop these, which start a child git in the
  * submodule whatever the config says (measured): an explicit `--recurse-submodules`, `--ignore-submodules=none|untracked` or
  * `--submodule=diff|log`, `git submodule` and `submodule--helper`, a caller's own `-c` of those keys, `git rm` of a
  * submodule (`--cached` too), and `git add -A`, `add .` or `add -u` whose pathspec covers one (`add -A -- . ':!sub'` ran
- * nothing). The enforcing step refuses those (submoduleRecursion; add and rm in a repository with submodules). No
- * Final-Factory repository has submodules. Warn-only first (lothsahn's lockout rule): the enforcing step changes what
- * `git status` reports in a repository that has them (a submodule's uncommitted edits stop showing), and the clean-up reads
- * that status.
+ * nothing). Those are refused (submoduleRecursion; gitlinkCovered for add, rm and mv). A submodule's own `ignore` setting
+ * beats the forced diff.ignoreSubmodules (w6691), so the fence also passes options (IGNORE_SUBMODULES_OPT, QUIET_OPT) and
+ * refuses what no option stops in a repository with a submodule (wholeIndexCall). No Final-Factory repository has
+ * submodules; the warn-only step (ff-factory #1538) shipped first, by lothsahn's lockout rule. Forcing it changes what `git
+ * status` reports in a repository that has them (a submodule's uncommitted edits stop showing), so the clean-up checks each
+ * submodule as its own repository (cleanup.ts submoduleWorkWhy).
  */
 export const SUBMODULE_GIT_CONFIG: [string, string][] = [
   ['submodule.recurse', 'false'],
@@ -185,7 +181,60 @@ export const SUBMODULE_GIT_CONFIG: [string, string][] = [
   ['status.submoduleSummary', 'false'],
   // `diff` or `log` reads the submodule's own objects and runs its diff programs between the two commits a gitlink moved.
   ['diff.submodule', 'short'],
+  // An autostash is a `stash push` (w6691: `rebase --autostash` and `merge --autostash` ran a submodule's clean filter).
+  ['rebase.autoStash', 'false'],
+  ['merge.autoStash', 'false'],
 ];
+
+/**
+ * A submodule's own `submodule.<name>.ignore` (in .gitmodules, which a branch brings, or the repository's config) beats
+ * diff.ignoreSubmodules (w6691's review of #1544: with `ignore = none` in .gitmodules, `status`, `diff`, `diff-files`,
+ * `diff-index`, `checkout <branch>`, `stash`, `commit` and `describe --dirty` ran the submodule's clean filter through the
+ * forced config, measured on git 2.56.1.windows.1). Only an `--ignore-submodules` option beats it, and only these take one, so
+ * the fence passes `--ignore-submodules=dirty` right after them (a caller's own `all` or `dirty`, later, still wins;
+ * `none` and `untracked` are refused).
+ */
+const IGNORE_SUBMODULES_OPT = new Set(['status', 'diff', 'diff-files', 'diff-index']);
+/**
+ * Calls whose only look into a submodule is the summary of local changes they print, which `--quiet` turns off (measured: a
+ * `checkout <branch>` or `switch` ran the filter, `checkout -q`, `switch -q`, `stash apply -q` and `stash pop -q` none, as did
+ * `checkout --no-quiet <branch> --quiet`). The fence passes `--quiet` last before any `--`, so it beats a caller's `--no-quiet`.
+ */
+const QUIET_OPT = new Set(['checkout', 'switch', 'stash apply', 'stash pop']);
+
+/**
+ * Calls that look into every submodule whatever any option says (measured with `ignore = none`, git 2.56.1.windows.1):
+ * `commit` (with nothing staged, and `--dry-run`), `stash` (push, save, bare, create, and `stash branch`, which takes no
+ * `--quiet`), `describe --dirty` and `--broken`, and an autostash (`rebase`, `merge` or `pull` with `--autostash`, or a
+ * caller's `-c rebase.autoStash` or `merge.autoStash`). Also a real merge (`merge` or `pull` other than `--ff-only`; w6713:
+ * `merge --no-ff`, `--squash`, `--no-edit` and `pull --no-rebase` ran the filter) and `difftool` and `mergetool`, whose child
+ * git gets no option of the fence's: a `-c submodule.<name>.ignore` would need each name, and a merged .gitmodules can bring
+ * a new one. The fence lists the whole index and refuses them in a repository with a submodule (gitlinkCovered).
+ */
+export function wholeIndexCall(args: string[]): boolean {
+  const { sub } = splitGlobal(args);
+  const name = args[sub] ?? '';
+  const rest = args.slice(sub + 1);
+  const opts = rest.slice(0, rest.includes('--') ? rest.indexOf('--') : rest.length).map((a) => a.split('=')[0]!);
+  if (name === 'commit') return true;
+  if (name === 'stash') return !rest[0] || rest[0].startsWith('-') || /^(push|save|create|branch)$/.test(rest[0]);
+  if (name === 'describe') return opts.some((o) => (o.startsWith('--di') && isOpt(o, '--dirty')) || (o.startsWith('--b') && isOpt(o, '--broken')));
+  if (name === 'difftool' || name === 'mergetool') return true;
+  if (!/^(rebase|merge|pull)$/.test(name)) return false;
+  if (opts.some((o) => o.startsWith('--au') && isOpt(o, '--autostash'))) return true;
+  // Only the shapes FF Factory runs pass (w6731: a later `--no-ff` or `--ff` beats `--ff-only`, and `-m --ff-only` is a
+  // message): `merge --abort`, `merge --quit` (each resets to a commit), and `merge` or `pull` with `--ff-only`, `-q` and
+  // refs, none of which takes a value.
+  if (name !== 'rebase' && !(name === 'merge' && rest.length === 1 && /^--(abort|quit)$/.test(rest[0]!)) && !(rest.includes('--ff-only') && rest.every((a) => a === '--ff-only' || a === '-q' || a === '--quiet' || !a.startsWith('-')))) return true;
+  for (let i = 0; i < sub; i++) {
+    const a = args[i]!;
+    const pair = a === '-c' || a === '--config-env' ? args[i + 1] ?? '' : a.startsWith('--config-env=') ? a.slice(13) : a.startsWith('-c') ? a.slice(2) : '';
+    const eq = pair.indexOf('=');
+    const key = (eq < 0 ? pair : pair.slice(0, eq)).toLowerCase();
+    if (/^(rebase|merge)\.autostash$/.test(key) && (a.startsWith('--config-env') || gitTrue(eq < 0 ? '' : pair.slice(eq + 1)))) return true;
+  }
+  return false;
+}
 
 /** Config keys that make git recurse into submodules, and the values that do (a caller's `-c` beats the forced value). */
 const SUBMODULE_KEYS: [RegExp, RegExp][] = [
@@ -225,77 +274,110 @@ export function submoduleRecursion(args: string[]): string | undefined {
   return undefined;
 }
 
+/** The w6630 refusal of a call that recurses into submodules by its own option or setting, or undefined. */
+export function submoduleRefusal(args: string[]): string | undefined {
+  const how = submoduleRecursion(args);
+  if (!how) return undefined;
+  const name = args[splitGlobal(args).sub] ?? '';
+  return `refused by FF Factory (w6630): \`git ${name}\` recurses into submodules (${how}), where git reads each submodule's own config, which the fence does not scan; run git in the submodule itself (\`git -C <submodule> ...\`), where the fence scans its config`;
+}
+
+/** git's own commands, which no alias shadows (git runs a builtin before it looks for an alias). */
+const BUILTINS = new Set(['add', 'am', 'apply', 'archive', 'branch', 'cat-file', 'check-ignore', 'checkout', 'cherry-pick', 'clean', 'clone', 'commit', 'config', 'count-objects', 'describe', 'diff', 'diff-files', 'diff-index', 'diff-tree', 'difftool', 'fetch', 'for-each-ref', 'fsck', 'gc', 'grep', 'hash-object', 'init', 'log', 'ls-files', 'ls-remote', 'ls-tree', 'maintenance', 'merge', 'merge-base', 'mergetool', 'mv', 'notes', 'prune', 'pull', 'push', 'read-tree', 'rebase', 'reflog', 'remote', 'repack', 'reset', 'restore', 'rev-list', 'rev-parse', 'revert', 'rm', 'show', 'show-ref', 'sparse-checkout', 'stash', 'status', 'submodule', 'switch', 'symbolic-ref', 'tag', 'update-index', 'update-ref', 'var', 'version', 'worktree', 'write-tree']);
+
 /**
- * What says the repository has submodules (w6630), or undefined: a submodule key in its own config, `diff.submodule=diff|log`
- * there, a `.gitmodules` at the top of its working tree, or a `modules` folder in its git folder. Read from the files, with
- * no git call. A best effort for the warning only: a nested clone added as a gitlink without `git submodule add` shows none of
- * these, and the enforcing step forces SUBMODULE_GIT_CONFIG on every scanned call whatever this says.
+ * The w6731 refusal of an alias, or undefined. git runs a name that is neither one of its commands nor a `git-<name>` program
+ * as `alias.<name>` (the repository's config, the user's, or a caller's `-c`), and the fence's options and refusals apply to
+ * the name it is given: `-c alias.st=status st`, and `st` with `alias.st=status` in the repository's config, ran a
+ * submodule's clean filter (measured by w6731's review on git 2.56.1). The scan reads every `alias.*` (SCAN_KEYS); a call
+ * whose name an alias defines is refused, unless it names one of git's own commands (BUILTINS), which an alias never shadows.
  */
-export function submoduleSign(args: string[], rows: { scope: string; key: string; value?: string }[], cwd: string | undefined, env: Env): string | undefined {
-  const mark = rows.find((r) => !TRUSTED_SCOPES.has(r.scope) && (isSubmoduleMark(r.key) || (r.key === 'diff.submodule' && /^(diff|log)$/i.test(r.value ?? ''))));
-  if (mark) return mark.key === 'diff.submodule' ? `diff.submodule=${mark.value ?? ''}` : mark.key;
-  try {
-    const { location } = splitGlobal(args);
-    let base = path.resolve(cwd ?? process.cwd());
-    let gitDir: string | undefined;
-    let top: string | undefined;
-    for (let i = 0; i < location.length; i++) {
-      const [o, v] = location[i].includes('=') ? [location[i].slice(0, location[i].indexOf('=')), location[i].slice(location[i].indexOf('=') + 1)] : [location[i], location[i + 1] ?? ''];
-      if (!location[i].includes('=') && o !== '--bare') i++;
-      if (o === '-C') base = path.resolve(base, v);
-      else if (o === '--git-dir') gitDir = path.resolve(base, v);
-      else if (o === '--work-tree') top = path.resolve(base, v);
+export function aliasRefusal(args: string[], rows: { key: string }[]): string | undefined {
+  const { sub } = splitGlobal(args);
+  const name = args[sub];
+  if (!name || name.startsWith('-') || BUILTINS.has(name)) return undefined;
+  const key = `alias.${name.toLowerCase()}`;
+  const caller = args.slice(0, sub).some((a, i) => {
+    const pair = a === '-c' || a === '--config-env' ? args[i + 1] ?? '' : a.startsWith('--config-env=') ? a.slice(13) : a.startsWith('-c') ? a.slice(2) : '';
+    return pair.split('=')[0]!.toLowerCase() === key;
+  });
+  if (!caller && !rows.some((r) => r.key === key)) return undefined;
+  return `refused by FF Factory (w6731): \`git ${name}\` runs the alias ${key}, which the fence does not resolve (its options and refusals apply to the name it is given); name the git command itself`;
+}
+
+/** Calls the fence lists the index entries of their pathspec for (gitlinkListArgs). */
+const PATHSPEC_CALLS = new Set(['add', 'rm', 'mv']);
+
+/** The global options that change how a pathspec matches; the listing takes the same ones as the call. */
+const PATHSPEC_GLOBALS = new Set(['--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs']);
+
+/** Whether git reads a pathspec literally: `--literal-pathspecs` or GIT_LITERAL_PATHSPECS (git's boolean; empty is false). */
+function literalPathspecs(args: string[], env: Env): boolean {
+  const v = env.GIT_LITERAL_PATHSPECS;
+  return args.slice(0, splitGlobal(args).sub).includes('--literal-pathspecs') || (v !== undefined && v.trim() !== '' && gitTrue(v));
+}
+
+/** The listing's environment: the scan's, with literal pathspecs off, so `:/` and `:(literal)` keep their meaning. */
+export const gitlinkListEnv = (env: Env): Env => ({ ...scanEnv(env), GIT_LITERAL_PATHSPECS: '0' });
+
+/**
+ * The `git ls-files` arguments that list the index entries a call covers, or undefined for a call that needs no listing
+ * (w6630), run with gitlinkListEnv:
+ * - add, rm and mv start a child `git status` in each submodule their pathspec covers, whatever the config says (measured),
+ *   so the listing takes the same pathspec and pathspec options. With no pathspec, or one read from a file (any prefix of
+ *   `--pathspec-from-file` git takes, w6691: `--pathspec-fr` got past an exact match), it lists the whole index (`:/`). A
+ *   literal call's pathspec is passed as `:(literal)<spec>` (the environment turns literal off for `:/`).
+ * - a wholeIndexCall lists the whole index.
+ */
+export function gitlinkListArgs(args: string[], env: Env = {}): string[] | undefined {
+  const { location, sub } = splitGlobal(args);
+  const name = args[sub] ?? '';
+  const whole = [...location, 'ls-files', '-s', '-z', '--', ':/'];
+  if (wholeIndexCall(args)) return whole;
+  if (!PATHSPEC_CALLS.has(name)) return undefined;
+  const specs: string[] = [];
+  const rest = args.slice(sub + 1);
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]!;
+    if (a === '--') {
+      specs.push(...rest.slice(i + 1));
+      break;
     }
-    if (!gitDir && env.GIT_DIR) gitDir = path.resolve(base, env.GIT_DIR);
-    if (!top && env.GIT_WORK_TREE) top = path.resolve(base, env.GIT_WORK_TREE);
-    if (!gitDir)
-      for (let d = base; ; d = path.dirname(d)) {
-        const dot = path.join(d, '.git');
-        const st = fs.statSync(dot, { throwIfNoEntry: false });
-        if (st?.isDirectory()) gitDir = dot;
-        else if (st?.isFile()) gitDir = path.resolve(d, /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dot, 'utf8'))?.[1] ?? '.git');
-        if (gitDir) {
-          top ??= d;
-          break;
-        }
-        if (path.dirname(d) === d) return undefined;
-      }
-    if (top && fs.existsSync(path.join(top, '.gitmodules'))) return '.gitmodules';
-    const common = path.join(gitDir, 'commondir');
-    const commonDir = fs.existsSync(common) ? path.resolve(gitDir, fs.readFileSync(common, 'utf8').trim()) : gitDir;
-    if (fs.statSync(path.join(commonDir, 'modules'), { throwIfNoEntry: false })?.isDirectory()) return 'a `modules` folder in its git folder';
-  } catch {
-    // An unreadable folder is no sign; the call fails or runs by itself.
+    if (a.startsWith('-')) {
+      const opt = a.split('=')[0]!;
+      if (opt.startsWith('--pa') && isOpt(opt, '--pathspec-from-file')) return whole;
+      if (opt === a && opt.startsWith('--ch') && isOpt(opt, '--chmod')) i++;
+      continue;
+    }
+    specs.push(a);
   }
+  if (!specs.length) return whole;
+  const flags = args.slice(0, sub).filter((a) => PATHSPEC_GLOBALS.has(a));
+  return [...location, ...flags, 'ls-files', '-s', '-z', '--', ...(literalPathspecs(args, env) ? specs.map((s) => `:(literal)${s}`) : specs)];
+}
+
+/** The gitlink listing's output limit: it lists every index entry the pathspec covers (a game checkout's whole index is MBs). */
+export const LIST_MAX_BUFFER = 256 * 1024 * 1024;
+
+/** The first submodule (an index entry of mode 160000) in `git ls-files -s -z` output, or undefined. */
+export function gitlinkIn(out: string): string | undefined {
+  for (const e of out.split('\0')) if (e.startsWith('160000 ')) return e.slice(e.indexOf('\t') + 1);
   return undefined;
 }
 
 /**
- * The w6630 warning for a call, or undefined: one that recurses by its own option or setting (the enforcing step refuses it),
- * `git add` or `git rm` in a repository with submodules (they check each submodule they cover with a child `git status`
- * whatever the config says, so the enforcing step refuses them there), or any other call in such a repository (the enforcing
- * step runs it with SUBMODULE_GIT_CONFIG, which stops the child git on the routes measured, not on every one). Running git
- * in the submodule itself needs none of it: the fence then scans that submodule's own config.
+ * The w6630 refusal of an add or rm call from its gitlink listing, or undefined. A listing that failed refuses, except exit
+ * 128 with nothing listed (not a repository, or a pathspec outside it: the call fails the same way by itself).
  */
-export function submoduleWarning(args: string[], rows: { scope: string; key: string; value?: string }[], cwd?: string, env: Env = process.env): string | undefined {
+export function gitlinkCovered(args: string[], exit: number | null, out: string): string | undefined {
   const name = args[splitGlobal(args).sub] ?? '';
-  const how = submoduleRecursion(args);
-  if (how)
-    return `FF Factory safeGit (w6630) warning: \`git ${name}\` recurses into submodules (${how}), where git reads each submodule's own config, which the fence does not scan; this call will be refused once the fence enforces w6630. Run git in the submodule itself instead (\`git -C <submodule> ...\`), where the fence scans its config`;
-  if (name === 'clone') return undefined;
-  const sign = submoduleSign(args, rows, cwd, env);
-  if (!sign) return undefined;
-  if (name === 'add' || name === 'rm')
-    return `FF Factory safeGit (w6630) warning: the repository looks like it has submodules (${sign}), and \`git ${name}\` starts a child git in each submodule its pathspec covers, whatever the config says, which reads that submodule's own config, unscanned; once the fence enforces w6630 this call is refused here. Leave the submodules out of the pathspec (\`':!<submodule>'\`) or run git in the submodule itself (\`git -C <submodule> ...\`)`;
-  return `FF Factory safeGit (w6630) warning: the repository looks like it has submodules (${sign}), and \`git ${name}\` may start a child git in them, which reads each submodule's own config, unscanned; once the fence enforces w6630 every call runs with ${SUBMODULE_GIT_CONFIG.map(([k, v]) => `${k}=${v}`).join(', ')}, which stops that on the routes measured, and the calls it cannot stop are refused`;
-}
-
-const warned = new Set<string>();
-/** Each warning once per process (the guard runs the fence on every shell command). */
-function warnOnce(msg: string | undefined): void {
-  if (!msg || warned.has(msg)) return;
-  warned.add(msg);
-  console.warn(msg);
+  if (exit === 128 && out === '') return undefined;
+  if (exit !== 0) return `refused by FF Factory (w6630): the fence could not list the submodules \`git ${name}\` covers (${exit === null ? 'no exit' : `exit ${exit}`}); \`git ${name}\` starts a child git in each one, which reads its own config, unscanned`;
+  const link = gitlinkIn(out);
+  if (!link) return undefined;
+  if (!PATHSPEC_CALLS.has(name))
+    return `refused by FF Factory (w6630): \`git ${name}\` runs in a repository with the submodule ${link} and looks into it whatever the config says (a submodule's own \`ignore\` setting beats the fence's), starting a child git there that reads that submodule's own config, unscanned; run it in the submodule itself (\`git -C ${link} ...\`) or in a clone with no submodules`;
+  return `refused by FF Factory (w6630): \`git ${name}\` covers the submodule ${link}, and starts a child git in it whatever the config says, which reads that submodule's own config, unscanned; leave the submodules out of the pathspec (\`':!${link}'\`) or run git in the submodule itself (\`git -C ${link} ...\`)`;
 }
 
 /** fetch and pull options that take their value as the next argument (so it is not read as the remote). */
@@ -453,6 +535,8 @@ export function refusal(args: string[], rows: { scope: string; key: string; valu
   // FF Factory caller passes it, and adding the remote, then fetching it, is the same work with each step scanned.
   if (args[sub] === 'remote' && remoteAddFetches(fromVerb(args.slice(sub + 1))))
     return "refused by FF Factory (w6650): `git remote add` with --fetch fetches the new remote after writing its URL, past the fence's scan of the config (an includeIf on that URL switches on only then); run `git remote add` without -f, then `git fetch <name>`";
+  const recursion = submoduleRefusal(args) ?? aliasRefusal(args, rows);
+  if (recursion) return recursion;
   const bad = rows.find((r) => !TRUSTED_SCOPES.has(r.scope) && isUrlRewrite(r.key));
   if (!bad || !NETWORK.has(args[splitGlobal(args).sub] ?? '')) return firstWinsRefusal(args, rows);
   return `refused by FF Factory (w5573): the repository's own config sets ${bad.key}, which could send this call to another remote; ${unsetHint(bad)}`;
@@ -481,7 +565,7 @@ export function scannedOverrides(rows: { scope: string; key: string; value: stri
   const out: [string, string][] = [];
   const seen = new Set<string>();
   for (const r of repo) {
-    if (isCredential(r.key) || isUrlRewrite(r.key) || isFirstWins(r.key) || isReadOnly(r.key) || FIXED_KEYS.has(r.key) || seen.has(r.key)) continue;
+    if (isAlias(r.key) || isCredential(r.key) || isUrlRewrite(r.key) || isFirstWins(r.key) || isReadOnly(r.key) || FIXED_KEYS.has(r.key) || seen.has(r.key)) continue;
     seen.add(r.key);
     const back = trusted.filter((t) => t.key === r.key).at(-1);
     out.push([r.key, back ? back.value : neutral(r.key)]);
@@ -543,11 +627,19 @@ export function splitGlobal(args: string[]): {
   return { location, sub: i };
 }
 
-/** `args` with `--no-ext-diff --no-textconv` after a diff-like subcommand. */
+/**
+ * `args` with `--no-ext-diff --no-textconv` after a diff-like subcommand, `--ignore-submodules=dirty` after one that takes it
+ * (IGNORE_SUBMODULES_OPT), and `--quiet` last before any `--` for one whose summary looks into submodules (QUIET_OPT).
+ */
 export function fenceArgs(args: string[]): string[] {
   const { sub } = splitGlobal(args);
-  if (!DIFF_LIKE.has(args[sub] ?? '')) return args;
-  return [...args.slice(0, sub + 1), '--no-ext-diff', '--no-textconv', ...args.slice(sub + 1)];
+  const name = args[sub] ?? '';
+  const after = [...(DIFF_LIKE.has(name) ? ['--no-ext-diff', '--no-textconv'] : []), ...(IGNORE_SUBMODULES_OPT.has(name) ? ['--ignore-submodules=dirty'] : [])];
+  const out = after.length ? [...args.slice(0, sub + 1), ...after, ...args.slice(sub + 1)] : args;
+  const verb = name === 'stash' ? `stash ${args[sub + 1] ?? ''}` : name;
+  if (!QUIET_OPT.has(verb)) return out;
+  const dash = out.indexOf('--', sub + 1);
+  return dash < 0 ? [...out, '--quiet'] : [...out.slice(0, dash), '--quiet', ...out.slice(dash)];
 }
 
 /**
@@ -583,11 +675,14 @@ export function needsScan(args: string[]): boolean {
 
 /** A call that skips the scan: fixed keys, and no lazy fetch of a missing object (git 2.45.1 on). */
 function unscanned(args: string[], env: Env): { args: string[]; env: Env } {
-  const f = fenced(args, env, '', null);
+  const f = fenced(args, env, '', false);
   return { args: f.args, env: { ...f.env, GIT_NO_LAZY_FETCH: '1' } };
 }
 
-const scanArgs = (location: string[]) => [...location, 'config', '--show-scope', '--includes', '-z', '--get-regexp', SCANNED_KEYS];
+/** What the fence's scan reads: SCANNED_KEYS, and every alias (aliasRefusal), which no override covers. */
+const SCAN_KEYS = `${SCANNED_KEYS.slice(0, -2)}|alias\\..+)$`;
+const isAlias = (key: string) => key.startsWith('alias.');
+const scanArgs = (location: string[]) => [...location, 'config', '--show-scope', '--includes', '-z', '--get-regexp', SCAN_KEYS];
 
 /**
  * Why a scan's rows cannot be trusted, or undefined (w6632): only a scan that ended by itself with exit 0, or with exit 1 (no
@@ -606,12 +701,15 @@ export function scanCut(exit: number | null, why: string, out: string): string |
 /** The scan's output limit: a scan that prints more is cut short and refused (w6632). */
 export const SCAN_MAX_BUFFER = 4 * 1024 * 1024;
 
-/** `cwd` is where the call runs; a call that skips the scan passes `null` and gets no w6630 warning. */
-function fenced(args: string[], env: Env, scanOut: string, cwd: string | undefined | null, cut?: string): { args: string[]; env: Env } {
+/**
+ * `scanned` is false for a call that skips the scan (it starts no program, so it gets no SUBMODULE_GIT_CONFIG: a `git config`
+ * read would see it); `cut` says why the scan was cut short, `linked` is the add or rm call's gitlink refusal (gitlinkCovered).
+ */
+function fenced(args: string[], env: Env, scanOut: string, scanned: boolean, cut?: string, linked?: string): { args: string[]; env: Env } {
   const rows = parseScan(scanOut);
   const no = cut
     ? `refused by FF Factory (w6632): the fence's scan of this repository's config was cut short (${cut}), so a key after the cut would run unchecked; look at \`git config --show-scope --includes --get-regexp .\` in that repository for an oversized or hanging entry and remove it`
-    : refusal(args, rows);
+    : (refusal(args, rows) ?? linked);
   // A refused call still runs git, with an option it rejects (exit 129, the reason in its stderr), so every caller fails the
   // way it already handles a failed git.
   if (no)
@@ -619,14 +717,7 @@ function fenced(args: string[], env: Env, scanOut: string, cwd: string | undefin
       args: [`--${no.replace(/\s+/g, '-')}`],
       env: withConfigFirst(env, FIXED_GIT_CONFIG),
     };
-  // Warn-only: nothing in the warning may fail the call.
-  if (cwd !== null)
-    try {
-      warnOnce(submoduleWarning(args, rows, cwd, env));
-    } catch {
-      // A warning that cannot be built is skipped.
-    }
-  const out = withConfigFirst(env, [...fixedFor(args), ...scannedOverrides(rows)]);
+  const out = withConfigFirst(env, [...fixedFor(args), ...(scanned ? SUBMODULE_GIT_CONFIG : []), ...scannedOverrides(rows)]);
   return {
     args: fenceArgs(firstWinsArgs(args, rows)),
     env: lazyFetchOff(rows) ? { ...out, GIT_NO_LAZY_FETCH: '1' } : out,
@@ -666,9 +757,21 @@ export function gitFenceSync(args: string[], opts: { cwd?: string; env?: Env } =
     const x = e as { stdout?: string; status?: number | null; signal?: string | null; code?: string };
     out = String(x.stdout ?? '');
     const exit = typeof x.status === 'number' && !x.signal && typeof x.code !== 'string' ? x.status : null;
-    return fenced(args, env, out, opts.cwd, scanCut(exit, x.code ?? x.signal ?? '', out));
+    const cut = scanCut(exit, x.code ?? x.signal ?? '', out);
+    if (cut) return fenced(args, env, out, true, cut);
   }
-  return fenced(args, env, out, opts.cwd);
+  const list = gitlinkListArgs(args, env);
+  if (!list) return fenced(args, env, out, true);
+  let exit: number | null = 0;
+  let links = '';
+  try {
+    links = execFileSync('git', list, { cwd: opts.cwd, env: gitlinkListEnv(env), encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, maxBuffer: LIST_MAX_BUFFER });
+  } catch (e) {
+    const x = e as { stdout?: string; status?: number | null; signal?: string | null; code?: string };
+    links = String(x.stdout ?? '');
+    exit = typeof x.status === 'number' && !x.signal && typeof x.code !== 'string' ? x.status : null;
+  }
+  return fenced(args, env, out, true, undefined, gitlinkCovered(args, exit, links));
 }
 
 /** The arguments and environment for a git call in a checkout a worker may have written. */
@@ -690,10 +793,13 @@ export function gitFence(args: string[], opts: { cwd?: string; env?: Env } = {})
       },
       (e, raw) => {
         const out = String(raw ?? '');
-        if (!e) return resolve(fenced(args, env, out, opts.cwd));
-        const exit = typeof e.code === 'number' && e.code >= 0 && !e.signal ? e.code : null;
-        const why = typeof e.code === 'string' ? e.code : e.signal || (e.killed ? 'timed out' : e.message);
-        resolve(fenced(args, env, out, opts.cwd, scanCut(exit, why, out)));
+        const cut = e ? scanCut(typeof e.code === 'number' && e.code >= 0 && !e.signal ? e.code : null, typeof e.code === 'string' ? e.code : e.signal || (e.killed ? 'timed out' : e.message), out) : undefined;
+        const list = gitlinkListArgs(args, env);
+        if (cut || !list) return resolve(fenced(args, env, out, true, cut));
+        execFileOffThread('git', list, { cwd: opts.cwd, env: gitlinkListEnv(env), encoding: 'utf8', timeout: 60_000, windowsHide: true, maxBuffer: LIST_MAX_BUFFER }, (le, links) => {
+          const exit = !le ? 0 : typeof le.code === 'number' && le.code >= 0 && !le.signal ? le.code : null;
+          resolve(fenced(args, env, out, true, undefined, gitlinkCovered(args, exit, String(links ?? ''))));
+        });
       },
     );
   });
@@ -712,7 +818,14 @@ export async function gitOffThread(args: string[], opts: { cwd?: string; env?: E
     const scan = await runOffThread('git', scanArgs(splitGlobal(args).location), 15_000, { cwd: opts.cwd, env: scanEnv(env), maxBuffer: SCAN_MAX_BUFFER });
     // The probe thread answers -1 for anything but an exit (its stderr then holds execFile's message: maxBuffer, ENOENT, ...).
     const why = scan.code >= 0 ? '' : scan.timedOut ? 'timed out' : /ENOENT/.test(scan.stderr) ? 'ENOENT' : scan.stderr.split('\n')[0] || 'no exit';
-    f = fenced(args, env, scan.stdout, opts.cwd, scanCut(scan.code >= 0 ? scan.code : null, why, scan.stdout));
+    const cut = scanCut(scan.code >= 0 ? scan.code : null, why, scan.stdout);
+    const list = cut ? undefined : gitlinkListArgs(args, env);
+    let linked: string | undefined;
+    if (list) {
+      const ls = await runOffThread('git', list, 60_000, { cwd: opts.cwd, env: gitlinkListEnv(env), maxBuffer: LIST_MAX_BUFFER });
+      linked = gitlinkCovered(args, ls.code >= 0 ? ls.code : null, ls.stdout);
+    }
+    f = fenced(args, env, scan.stdout, true, cut, linked);
   }
   return runOffThread(opts.bin ?? 'git', [...(opts.pre ?? []), ...f.args], opts.timeoutMs ?? 15_000, { cwd: opts.cwd, env: f.env });
 }

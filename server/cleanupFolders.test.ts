@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { freeableBytes, githubSlug, hasLocalWork, localRemotePath, localWorkWhy, norm, setGithubContains } from './cleanup.ts';
+import { freeableBytes, githubSlug, hasLocalWork, localRemotePath, localWorkWhy, norm, setGithubContains, unpushedWorkWhy } from './cleanup.ts';
 import { EMPTY_SLOT_WHY, FACTS_MAX_AGE_MS, factsProblem, gitKeeps, judgePath, judgeSession, judgeTiming, planFolders, renderFolders, type CleanupFacts } from './cleanupFolders.ts';
 import { ownersOf } from './resumable.ts';
 import { foldersMain, hostSessionsIn, installLeftoversShim, slotContext, slotPathOf } from '../machine/leftovers.ts';
@@ -242,6 +242,83 @@ test('w1387: localWorkWhy names uncommitted changes, commits on no remote and st
   assert.equal(await localWorkWhy(wt), undefined);
 
   assert.match((await localWorkWhy(path.join(base, 'no-such-repo')))!, /could not be read/, 'unknown counts as work');
+});
+
+/**
+ * w6630: the fence runs every scanned call with SUBMODULE_GIT_CONFIG, so the superproject's status no longer shows a
+ * submodule's edits, and its commit and stash counts never showed a submodule's. Each submodule is checked as its own
+ * repository: a populated one, a deinit'ed one's git folder, and (for unpushedWorkWhy) an untracked clone inside.
+ */
+test('w6630: localWorkWhy and unpushedWorkWhy name the work a submodule holds', async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-w6630-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 }));
+  const remotes = path.join(base, 'remotes');
+  fs.mkdirSync(remotes);
+  const g = (cwd: string, ...a: string[]) => git(cwd, '-c', 'protocol.file.allow=always', ...a);
+  const sub = pushedClone(remotes, path.join(base, 'subsrc', 'ff'));
+  const superWith = (name: string) => {
+    const dir = pushedClone(remotes, path.join(base, name, 'ff'));
+    g(dir, 'submodule', 'add', '-q', sub.replace(/\\/g, '/'), 'lib/sub');
+    g(dir, 'commit', '-q', '-m', 'sub');
+    g(dir, 'push', '-q', 'origin', 'HEAD');
+    return dir;
+  };
+  const clean = superWith('clean');
+  assert.equal(await localWorkWhy(clean), undefined);
+  assert.equal(await unpushedWorkWhy(clean), undefined);
+
+  // An edit in the submodule: the superproject's own status no longer shows it.
+  const dirty = superWith('dirty');
+  fs.writeFileSync(path.join(dirty, 'lib', 'sub', 'a.txt'), 'changed\n');
+  assert.equal(await localWorkWhy(dirty), 'submodule lib/sub: 1 uncommitted change');
+
+  const ahead = superWith('ahead');
+  const s = path.join(ahead, 'lib', 'sub');
+  fs.writeFileSync(path.join(s, 'b.txt'), 'b\n');
+  git(s, 'add', '.');
+  git(s, 'commit', '-q', '-m', 'b');
+  fs.writeFileSync(path.join(s, 'a.txt'), 'set aside\n');
+  git(s, 'stash', 'push', '-q');
+  assert.match((await localWorkWhy(ahead))!, /submodule lib\/sub: 1 commit on no remote, 1 stash$/);
+  assert.match((await unpushedWorkWhy(ahead))!, /^submodule lib\/sub: 1 commit on no remote, 1 stash$/);
+
+  // Deinit'ed: the working tree goes, the commit and the stash stay in .git/modules.
+  g(ahead, 'submodule', 'deinit', '-q', '-f', 'lib/sub');
+  assert.ok(!fs.existsSync(path.join(s, '.git')));
+  assert.equal(await unpushedWorkWhy(ahead), 'submodule git folder .git/modules/lib/sub: 1 commit on no remote, 1 stash');
+  assert.match((await localWorkWhy(ahead))!, /submodule git folder \.git\/modules\/lib\/sub: 1 commit on no remote, 1 stash$/);
+
+  // w6691: a linked worktree keeps the submodules it checked out in its own git folder, which goes with the main clone.
+  const wt = path.join(base, 'clean', 'wt');
+  git(clean, 'worktree', 'add', '-q', '-b', 'wt', wt);
+  g(wt, 'submodule', 'update', '-q', '--init');
+  const ws = path.join(wt, 'lib', 'sub');
+  fs.writeFileSync(path.join(ws, 'w.txt'), 'w\n');
+  git(ws, 'add', '.');
+  git(ws, 'commit', '-q', '-m', 'w');
+  g(wt, 'submodule', 'deinit', '-q', '-f', 'lib/sub');
+  assert.equal(await unpushedWorkWhy(clean), 'submodule git folder .git/worktrees/wt/modules/lib/sub: 1 commit on no remote');
+  assert.match((await localWorkWhy(wt))!, /submodule git folder \.\.\/ff\/\.git\/worktrees\/wt\/modules\/lib\/sub: 1 commit on no remote/);
+
+  // w6691: what could not be read counts as work for localWorkWhy, and as none for unpushedWorkWhy.
+  const deep = superWith('deep');
+  fs.mkdirSync(path.join(deep, '.git', 'modules', 'x', '1', '2', '3', '4', '5', '6', '7', '8', '9'), { recursive: true });
+  git(deep, 'init', '-q', '--bare', path.join(deep, '.git', 'modules', 'unborn'));
+  const deepWhy = (await localWorkWhy(deep))!;
+  assert.match(deepWhy, /submodule git folders could not be read: \.git\/modules\/x\/1\/2\/3\/4\/5\/6\/7\/8 \(more than 8 folders down\)/);
+  assert.match(deepWhy, /submodule git folder \.git\/modules\/unborn: its git state could not be read/);
+  assert.equal(await unpushedWorkWhy(deep), undefined);
+  assert.equal(await localWorkWhy(clean, 15_000, 4), 'its submodules more than 4 levels down were not checked');
+  assert.equal(await unpushedWorkWhy(clean, 15_000, 4), undefined);
+
+  // An untracked clone inside: unpushedWorkWhy counts no uncommitted change, so it reads that clone's own work.
+  const nested = pushedClone(remotes, path.join(base, 'nested', 'ff'));
+  const inner = path.join(nested, 'tools', 'inner');
+  git(nested, 'clone', '-q', sub, inner);
+  fs.writeFileSync(path.join(inner, 'c.txt'), 'c\n');
+  git(inner, 'add', '.');
+  git(inner, 'commit', '-q', '-m', 'c');
+  assert.equal(await unpushedWorkWhy(nested), 'clone tools/inner: 1 commit on no remote');
 });
 
 /**
