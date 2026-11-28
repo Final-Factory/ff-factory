@@ -265,6 +265,22 @@ A drop is a close `by ping-timeout` or `by network`, or an open with `why=stale`
 To explain a person's drops: `regex: "page socket .*<login>"` around the time, with `grep: "event loop: blocked"` for
 the same minutes.
 
+**Page socket timing (w6762).** After w6336 a reconnect's server build was 0.1-0.5 s, yet pages waited 3-9 s for the
+socket to open and 3-10 s more for the first state, with no event-loop block of a second. Each connect now says where
+those seconds went, measured, not guessed:
+- On the ready line, `; clocks: upgrade in <ms> after the page began, open seen <ms> after it, in+back <ms>, state sent
+  <ms> after it, at the page <ms> after that`. The page sends its clock (Date.now()) when its attempt begins (the URL's
+  `at`), when the socket opens and when the first state arrives (`openEpoch`, `stateEpoch` in its ready message); the
+  server sets its own beside them (the upgrade's arrival, the first state's hand-off to the kernel). Each step crosses the
+  two clocks and is off by their skew; `in+back` cancels it. A big `upgrade in` with a quick `open seen` is the way in
+  (Funnel or tailscaled, before the portal saw the request); a big `at the page` is the way out after the kernel.
+- In parentheses, on the slow sent line (1 s or more) or else on the ready line: `deflate queued <ms>, ran <ms> in <n>
+  chunks <in>KB to <out>KB` (ws's permessage-deflate of the first state: its zlib limiter, then zlib on libuv's thread
+  pool, one pool job and one loop turn per 16 KB of output; `not deflated` under the 16 KB threshold), `kernel <ms>` (from
+  the deflate's end to the write callback: a full socket buffer, tailscaled reading slowly), `pool lag <ms>, loop turn <ms>`
+  (a no-op fs.stat and a setImmediate at the open: the first minus the second is the wait for a free pool thread), and
+  `cpu{vm <n>% of <c> cores, steal <n>%, node <n>%, tailscaled <n>%}` over that connect's own seconds (/proc; a process's
+  % is of one core, so node at 100% is its one thread flat out).
 
 When every socket closes `by network` in the same second, alongside `machine <id> disconnected` for each machine and
 `provider ffbox: ... closed 1006`, the portal did not drop them: tailscaled restarted underneath. Read source `tailscaled`

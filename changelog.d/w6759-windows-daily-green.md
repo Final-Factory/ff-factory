@@ -1,0 +1,1 @@
+- Windows tests: the daily all-tests run is green again. The tests see their temp folder's long path, not the runner's 8.3 short name (`RUNNER~1`) that the fences rightly refuse, and w6486's offeredDir test no longer assumes its temp folder is off C: (w6759).

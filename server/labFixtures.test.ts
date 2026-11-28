@@ -297,7 +297,10 @@ test('w6486: offeredDir, now off the event loop, offers the same folder and fail
   fs.rmdirSync(path.join(dangling, 'gone'));
   assert.equal((await same(dangling, 'a link to nowhere')).dir, undefined);
   // An error other than a missing folder throws in both (a NUL in the path: an invalid argument).
-  assert.ok((await same(`${root}\0x`, 'a path stat refuses')).code, 'it fails, as the synchronous one threw');
+  // w6759: a root off C:, or both refuse the C: path before any stat and neither throws (a GitHub Windows runner's temp
+  // folder is on C:). The NUL makes stat refuse the path itself, so no drive Z: is ever touched.
+  const offC = onDriveC(root) ? 'Z:\\w6486-root' : root;
+  assert.ok((await same(`${offC}\0x`, 'a path stat refuses')).code, 'it fails, as the synchronous one threw');
 });
 
 test('fetch_lab_fixture: the worker tool takes a sha256 and a name, never a path', () => {

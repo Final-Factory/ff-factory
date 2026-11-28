@@ -241,6 +241,7 @@ test('w2041: w1976 as it happened: a retry of a spent pair run cancels it and fi
   assert.deepEqual(n.sessionIds, [], 'fresh legs: none of the old run carries over');
   assert.equal(n.pair!.retryOf, first);
   assert.deepEqual(n.pair!.avoid, ['lothlaptop'], 'the offline client computer; the host computer pc is fine');
+  assert.deepEqual(n.pair!.failedOn, ['lothlaptop'], 'w6758: the server records where the leg failed, the audit\'s reason to keep it off (w6754)');
   assert.match(n.constraints ?? '', /not on lothlaptop$/);
   assert.match(n.brief, new RegExp(`This is a retry of ${first}.*no leg goes on lothlaptop`));
   assert.match(unfitWhy(n, 'lothlaptop', undefined) ?? '', /^lothlaptop is where an earlier leg of this pair run failed/);

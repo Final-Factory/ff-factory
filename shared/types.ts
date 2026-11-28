@@ -2498,7 +2498,8 @@ export interface WorkPair {
   /**
    * w6754 (the w6697 review, 1): the computers where a leg of the run this one retries failed, as the server saw it
    * (pairFailedOn: offline, its worker errored, or no DONE while another leg said DONE). Set only by the server, so the audit
-   * counts it as a reason to keep them on `avoid`; an asker's avoid_why never does.
+   * counts it as a reason to keep them on `avoid`; an asker's avoid_why never does. Every retry filed since w6758 carries it
+   * (empty when no leg failed), so a retry without it was filed before (w6758, the w6756 review, 3).
    */
   failedOn?: string[];
   /**
@@ -2753,6 +2754,11 @@ export interface WorkItem {
   reports?: { id: string; title: string; kind: ReportKind; openQuestions?: string[] }[];
   /** What happened, oldest first: "10:02 filed by Lothsahn", "10:03 merged into w11: same fix". */
   log: string[];
+  /**
+   * w6758 (the w6756 review, 5): the machine exclusions the audit logged as citing no live reason ("source|machine"), so a
+   * restart does not log them again however long the log has grown since. Pruned of marks no longer carried.
+   */
+  exclusionsLogged?: string[];
   /**
    * Recorded, not filed: a worker that started outside the ledger (the dispatcher's direct start, the dashboard, /mcp,
    * a delegation) and is listed so the ledger shows all work. It does not count against its person's filing limits.

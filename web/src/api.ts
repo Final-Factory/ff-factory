@@ -381,6 +381,8 @@ export function connectSocket(h: SocketHandlers): () => void {
     if (lastCode !== undefined) q.set('code', String(lastCode));
     if (lostAt) q.set('gap', String(Date.now() - lostAt));
     if (tries) q.set('tries', String(tries));
+    // w6762: this page's clock as the attempt begins; the server sets its own beside it (when the upgrade arrived).
+    q.set('at', String(Date.now()));
     const boot = everOpened ? undefined : h.boot?.();
     const have = everOpened && lostAt ? h.have?.(Date.now() - lostAt) : boot?.have;
     if (have) q.set('have', have);
@@ -409,6 +411,7 @@ export function connectSocket(h: SocketHandlers): () => void {
     const began = performance.now();
     const firstConnect = !everOpened;
     let openAt = 0;
+    let openEpoch = 0;
     let told = false;
     // A hung attempt (w5318: a failing Funnel takes the connection and never answers) fires no close for minutes.
     const hung = setTimeout(() => {
@@ -419,6 +422,7 @@ export function connectSocket(h: SocketHandlers): () => void {
       if (ws !== sock) return;
       opened = true;
       openAt = performance.now();
+      openEpoch = Date.now();
       attempt = 0;
       tries = 0;
       heard = Date.now();
@@ -430,6 +434,7 @@ export function connectSocket(h: SocketHandlers): () => void {
       if (ws !== sock) return;
       heard = Date.now();
       const inAt = performance.now();
+      const stateEpoch = heard;
       let ev: ServerEvent;
       try {
         ev = JSON.parse(typeof m.data === 'string' ? m.data : '');
@@ -440,7 +445,7 @@ export function connectSocket(h: SocketHandlers): () => void {
       h.onEvent(ev);
       if (ev.type === 'state' && !told) {
         told = true;
-        tellReady(sock, { open: openAt - began, state: inAt - openAt, parse: performance.now() - inAt }, inAt, firstConnect);
+        tellReady(sock, { open: openAt - began, state: inAt - openAt, parse: performance.now() - inAt, openEpoch, stateEpoch }, inAt, firstConnect);
       }
     };
     sock.onclose = async (e) => {
@@ -465,7 +470,7 @@ export function connectSocket(h: SocketHandlers): () => void {
   // w6336: once the first state is applied and drawn (the event batch flushes on the next frame; a task after it runs
   // after that frame's paint), the server logs every phase of this connect (server/pageSockets.ts ready). A hidden tab
   // draws no frames: it says nothing rather than a render time that is only how long it stayed hidden.
-  const tellReady = (sock: WebSocket, t: { open: number; state: number; parse: number }, inAt: number, firstConnect: boolean) => {
+  const tellReady = (sock: WebSocket, t: { open: number; state: number; parse: number; openEpoch: number; stateEpoch: number }, inAt: number, firstConnect: boolean) => {
     if (document.visibilityState === 'hidden') return;
     requestAnimationFrame(() =>
       setTimeout(() => {

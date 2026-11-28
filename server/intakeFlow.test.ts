@@ -1751,17 +1751,23 @@ test('nightly run (w864): the night\'s key is minted at the fire and reaches onl
   // A later process of the same worker gets the same key: the lab's running night holds it.
   assert.equal(machines.hooks!.specFor(w.info, m).env?.FF_FACTORY_NIGHTLY_KEY, `ffsb_night1_${'x'.repeat(30)}`);
   assert.equal(minted, 1);
-  // A restarted portal has no key in memory: a worker already given one is not given another (that would revoke the
-  // running night's), and the next night's fire mints a fresh one, which replaces it.
+  // A restarted portal has no key in memory. w6761: a worker already given one gets an extra key beside it (on
+  // 2026-11-28 the worker FF Factory started after the 09:06 UTC restart had none, so the night was NOT DELIVERED), not
+  // the plain mint that would revoke the running night's; the next night's fire mints a plain one, which replaces both.
   intake.close();
-  const again = new IntakeManager({ cfg, store, identity: agents.identity, orchestrators: o, now: () => clock.now, mintNightlyKey: () => `ffsb_night${++minted}_${'y'.repeat(30)}` });
+  const kinds: string[] = [];
+  const again = new IntakeManager({ cfg, store, identity: agents.identity, orchestrators: o, now: () => clock.now, mintNightlyKey: (extra) => (kinds.push(extra ? 'extra' : 'plain'), `ffsb_night${++minted}_${'y'.repeat(30)}`) });
   t.after(() => again.close());
   agents.nightlyKeyFor = (ids, url) => again.nightlyRunEnv(ids, url);
-  assert.equal(machines.hooks!.specFor(w.info, m).env?.FF_FACTORY_NIGHTLY_KEY, undefined);
-  assert.equal(minted, 1);
+  assert.equal(machines.hooks!.specFor(w.info, m).env?.FF_FACTORY_NIGHTLY_KEY, `ffsb_night2_${'y'.repeat(30)}`);
+  assert.equal(machines.hooks!.specFor(w.info, m).env?.FF_FACTORY_URL, m.portalUrl.replace(/\/+$/, ''));
+  assert.equal(machines.hooks!.specFor(w.info, m).env?.FF_FACTORY_NIGHTLY_KEY, `ffsb_night2_${'y'.repeat(30)}`, 'one extra per restart, not per process');
+  assert.deepEqual(kinds, ['extra'], 'never a plain mint, which would revoke the key the running night holds');
+  assert.equal(machines.hooks!.specFor(other.info, m).env?.FF_FACTORY_NIGHTLY_KEY, undefined, 'still no other worker');
   clock.now = NY_0300_EDT + 86_400_000 + 60_000;
   again.checkNightlyRun();
-  assert.equal(minted, 2, 'the next night mints its own');
+  assert.equal(minted, 3, 'the next night mints its own');
+  assert.deepEqual(kinds, ['extra', 'plain']);
 });
 
 test('nightly run (w864): after a restart, a night whose worker never got its key gets a fresh one', (t) => {
