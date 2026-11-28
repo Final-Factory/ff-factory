@@ -672,6 +672,18 @@ export function agentNodePathDir(root: string | undefined, platform: NodeJS.Plat
   return exists(agentNodeExe(root)) ? agentNodeDir(root) : undefined;
 }
 
+/**
+ * The node the workers' shims start (ff-pr, ff-leftovers, ffu-slot, the Unity slot shims, the gh shim and its credential
+ * helper; w6672). On Windows: the root's agent node, the same pinned version, which Low workers already run. Not the
+ * daemon's own copy (`daemonNodeDir`, w6603): that sits in `<root>\daemon`, which the read fence closes to Low reads, and its
+ * read-back (FENCE_READ_ALLOW) is joined to the daemon's code folder, which on LothDesktop is `D:\workfw\daemon`, not
+ * `V:fw\daemon`; there Git Bash answered "node.exe: Is a directory" for every worker. Elsewhere, or before the agent node
+ * is in place: the daemon's own node, as before.
+ */
+export function shimNode(root: string | undefined, platform: NodeJS.Platform = process.platform, exists: (p: string) => boolean = fs.existsSync, execPath: string = process.execPath): string {
+  return root && platform === 'win32' && exists(agentNodeExe(root)) ? agentNodeExe(root) : execPath;
+}
+
 /** How Windows Firewall shows firewall.ps1's tailnet ($Tailnet: 100.64.0.0/10, fd7a:115c:a1e0::/48) in a rule's RemoteAddress. */
 export const TAILNET_FORMS = ['100.64.0.0/255.192.0.0', '100.64.0.0/10', 'fd7a:115c:a1e0::/48'];
 

@@ -113,7 +113,7 @@ import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBrok
 import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim, readFfuSlotsReport, runFfuSlotSweep } from './ffuSlots.ts';
 import { FfuSlotAutoSweep } from './ffuSlotAutoSweep.ts';
-import { agentNodePathDir } from '../server/agentNode.ts';
+import { agentNodePathDir, shimNode } from '../server/agentNode.ts';
 import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, sayOwnerLabels, ownerLabelTargets, ownerLabelMode, ghLoginStorage, machineGhStatusEnv, ghLoginToFile, ghLoginToKeyring, realGhRun, OWNER_GH_MOVED_NOTE, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { installPythonShim, trustedGh } from './evidenceGate.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
@@ -2203,13 +2203,15 @@ export class Daemon {
     const oldBin = path.join(this.slotMailbox, 'bin');
     const shims = (bin: string) => {
       // ff-leftovers (w1197): a worker lists and ends what it started before DONE or a stop.
-      installLeftoversShim(bin, undefined, undefined, undefined, cleanupFactsFile(appDirOfConfig(this.cfg)));
+      // w6672: each shim starts shimNode, a node Low workers can read, never the daemon's own copy in its closed folder.
+      const node = shimNode(this.cfg.root);
+      installLeftoversShim(bin, node, undefined, undefined, cleanupFactsFile(appDirOfConfig(this.cfg)));
       // ff-pr (w1478): a worker's push, PR, landed check and merge on green, one command each.
-      installPrShim(bin);
+      installPrShim(bin, node);
       // w5836: python where a macOS or Linux machine has only python3, for the documented `python "$FF_SKILLS/…"` commands.
       installPythonShim(bin);
       // ffu-slot (w3764): a worker's ffu checkout with a warm cargo target, leased from <install>/ffu-sandboxes.
-      installFfuSlotShim(bin, cleanupFactsFile(appDirOfConfig(this.cfg)), FFU_SLOTS_DEFAULT_MAX);
+      installFfuSlotShim(bin, cleanupFactsFile(appDirOfConfig(this.cfg)), FFU_SLOTS_DEFAULT_MAX, node);
       return bin;
     };
     let shimModes: ShimModeGuard | undefined;
@@ -2224,7 +2226,7 @@ export class Daemon {
       if (process.platform === 'win32' && this.cfg.root) {
         const root = this.cfg.root;
         const waits = () => (this.hosted ? hostsWithPathDir(this.hostsRoot, toolsShimsDir(root)) : []);
-        const w = windowsShims(root, { write: (d) => void shims(writeShims(d)), waits, log });
+        const w = windowsShims(root, { write: (d) => void shims(writeShims(d, shimNode(this.cfg.root))), waits, log });
         this.slotBin = w.bin;
         // w6101: once no agent started before the move runs it, <root>/tools/shims goes; files in the new folder the
         // daemon does not write are moved out, now and again once the fence has labelled tools-medium Medium.
@@ -2235,7 +2237,7 @@ export class Daemon {
           quarantineStrayShims(root, { log });
           void this.fenceReady?.then(() => quarantineStrayShims(root, { log })).catch(() => undefined);
         }
-      } else this.slotBin = shims(writeShims(shimDirFor(pf, this.slotMailbox, this.cfg.root)));
+      } else this.slotBin = shims(writeShims(shimDirFor(pf, this.slotMailbox, this.cfg.root), shimNode(this.cfg.root)));
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
       if (pf === 'on' && process.platform !== 'win32' && this.cfg.root) {
@@ -2246,7 +2248,7 @@ export class Daemon {
         this.slotBin = dir;
         log(`path fence: could not write the shims in ${dir} (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); agents run what is there until a write succeeds, tried again each minute. Not put in ${oldBin}, which fenced workers can write. Recovery: path_fence off`);
         // w6144 (w6103 note 1): once a retry writes them, the mode guard (started below with nothing to guard) learns them.
-        this.timers.push(retryShimWrite(dir, { write: (d) => void shims(writeShims(d)), wrote: () => shimModes?.learn(), log }));
+        this.timers.push(retryShimWrite(dir, { write: (d) => void shims(writeShims(d, shimNode(this.cfg.root))), wrote: () => shimModes?.learn(), log }));
       }
     }
     if (process.platform === 'win32') {
@@ -2270,7 +2272,7 @@ export class Daemon {
     // GitHub Apps (w1519): the gh shim and git helper a run the portal named apps for gets (machine/ghApp.ts).
     try {
       const p = ghAppPaths(appDirOfConfig(this.cfg));
-      this.ghApp = { bin: p.bin, file: p.file, helper: installGhAppShims(p.bin) };
+      this.ghApp = { bin: p.bin, file: p.file, helper: installGhAppShims(p.bin, shimNode(this.cfg.root)) };
     } catch (e) {
       log(`github apps: could not write the gh shim: ${(e as Error).message}`);
     }

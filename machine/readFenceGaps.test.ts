@@ -17,7 +17,7 @@ import { ensureReadBackDirs, readFenceProbeTargets } from './readFence.ts';
 import { NO_READ_UP, READ_BACK, noReadUpTargets, relabelInside, relabelScript, type LabelTarget } from './lowIntegrity.ts';
 import { buildMirror, mirrorPath, precheckPlan, probeReadFenceWin, realVerdict, windowsReadVerdict } from './readFenceWin.ts';
 import { personFile } from './personPlay.ts';
-import { DAEMON_NODE_FOLDER, daemonNodeExe } from '../server/agentNode.ts';
+import { DAEMON_NODE_FOLDER, daemonNodeExe, shimNode } from '../server/agentNode.ts';
 
 const tmp = (n: string) => fs.mkdtempSync(path.join(os.tmpdir(), `w5957-${n}-`));
 const ino = (p: string) => fs.statSync(p, { bigint: true }).ino;
@@ -383,4 +383,29 @@ test("w6603 (w6655's review): every node the workers' shims start stays readable
   }
   assert.equal(labelOf(daemonNode), READ_BACK.dir);
   assert.equal(DAEMON_NODE_FOLDER, path.basename(path.dirname(daemonNodeExe('/r'))), "the folder given back is the one ensureDaemonNode fills");
+});
+
+test("w6672: the shims' node stays readable when the daemon's code folder is not the root's daemon folder (LothDesktop's layout)", () => {
+  // LothDesktop: root V:\ffw, the daemon's code in D:\work\ffw\daemon. FENCE_READ_ALLOW is joined to the code folder, so
+  // V:\ffw\daemon\node-v<version> stays closed, and Git Bash answered "node.exe: Is a directory" for every gh and ff-leftovers.
+  for (const [R, app] of [['V:\\ffw', 'D:\\work\\ffw\\daemon'], ['F:\\ffw', 'F:\\ffw\\daemon']]) {
+    const daemonNode = path.win32.join(R, 'daemon', DAEMON_NODE_FOLDER, 'node.exe');
+    const agentNode = path.win32.join(R, 'tools', 'node', 'node.exe');
+    const there = new Set([app, path.win32.join(R, 'daemon'), path.win32.join(R, 'secrets'), path.win32.join(R, 'daemon', DAEMON_NODE_FOLDER), path.win32.join(app, DAEMON_NODE_FOLDER), path.win32.join(app, 'gh-app', 'bin')]);
+    const t = noReadUpTargets({ root: R, appDir: app, allowBack: FENCE_READ_ALLOW, extraBack: fenceRootReadBack(R, path.win32.join), stat: (x) => (there.has(x) ? 'dir' : undefined), path: path.win32 });
+    const labelOf = (p: string) =>
+      t.filter((x) => p.toLowerCase() === x.path.toLowerCase() || p.toLowerCase().startsWith(`${x.path.toLowerCase()}\\`)).sort((a, b) => b.path.length - a.path.length)[0]?.sddl;
+    const node = shimNode(R, 'win32', (p) => p.toLowerCase() === agentNode.toLowerCase(), daemonNode);
+    assert.equal(node, agentNode, `${R}: the shims start the root's agent node`);
+    const l = labelOf(node);
+    assert.ok(l === undefined || l === READ_BACK.dir || l === READ_BACK.file, `${R} with code in ${app}: ${node} is readable to Low workers (got ${l})`);
+    if (app !== path.win32.join(R, 'daemon')) assert.equal(labelOf(daemonNode), NO_READ_UP.dir, "the daemon's own copy is closed there, which is why the shims must not start it");
+  }
+});
+
+test('w6672: every shim the daemon writes is given shimNode, never the default process.execPath', () => {
+  const d = src('machine/daemon.ts');
+  const calls = d.split('\n').filter((l) => /\b(installLeftoversShim|installPrShim|installFfuSlotShim|installGhAppShims|writeShims|installShims)\(/.test(l));
+  assert.ok(calls.length >= 6, `found ${calls.length} shim writes`);
+  for (const l of calls) assert.ok(/[(,] ?node\)|, node,|shimNode\(this\.cfg\.root\)/.test(l), `${l.trim()} passes the shims' node`);
 });

@@ -1,0 +1,1 @@
+- Windows: the workers' shims (gh, ff-pr, ff-leftovers, ffu-slot, the Unity slot shims) start the root's agent node again, not the daemon's own pinned copy, which the read fence keeps closed where the daemon's code folder is not the root's daemon folder. On LothDesktop every gh and ff-leftovers call failed with "node.exe: Is a directory" (w6672).
