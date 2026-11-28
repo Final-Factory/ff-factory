@@ -146,9 +146,14 @@ export async function syncStatusDirAsync(
   editor: { since?: number; strict?: boolean } | undefined,
   files: StatusFile[],
   clones: { project: string; since: number }[] = [],
+  wanted: () => boolean = () => true,
 ): Promise<void> {
   const plan = statusDirPlan(dir, project, editor, files, clones);
+  // w6675: `wanted` is asked again before each step: a sandbox deleted (or a newer pass begun) while this one waited on the
+  // disk must not have its folder made again by this pass.
+  if (!wanted()) return;
   await fs.promises.mkdir(dir, { recursive: true });
+  if (!wanted()) return;
   await Promise.all(strays(await fs.promises.readdir(dir), plan.keep).map((n) => fs.promises.rm(path.join(dir, n), { force: true })));
   for (const w of plan.writes) {
     try {
@@ -156,8 +161,15 @@ export async function syncStatusDirAsync(
     } catch {
       // not there yet
     }
+    if (!wanted()) return;
     const tmp = `${w.file}.${process.pid}.${++asyncTmp}.tmp`;
-    await fs.promises.writeFile(tmp, w.text);
-    await fs.promises.rename(tmp, w.file);
+    try {
+      await fs.promises.writeFile(tmp, w.text);
+      await fs.promises.rename(tmp, w.file);
+    } catch (e) {
+      // w6675: its name is its own, so nothing else would ever remove it (a rename Windows refused while a reader held the file).
+      await fs.promises.rm(tmp, { force: true }).catch(() => undefined);
+      throw e;
+    }
   }
 }

@@ -640,6 +640,8 @@ const LIVE_LINE_MERGE_MS = 5000;
 const STATS_MS = 15_000;
 /** w6595: how old a session's cached host start (hostSinceCached) may be before it is read again, off the loop. */
 const HOST_SINCE_MS = 20_000;
+/** w6675: a Unity MCP status refresh still running after this is left behind (logged), and a new one starts. */
+export const MCP_REFRESH_HUNG_MS = 60_000;
 /** w5615: how often the clone keeper looks for a sandbox whose caches to make, merge back or refresh. */
 const SLOT_CACHES_EVERY_MS = 10 * 60_000;
 /** w6393: how long a light folder's create waits for its cache clones before it answers: below the portal's 60 s for the create (server/machines.ts createLightFolder). */
@@ -1989,8 +1991,8 @@ export class Daemon {
 
   /** Bring every place's Unity MCP status folder up to date, from the editor pids the watches know. */
   syncMcpScopes(files?: StatusFile[]): void;
-  syncMcpScopes(files: StatusFile[], offLoop: true): Promise<void>;
-  syncMcpScopes(files?: StatusFile[], offLoop?: true): void | Promise<void> {
+  syncMcpScopes(files: StatusFile[], offLoop: true, current?: () => boolean): Promise<void>;
+  syncMcpScopes(files?: StatusFile[], offLoop?: true, current?: () => boolean): void | Promise<void> {
     const alive = (pid?: number) => {
       if (!pid) return undefined;
       try {
@@ -2003,7 +2005,7 @@ export class Daemon {
     // w6595: the pids refreshMcpScopes read off the loop (at most 5 s old); a sandbox not read yet is read here once.
     const instancePid = (project: string) => (this.mcpInstancePids.has(project) ? this.mcpInstancePids.get(project) : editorInstancePid(project));
     const places = mcpPlaces(this.pool.list(), alive, instancePid, this.mcpEditors);
-    if (offLoop && files) return this.mcpScopes.syncAsync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line), files);
+    if (offLoop && files) return this.mcpScopes.syncAsync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line), files, current);
     this.mcpScopes.sync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line), files);
   }
 
@@ -2011,34 +2013,47 @@ export class Daemon {
    * w5746: read the machine's Unity processes, so an EditorInstance.json pid counts only while it is a Unity editor of its
    * sandbox's project (mcpPlaces), then sync. A failed read forgets the list: no such pid counts until the next one.
    */
-  async refreshMcpScopes() {
+  async refreshMcpScopes(now = Date.now()) {
     // w6639: one at a time: its reads and writes are async now, and a look on a slow disk may outlast the 5 s timer.
-    if (this.mcpRefreshing) return;
-    this.mcpRefreshing = true;
+    // w6675: but not forever: a pass still running after MCP_REFRESH_HUNG_MS (a read or write that never answers) is logged
+    // and left behind, and a new one starts; the old one changes nothing more once it is not the current pass.
+    const old = this.mcpPass;
+    if (old) {
+      if (now - old.at < MCP_REFRESH_HUNG_MS) return;
+      log(`unity mcp: the status refresh started ${new Date(old.at).toISOString()} has run ${Math.round((now - old.at) / 1000)} s without finishing; a new one starts, and the old one writes nothing more`);
+    }
+    const pass = { at: now };
+    this.mcpPass = pass;
     try {
-      await this.refreshMcpScopesOnce();
+      await this.refreshMcpScopesOnce(() => this.mcpPass === pass);
     } finally {
-      this.mcpRefreshing = false;
+      if (this.mcpPass === pass) this.mcpPass = undefined;
     }
   }
 
-  private mcpRefreshing = false;
+  /** The status refresh under way (w6675: its start, to leave a hung one behind after MCP_REFRESH_HUNG_MS). */
+  private mcpPass: { at: number } | undefined;
 
-  private async refreshMcpScopesOnce() {
+  private async refreshMcpScopesOnce(current: () => boolean) {
+    let editors: ReturnType<typeof unityProcesses> | undefined;
     try {
-      this.mcpEditors = unityProcesses(await this.procs(), machinePlatformOf(process.platform));
+      editors = unityProcesses(await this.procs(), machinePlatformOf(process.platform));
     } catch (e) {
-      this.mcpEditors = undefined;
-      log(`unity mcp: reading the processes: ${(e as Error).message}`);
+      if (current()) log(`unity mcp: reading the processes: ${(e as Error).message}`);
     }
+    if (!current()) return;
+    this.mcpEditors = editors;
     // w6595: each sandbox's Library/EditorInstance.json, read off the loop (read in syncMcpScopes, these held it 6.6 s on
     // LothDesktop's busy disk, 2026-11-27 23:00Z).
     const projects = this.pool.list().map((sb) => sb.path);
     const pids = await Promise.all(projects.map((p) => editorInstancePidAsync(p)));
+    if (!current()) return;
     this.mcpInstancePids = new Map(projects.map((p, i) => [p, pids[i]]));
     // w6639: the editors' status files are read and the status folders written off the loop too (in sync, the read held
     // BEAST's loop 10.8 s on 2026-11-28 00:49Z, and syncStatusDir's writes up to 10.8 s).
-    await this.syncMcpScopes(await readStatusFilesAsync(this.mcpScopes.statusDirs()), true);
+    const files = await readStatusFilesAsync(this.mcpScopes.statusDirs());
+    if (!current()) return;
+    await this.syncMcpScopes(files, true, current);
   }
 
   get connected() {
