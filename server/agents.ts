@@ -4601,7 +4601,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       });
       const how = { fresh: 'start a worker for it with start_agent (an agent slot is enough unless its brief needs more)', move: `stop_agent its worker ${sessionId} with move_to a computer with room`, again: `message_agent its worker ${sessionId}` }[route];
       const act = on
-        ? `FF Factory ${{ fresh: 'starts a fresh worker for it', move: 'moves it off that computer', again: `wakes its worker ${sessionId} again where it is` }[route]} by itself, with the check-in's note, as soon as a computer has room (lostCheckIns "on"). Only if it still reads Stalled for this in 15 min, ${how}, passing its note: "${l.note.slice(0, 600) || '(none)'}".`
+        ? `FF Factory ${{ fresh: 'starts a fresh worker for it', move: 'moves it off that computer', again: `wakes its worker ${sessionId} again where it is` }[route]} by itself, with the check-in's note, ${route === 'again' ? 'as soon as it can be woken' : 'as soon as a computer has room'} (lostCheckIns "on"). Only if it still reads Stalled for this in 15 min, ${how}, passing its note: "${l.note.slice(0, 600) || '(none)'}".`
         : `${how[0].toUpperCase()}${how.slice(1)}, passing its note: "${l.note.slice(0, 600) || '(none)'}".`;
       this.orchestrators.toDispatcher(
         `[ledger] LOST CHECK-IN (w6768): ${w.id} "${w.title.slice(0, 80)}" (${names(w.requesters)}, ${w.priority}): ${lostLine(l)}. ${act} Said once.`,
@@ -4821,9 +4821,12 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    */
   private wakeLost(w: WorkItem, l: LostCheckIn, info: SessionInfo, now: number): { did: string } | undefined {
     if (info.machineId && !this.machines.isOnline(info.machineId)) return undefined;
-    const key = `${w.id}@${l.due}`;
-    if (this.lostWoken.has(key) || now - (this.lostFailed.get(w.id) ?? -Infinity) < 10 * 60_000) return undefined;
-    this.lostFailed.set(w.id, now);
+    // Keyed by the worker, not the request (review w6775, B1): a worker on two open requests holds the same lost check-in on
+    // each, and is woken once for both. In memory only: a portal restart while a send is held could send it once more.
+    const key = `${info.id}@${l.due}`;
+    const tried = `wake:${info.id}`;
+    if (this.lostWoken.has(key) || now - (this.lostFailed.get(tried) ?? -Infinity) < 10 * 60_000) return undefined;
+    this.lostFailed.set(tried, now);
     const text = `[wake_me, w6768] Your check-in at ${l.due.slice(11, 16)}Z could not be delivered then (${l.why.replace(/^is /, '')}); FF Factory wakes you with it now. Your note: ${l.note || '(none)'}`;
     try {
       this.sessions.send(info.id, text, 'system', undefined, { ops: 'wake', resumeOf: { work: w.id, note: l.note } });

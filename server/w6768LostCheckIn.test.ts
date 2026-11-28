@@ -554,3 +554,23 @@ test('w6774 (nit 5): the real startMoved with the ghost worker starts the fresh 
   agents.moveAwayWork(Date.now());
   assert.equal(store.work.get('w6370')!.lostCheckIn, undefined);
 });
+
+test('w6774 (review w6775, B1): a worker on two open requests is woken once for its lost check-in, not once per request', async (t) => {
+  const { store, agents, request, starts } = await moveSetup(t);
+  const sent: string[] = [];
+  (agents as unknown as Sender).sessions.send = (id, text) => {
+    sent.push(`${id}: ${text}`);
+    return 'u1';
+  };
+  store.putSession(worker('dddd4444', { machineId: 'lothdesktop', machineSandbox: 'slot1' }));
+  request({ id: 'w6500', sessionIds: ['dddd4444'] });
+  request({ id: 'w6501', sessionIds: ['dddd4444'] });
+  assert.deepEqual(agents.lostCheckIn('dddd4444', { at: Date.now() - MIN, note: 'check CI' }, 'could not be woken (at the agent limit)').sort(), ['w6500', 'w6501']);
+  const now = Date.now();
+  assert.equal(agents.moveAwayWork(now).length, 1, 'one wake, for the first request');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(agents.moveAwayWork(now + 11 * MIN), []);
+  assert.deepEqual(agents.moveAwayWork(now + 30 * MIN), []);
+  assert.equal(sent.length, 1, 'never a second wake through the other request');
+  assert.equal(starts.length, 0);
+});
