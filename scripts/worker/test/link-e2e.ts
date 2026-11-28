@@ -195,6 +195,14 @@ try {
   if (isLinux) check(/started as the transient systemd unit/.test(daemonLog()), 'the job ran as a transient systemd user unit', (daemonLog().match(/job \S+ started as [^\n]*/g) ?? []).pop() ?? '(no "started as" line)');
   check(!jobLog().includes(credential) && !/ffm_wlink_[A-Za-z0-9_-]{20,}/.test(jobLog() + JSON.stringify(up)), "no credential in the job's log or report");
   check(/The portal sees wlink online running/.test(up.report?.log ?? ''), "the report carries the installer's own lines");
+  // w6662: the job runs on the daemon's Medium-labelled node, under a supervisor this UAC-off runner runs High, so the
+  // supervisor check cannot read its command line and counts it from the task's own instance, saying so. An older daemon
+  // (FROM) runs the job on the runner's node, at High, where the command line reads and no such line is printed.
+  if (isWin) {
+    const saw = /The supervisor check saw \(w6662\): [^\n]*/.exec(up.report?.log ?? '')?.[0];
+    console.log(saw ?? 'the update printed no "supervisor check saw (w6662)" line');
+    if (!FROM && process.env.GITHUB_ACTIONS) check(!!saw && /runs at Medium/.test(saw) && /with [1-9]\d* powershell\.exe under it/.test(saw), "the job's supervisor check ran at Medium and counted the supervisor from its task (w6662)", saw ?? '(no line)');
+  }
   check(await waitFor("the job's registration to go", async () => !jobRegistered(), 60_000), `the job's ${registration} is removed once reported`);
 
   // 3. An update to a commit whose daemon exits at start (C): the job puts B back by itself.

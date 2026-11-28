@@ -112,7 +112,14 @@ crash loop), and Task Scheduler restarts that script if it fails. On a Mac launc
 `KeepAlive`. The installer checks it after starting the daemon (`requireSupervisor`): the task or plist runs this root,
 restarts on failure, and, when someone is logged on, is running. It fails until all of that holds. A task registered for
 another folder that a non-administrator run could not replace counts as missing. Re-running the installer repairs it,
-the uninstall removes it, and `check` lists it.
+the uninstall removes it, and `check` lists it. On Windows "running" is a `powershell.exe` whose command line names this
+root's `run-daemon.ps1`, or one the task's own running instance started (Task Scheduler's EnginePID, w6662): a session
+below the supervisor's integrity level reads its command line as empty. That is every update job on a machine with UAC
+off, where the task runs High and the daemon's node (`daemon
+ode-<version>`, explicitly labelled Medium for the read
+fence) starts the daemon and its jobs at Medium; on such a machine the check counted 0 and rolled every update back. When
+it counts none by command line it says what it saw: this session's level, how many command lines it could not read, a
+failed query's error, the task's instance and the command lines it did see.
 
 **The short way for a new machine: a join code** (w1592): an owner asks for one, and one line at the PC does the rest,
 record and credential included ([Adding a machine with a join code](#adding-a-machine-with-a-join-code-w1592)).

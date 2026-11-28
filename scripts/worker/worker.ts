@@ -919,6 +919,55 @@ export interface SupervisorFacts {
   script: boolean;
   /** Supervisors running from this root (Windows), or launchd running the daemon (a Mac). */
   running: number;
+  /**
+   * Windows (w6662): what the count rests on, so "none running" reads apart from "could not read". `unreadable` counts the
+   * other powershell.exe processes whose command line came back empty (one at a higher integrity level than this session);
+   * `taskProcs` the powershell.exe processes the task's running instance started (`enginePids`, Task Scheduler's own
+   * answer, no command line needed); `level` is this session's integrity RID (8192 Medium, 12288 High); `seen` the
+   * powershell.exe the query saw when none matched (a command line only in a supervisor's own form); `cimError` and `taskError` what a failed query said.
+   */
+  unreadable?: number;
+  taskState?: string;
+  enginePids?: number[];
+  taskProcs?: number;
+  level?: string;
+  seen?: string[];
+  cimError?: string;
+  taskError?: string;
+}
+
+/** The lines supervisorFacts' Windows script prints, read into facts. Exported for tests. */
+export function parseWinSupervisorFacts(out: string): SupervisorFacts {
+  const get = (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(out)?.[1]?.trim() ?? '';
+  const num = (k: string) => (get(k) === '' ? undefined : Number(get(k)) || 0);
+  return {
+    installed: get('installed') === 'True',
+    here: get('here') === 'True',
+    restarts: get('restarts') === 'True',
+    script: get('script') === 'True',
+    running: Number(get('running')) || 0,
+    unreadable: num('unreadable'),
+    taskState: get('taskState') || undefined,
+    enginePids: get('enginePids') ? get('enginePids').split(',').map(Number).filter((n) => n > 0) : [],
+    taskProcs: num('taskProcs'),
+    level: get('level') || undefined,
+    seen: [...out.matchAll(/^seen=(.*)$/gm)].map((m) => m[1].trim()),
+    cimError: get('cimError') || undefined,
+    taskError: get('taskError') || undefined,
+  };
+}
+
+const LEVELS: Record<string, string> = { '4096': 'Low', '8192': 'Medium', '8448': 'Medium Plus', '12288': 'High', '16384': 'System' };
+
+/** What a Windows supervisor count saw, for a refusal (w6662). Exported for tests. */
+export function supervisorSeen(f: SupervisorFacts): string {
+  const parts = [
+    `this session runs at ${f.level ? (LEVELS[f.level] ?? `integrity ${f.level}`) : 'an unknown integrity level'}`,
+    f.cimError ? `the process query failed: ${f.cimError}` : `${f.running} powershell.exe ran it by command line, ${f.unreadable ?? '?'} other powershell.exe had a command line this session could not read`,
+    `the task is ${f.taskState || 'in an unknown state'}${f.enginePids?.length ? `, its running instance is pid ${f.enginePids.join(', ')} with ${f.taskProcs ?? 0} powershell.exe under it` : ', with no running instance'}${f.taskError ? ` (${f.taskError})` : ''}`,
+  ];
+  if (f.seen?.length) parts.push(`the powershell.exe it saw: ${f.seen.slice(0, 20).join(' | ')}${f.seen.length > 20 ? ` | and ${f.seen.length - 20} more` : ''}`);
+  return parts.join('; ');
 }
 
 /** What is wrong with the supervisor; `started` is whether it should run now (someone is logged on). Exported for tests. */
@@ -930,7 +979,10 @@ export function supervisorProblems(f: SupervisorFacts, l: Pick<Layout, 'daemon'>
     if (!f.here) out.push(`the ${service} task does not run ${script} (a task registered for another folder was kept: registering it needs an administrator)`);
     if (!f.restarts) out.push(`the ${service} task is not restarted on failure`);
     if (!f.script) out.push(`${script} is missing`);
-    if (started && f.here && f.script && !f.running) out.push(`no supervisor runs from ${script}`);
+    // w6662: the task's own running instance counts too. A session below the supervisor's integrity level reads its
+    // command line as empty (an update job on the daemon's Medium-labelled node, under a supervisor a UAC-off machine runs
+    // High), and Task Scheduler names the instance's process with no command line needed.
+    if (started && f.here && f.script && !f.running && !f.taskProcs) out.push(`no supervisor runs from ${script}`);
   } else if (platform === 'linux') {
     if (!f.installed) return [`no ${unitName(service)} systemd user unit`];
     if (!f.here) out.push(`the ${service} systemd user service does not run the daemon in ${l.daemon}`);
@@ -945,23 +997,44 @@ export function supervisorProblems(f: SupervisorFacts, l: Pick<Layout, 'daemon'>
   return out;
 }
 
-async function supervisorFacts(l: Layout, service: string): Promise<SupervisorFacts> {
-  if (isWin) {
-    const out = await ps(
-      'checking the supervisor',
-      `$ErrorActionPreference = 'Continue'
-$s = Join-Path ${win.psq(win.winDir(l.daemon))} 'run-daemon.ps1'
+/** The Windows supervisor check's script (supervisorFacts), read-only. Exported for tests. */
+export function winSupervisorScript(daemonDir: string, service: string): string {
+  return `$ErrorActionPreference = 'Continue'
+$s = Join-Path ${win.psq(win.winDir(daemonDir))} 'run-daemon.ps1'
 $t = Get-ScheduledTask -TaskName ${win.psq(service)} -ErrorAction SilentlyContinue
 "installed=$([bool]$t)"
 "here=$([bool]($t -and ([string]$t.Actions[0].Arguments).IndexOf($s, [StringComparison]::OrdinalIgnoreCase) -ge 0))"
 "restarts=$([bool]($t -and $t.Settings.RestartCount -gt 0))"
 "script=$(Test-Path -LiteralPath $s)"
-"running=$(@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -Property CommandLine | Where-Object { ([string]$_.CommandLine).IndexOf($s, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count)"
-`,
-    );
-    const get = (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(out)?.[1]?.trim() ?? '';
-    return { installed: get('installed') === 'True', here: get('here') === 'True', restarts: get('restarts') === 'True', script: get('script') === 'True', running: Number(get('running')) || 0 };
+"taskState=$(if ($t) { [string]$t.State })"
+$engine = @()
+try {
+  $svc = New-Object -ComObject Schedule.Service
+  $svc.Connect()
+  $engine = @($svc.GetRunningTasks(1) | Where-Object { $_.Name -eq ${win.psq(service)} } | ForEach-Object { [int]$_.EnginePID })
+} catch { "taskError=$($_.Exception.Message -replace '\\s+', ' ')" }
+"enginePids=$($engine -join ',')"
+"level=$([regex]::Match(((& (Join-Path $env:SystemRoot 'System32\\whoami.exe') /groups) -join ' '), 'S-1-16-(\\d+)').Groups[1].Value)"
+try {
+  $all = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -Property ProcessId, ParentProcessId, CommandLine -ErrorAction Stop | Where-Object { $_.ProcessId -ne $PID })
+  $mine = @($all | Where-Object { ([string]$_.CommandLine).IndexOf($s, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+  "running=$($mine.Count)"
+  "unreadable=$(@($all | Where-Object { -not $_.CommandLine }).Count)"
+  "taskProcs=$(@($all | Where-Object { $engine -contains [int]$_.ParentProcessId }).Count)"
+  if (-not $mine.Count) {
+    foreach ($p in $all) {
+      # Only a supervisor's own form is shown (w6669's review): any other command line may carry a person's secret.
+      $c = ([string]$p.CommandLine) -replace '\\s+', ' '
+      $shown = if (-not $c) { '(command line not readable)' } elseif ($c -match '(?i)-File "([A-Za-z]:\\\\[^"]*\\\\run-daemon\\.ps1)"\\s*$') { "a supervisor running $($Matches[1])" } else { '(another command line, not shown)' }
+      "seen=pid $($p.ProcessId) (parent $($p.ParentProcessId)): $shown"
+    }
   }
+} catch { "running=0"; "cimError=$($_.Exception.Message -replace '\\s+', ' ')" }
+`;
+}
+
+async function supervisorFacts(l: Layout, service: string): Promise<SupervisorFacts> {
+  if (isWin) return parseWinSupervisorFacts(await ps('checking the supervisor', winSupervisorScript(l.daemon, service)));
   if (isLinux) {
     const file = unitFile(os.homedir(), service);
     const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
@@ -989,12 +1062,15 @@ $t = Get-ScheduledTask -TaskName ${win.psq(service)} -ErrorAction SilentlyContin
 /** The supervisor is not optional: the install fails until it is in place, and re-running the installer repairs it. */
 async function requireSupervisor(l: Layout, service: string, started: boolean): Promise<void> {
   let problems: string[] = [];
+  let facts: SupervisorFacts | undefined;
   // Start-ScheduledTask and launchctl bootstrap return before the supervisor runs.
   for (let i = 0; i < 30; i++) {
-    problems = supervisorProblems(await supervisorFacts(l, service), l, service, started);
+    facts = await supervisorFacts(l, service);
+    problems = supervisorProblems(facts, l, service, started);
     if (!problems.length) break;
     await new Promise((r) => setTimeout(r, 1000));
   }
+  if (isWin && facts && (problems.length || (started && !facts.running))) say(`The supervisor check saw (w6662): ${supervisorSeen(facts)}.`);
   if (problems.length) throw new Error(`the daemon's supervisor is not in place: ${problems.join('; ')}. Re-run the installer${isWin ? ' from an administrator PowerShell' : ''} to repair it`);
   say(`Supervisor: ${isWin ? `the ${service} task runs ${path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1')}, which starts the daemon again whenever it exits` : isLinux ? 'systemd starts the daemon again whenever it exits (Restart=always)' : `launchd starts the daemon again whenever it exits (KeepAlive)`}${started ? ', running' : ''}.`);
 }
@@ -2937,7 +3013,7 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
     const sup = await supervisorFacts(l, service);
     items.push(
       { what: `scheduled task ${service}`, present: get('task') === 'True' },
-      { what: `the supervisor ${path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1')}`, present: sup.script || sup.running > 0, detail: `${sup.running} running` },
+      { what: `the supervisor ${path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1')}`, present: sup.script || sup.running > 0 || (sup.taskProcs ?? 0) > 0, detail: `${sup.running} running${sup.unreadable ? `; ${sup.unreadable} powershell.exe whose command line this session cannot read` : ''}${sup.cimError ? `; the process query failed: ${sup.cimError}` : ''}` },
       group(SLOT_GROUP, get('slotRules')),
       group(UNITY_GROUP, get('unityRules')),
       { what: `firewall rules naming a path in the root`, present: Number(get('rootRules')) > 0, detail: `${get('rootRules')} rule(s)` },
