@@ -84,6 +84,19 @@ Two more rules from flakes (w858, corrected by w906):
   node too when it cuts the output short: PowerShell's `& node ... | Select-Object -First 1` ends node mid-exit; take
   `(& node ...) | Select-Object -First 1` (w906: the probe's `node -p` was every empty file).
 
+Three from the Windows supervisor (w6784):
+
+- **On Windows a child left behind holds its parent's pipes open**: a test that waits on `'close'` for a script whose
+  child outlives it waits until that child ends. Wait on `'exit'`, and end the children (the test's own pids) before
+  removing the folder they run in (`server/supervisorWin.test.ts`).
+- **Node's strip-only TypeScript refuses parameter properties** (`constructor(private n = 3)` is
+  `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` at import, not a type error `tsc` reports): declare the fields and assign them in
+  the constructor (`machine/startStreak.ts`).
+- **A back-off variable is not a "start now" flag.** The supervisor script run-daemon.ps1
+  (`server/machineDeployWin.ts`) set `$delay = 0` to restart at once and so zeroed the back-off for every later exit
+  (the Worker update end-to-end check caught it); keep what this exit waits (`$wait`) apart from the back-off it grows
+  (`$delay`).
+
 Two from a script a person runs (w1592):
 
 - **A script run as `irm <url> | iex` never calls `exit`**: under `iex` it runs in the person's own PowerShell, and `exit`
