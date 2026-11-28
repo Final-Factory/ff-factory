@@ -372,13 +372,15 @@ export async function fencedRegisterEnv(d: Pick<PublishDeps, 'exec' | 'say'>, cl
   // A URL rewrite cannot be overridden by value (safeGit refuses the call, w5573): it could point the refresh at another
   // repository, whose plugins every agent would then load. So it is taken out of that config, said, and the refresh goes on
   // (w5946 F6: a worker who plants one must not be able to stop every refresh); only a rewrite that stays stops this folder's.
-  for (const key of new Set(planted.filter((r) => /^url\..+\.(insteadof|pushinsteadof)$/.test(r.key)).map((r) => r.key))) {
+  // The same for the keys git keeps the first value of (w6570): an upload or receive program, or a git:// proxy, runs ahead
+  // of the override on registerAgents.sh's own fetch.
+  for (const key of new Set(planted.filter((r) => /^(url\..+\.(insteadof|pushinsteadof)|remote\..+\.(uploadpack|receivepack)|core\.gitproxy)$/.test(r.key)).map((r) => r.key))) {
     const u = await d.exec('git', [...fence, '-C', mp, 'config', '--local', '--unset-all', key], { env, timeoutMs: 60_000 });
     if (u.code !== 0 && u.code !== 5) {
-      d.say(`FAILED: the marketplace checkout ${mp}${label} rewrites remote URLs (${key}), so its refresh could fetch another repository, and the rewrite could not be removed (${tail(u)}); this folder's plugins stay as they were. Remove it (\`git -C ${mp} config --local --unset-all ${key}\`) or run registerAgents.sh --reinstall.`);
+      d.say(`FAILED: the marketplace checkout ${mp}${label} sets ${key} in its own config, so its refresh could fetch another repository or run a program it names, and the key could not be removed (${tail(u)}); this folder's plugins stay as they were. Remove it (\`git -C ${mp} config --local --unset-all ${key}\`) or run registerAgents.sh --reinstall.`);
       return undefined;
     }
-    d.say(`WARNING: the marketplace checkout ${mp}${label} rewrote remote URLs (${key}), so its refresh could have fetched another repository; it is removed from that checkout's config (w5870). Look at who wrote it.`);
+    d.say(`WARNING: the marketplace checkout ${mp}${label} set ${key} in its own config (a URL rewrite, or a program git runs ahead of the fence), so its refresh could have fetched another repository or run it; it is removed from that checkout's config (w5870). Look at who wrote it.`);
   }
   return withConfigFirst(env, [...FIXED_GIT_CONFIG, ...scannedOverrides(rows)]);
 }
