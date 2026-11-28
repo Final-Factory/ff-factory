@@ -23,6 +23,15 @@ const until = async (what: string, cond: () => boolean, ms = 30_000) => {
   }
 };
 
+/** The time in a host's daemon.progress, 0 while it is missing or mid-write (an async writeFile truncates first: w6606). */
+const savedProgress = (dir: string) => {
+  try {
+    return Number(fs.readFileSync(hostFiles(dir).progress, 'utf8')) || 0;
+  } catch {
+    return 0;
+  }
+};
+
 const info = (id: string): SessionInfo => ({ id, kind: 'worker', title: `w799 ${id}`, status: 'running', permissionMode: 'default', createdAt: new Date().toISOString(), lastActivityAt: new Date().toISOString(), turns: 1, costUsd: 0, pendingPermissions: [] });
 
 /**
@@ -315,7 +324,8 @@ test('w3673: busy tools keep a silent agent (a long build), flagged; progress cl
   fs.appendFileSync(hostFiles(dir).out, JSON.stringify({ op: 'delta', text: 'back' }) + '\n');
   await until('the flag cleared', () => lastSession(h)?.info.statusDetail === undefined);
   assert.ok(h.logs.some((l) => /made progress again/.test(l)), h.logs.join('\n'));
-  assert.ok(Number(fs.readFileSync(hostFiles(dir).progress, 'utf8')) > Date.now() - 60_000, 'its progress time kept for the next daemon');
+  // w6606: daemon.progress is written off the loop (w6554), so the flag can clear before the write lands: wait for it
+  await until('its progress time kept for the next daemon', () => savedProgress(dir) > Date.now() - 60_000);
 });
 
 test('w6110: idle tools that run lowered below a CI job keep a silent agent, flagged, rather than end it', { timeout: 60_000 }, async (t) => {
@@ -609,5 +619,5 @@ test('w6554: daemon.progress is written off the event loop, and a failed write l
   await until('r3 answered, the loop free while the write is held', () => answered.includes('r3'));
   assert.equal(tries, 2, 'no second write races the held one, and the minute between saves holds');
   release();
-  await until('the progress saved', () => fs.existsSync(f.progress) && Number(fs.readFileSync(f.progress, 'utf8')) > 0);
+  await until('the progress saved', () => savedProgress(dir) > 0);
 });
