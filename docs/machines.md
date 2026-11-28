@@ -3045,6 +3045,23 @@ LothDesktop and Beast, not just when BEAST is full").
     computers sized by RAM and by their editor limit (biscuit's is 1). Should "frees no sandbox" lines show urgent work
     waiting with nothing reclaimable, that is the measurement to decide it on.
   - Tests: `server/w3507PriorityReclaim.test.ts`.
+- **A machine exclusion cites a live reason** (w6687, lothsahn: "machine exclusions must cite a live hold and expire with
+  it"). For over a day every built-player job was kept off BEAST by "No game player on BEAST (crash hold)", copied from
+  brief to brief and into request_pair (`avoid: ["beast"]`), after the one real crash hold (2026-11-26 18:39Z) had cleared
+  16 minutes after it was set (w6685). Each minute the blocker watch (`Orchestrators.auditExclusions`,
+  `server/exclusionAudit.ts`) judges a pair run's `avoid` before its legs start, a machine pin, and a Queued request's
+  `needs` (every online computer it leaves out). A machine stays out only for: a live crash hold (any open request's,
+  not cleared), a hold, pause, drain or offline state, a config `placement.avoid` or `placement.hold` key, a capability
+  (a Mac for a run with a client, w3697; no players; no timed runs for a timed run; Medium integrity for a pre-w5297
+  player), or a person's words (a `pin_words` pin, the request's or its parent's constraints, a person's note).
+  - **Stage 1, warn-only** (lothsahn's lockout rule): an exclusion with none of these gets one line on its request,
+    `w6687 warn-only, nothing dropped: enforcing would drop <machine> from <its pair avoid | its pin | its queue needs>:
+    ...`, once per change (a cleared crash hold it was kept for says so), and the same line in the portal journal as
+    `[w6687 exclusions]`. Nothing is dropped or re-queued; the enforce stage is a separate change.
+  - request_pair's `avoid_why` is kept beside each avoided machine (`WorkPair.avoidWhy`) and shown in the line; it is
+    never itself a reason. The capacity block carries `Crash holds now (w3740, the live list ...)`, so the dispatcher
+    reads holds from the live list and nowhere else.
+  - Tests: `server/w6687ExclusionAudit.test.ts`.
 - **The numbers are judgments**: 85% RAM (BEAST at 86% was overloaded, LothDesktop at 47% had room; one more editor
   takes 8-12 GB, about 15% of 64 GB) and the 10-point margin (one agent of ten slots, or about 6 GB of 64). Live agents
   count, not only mid-turn ones, because an idle agent's process holds its memory too (docs/orchestrators.md, "Agent
