@@ -128,9 +128,13 @@ test('wake_me: pending wakes survive a restart; one that came due while the serv
   now += 20 * 60_000;
   const after = new Waker(sessions, store, file);
   after.now = () => now;
-  assert.equal(after.restore(), 3);
+  const lost: string[] = [];
+  after.onLost = (id, _w, why) => lost.push(`${id} ${why}`);
+  // w6768: the deleted session's wake is armed too, and said lost when it fires (it was dropped unsaid before).
+  assert.equal(after.restore(), 4);
   t.mock.timers.tick(0);
   assert.deepEqual(sent, [{ id: 'w1', text: '[wake_me] Time is up (10 min late: FF Factory was restarting). Your note: check the build' }]);
+  assert.deepEqual(lost, ['gone is gone']);
   assert.equal(after.pending('w2')?.note, 'check CI');
   t.mock.timers.tick(10 * 60_000);
   assert.equal(sent.at(-1)?.id, 'orch');

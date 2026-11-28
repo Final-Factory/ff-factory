@@ -9,6 +9,7 @@ import type { DesktopSession } from './desktop.ts';
 import type { MachineBaseline } from './machineBaseline.ts';
 import type { Answered } from './replies.ts';
 import type { Ask } from './ask.ts';
+import type { LostCheckIn } from './lostCheckIn.ts';
 
 /** 'blocked': the editor is alive but stuck on a modal dialog, or silent for too long while starting (see unity.blocked). */
 /** A working tree's real state, read from git (docs: server/gitStatus.ts). */
@@ -2897,6 +2898,11 @@ export interface WorkItem {
   awayMove?: { at: string; line: string };
   /** w2544: it names `machine` (its pin), so it waited for that computer instead of moving: its orchestrator was told once. */
   awayKept?: { machine: string; at: string };
+  /**
+   * w6768: a worker's own check-in came due and nothing could deliver it (its worker gone, or its computer away past the
+   * grace): Stalled with that reason until a worker on it takes a turn again (shared/lostCheckIn.ts).
+   */
+  lostCheckIn?: LostCheckIn;
   /**
    * w2358: the dispatcher's brief (start_agent's prompt) that made this timed work, or named its OS, when start_agent refused
    * it for that: needsTimed reads it as a note of that time, so decide_work queue and the room shares read the request as

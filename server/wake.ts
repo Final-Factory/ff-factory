@@ -38,6 +38,15 @@ export class Waker {
   now: () => number = Date.now;
   /** Called after the pending wakes change (armed, cancelled, fired): the server copies them onto the sessions (w475). */
   onChange?: () => void;
+  /**
+   * w6768: a due wake nothing can deliver: its session is gone ("is gone"), its computer is away past the grace (awayOf's
+   * words), or its retries ran out. Said once per wake; the server records it on the worker's open requests.
+   */
+  onLost?: (sessionId: string, wake: { at: number; note: string }, why: string) => void;
+  /** w6768: "is on beast (offline 2 h 27 min)" while `sessionId`'s computer is away past the grace, else undefined. */
+  awayOf?: (sessionId: string) => string | undefined;
+  /** w6768: the wakes onLost was told of, `${sessionId}@${at}`, so each is said once. */
+  private readonly lost = new Set<string>();
 
   constructor(sessions: SessionManager, store: Store, file?: string) {
     this.sessions = sessions;
@@ -98,7 +107,7 @@ export class Waker {
 
   /**
    * After a restart: arm the wakes the last server left in the file. One whose time passed while the server
-   * was down fires at once, saying how late it is; one for a session that no longer exists is dropped.
+   * was down fires at once, saying how late it is; one for a session that no longer exists fires as lost (w6768).
    * Returns how many were re-armed.
    */
   restore(): number {
@@ -112,7 +121,8 @@ export class Waker {
     }
     let n = 0;
     for (const [id, w] of Object.entries(saved)) {
-      if (!this.sessions.sessions.has(id) || !Number.isFinite(w?.at) || this.timers.has(id)) continue;
+      if (!Number.isFinite(w?.at) || this.timers.has(id)) continue;
+      // w6768: a wake whose session is gone is no longer dropped here unsaid: it is armed, and fire() says it lost when due.
       this.arm(id, { at: w.at, note: String(w.note ?? ''), ...(typeof w.resumeOf === 'string' ? { resumeOf: w.resumeOf } : {}) });
       n++;
     }
@@ -146,7 +156,11 @@ export class Waker {
     // fired early (a test, a wake folded in): its own timeout must not fire again later and save into a folder maybe gone (w3746)
     if (t) clearTimeout(t.timer);
     this.timers.delete(sessionId);
-    if (!t || !this.sessions.sessions.has(sessionId)) return void this.save();
+    if (!t) return void this.save();
+    if (!this.sessions.sessions.has(sessionId)) {
+      this.tellLost(sessionId, t, 'is gone');
+      return void this.save();
+    }
     const late = Math.round((this.now() - t.at) / 60_000);
     const when = late >= 2 ? ` (${late} min late: FF Factory was restarting)` : '';
     const head = t.early ? `Woken early: ${t.early} (it was due at ${new Date(t.at).toISOString().slice(11, 16)}Z)` : `Time is up${when}`;
@@ -156,8 +170,23 @@ export class Waker {
       // At the agent limit, the host guard says wait, or its machine is offline: try again in a minute, a few times.
       if (tries < RETRIES) return this.arm(sessionId, { at: t.at, note: t.note, ...(t.early ? { early: t.early } : {}), ...(t.resumeOf ? { resumeOf: t.resumeOf } : {}) }, tries + 1, 60_000);
       this.store.append(sessionId, { kind: 'system', text: `wake_me could not wake this session: ${(e as Error).message}` });
+      // w6768: said after the last retry, never while one may still deliver it (review w6771, S2): its computer away past the
+      // grace named as the reason when it is.
+      this.tellLost(sessionId, t, this.awayOf?.(sessionId) ?? `could not be woken (${(e as Error).message.slice(0, 160)})`);
     }
     this.save();
+  }
+
+  /** w6768: tell onLost once per wake. */
+  private tellLost(sessionId: string, t: WakeRecord, why: string) {
+    const key = `${sessionId}@${t.at}`;
+    if (this.lost.has(key)) return;
+    this.lost.add(key);
+    try {
+      this.onLost?.(sessionId, { at: t.at, note: t.note }, why);
+    } catch (e) {
+      console.warn(`wake_me: recording the lost check-in of ${sessionId}: ${(e as Error).message}`);
+    }
   }
 
   // ---------------------------------------------------------------- the heartbeat
