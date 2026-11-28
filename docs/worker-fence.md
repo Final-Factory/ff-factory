@@ -489,20 +489,26 @@ folder and flags it, refusing nothing. It logs paths and the reading program onl
     `machine/hostWatch.ts` checks a host). Else it says `root-refused`, logged as `read log: agent host <pid> not followed`.
     A host that exits is dropped at its stop event and is never taken back under a reused pid. A read names its host by both
     numbers, so a reused host pid never names another session;
+  - an event (an open, or a followed process's start of a child) counts only if it is the process's own: stamped by the
+    session's clock within the process's span, from its start event (or the moment it was found running) to its own stop
+    event. Before that stop, a running process with the entry's creation time on the pid makes it so. A pid with no running
+    process, or another one, is never trusted on its own (w6734's review: ETW may lose a stop event, count a loss late, or
+    deliver its per-CPU buffers out of order): the event waits for the process's own stop, matched by the creation time the
+    stop event carries, and counts only if stamped before it. A stop of another process on the pid (the followed one's stop
+    lost, the pid given out again) drops the entry and what waited. The session delivers about a second late, so a short tool
+    has always exited by the time its opens are handled; that wait is what lets them through (w6599's CI);
   - a child (at its start event, and in the walk when a root is named): followed only when its creation time is at or after
-    its parent's, and only after the parent's pid is checked to still be the process followed. At a start event the time
-    comes from the event alone: one without it is not followed, since the process on the pid now may be a later holder's;
-  - an open: before it is reported, the pid's process must be running and have the entry's creation time. A pid with no
-    running process is never trusted (w6734's review): ETW may lose a stop event, count a loss late, or deliver its per-CPU
-    buffers out of order, so the stream cannot say the pid has no later holder. An exited tool's last few opens, still on
-    their way, go unlogged; this log only warns;
+    its parent's, and the start is its parent's own as above. At a start event the time comes from the event alone: one
+    without it is not followed, since the process on the pid now may be a later holder's;
   - an insert after the walk's checks: each process is checked again under the lock it is inserted under, so one whose stop
     was handled between its check and its insert is not inserted (no stop event would ever remove it);
   - a Low orphan: its creation time is read before and after its checks and must be the same, and a person's process is
     remembered as not a worker's by pid and creation time, so a worker's process given the pid later is looked at afresh;
-  - every minute, each followed pid whose process is gone or has another creation time is dropped.
+  - every minute, each followed pid whose process is gone or has another creation time is dropped, with what waited, at the
+    second check that finds it so (its stop may still be on its way at the first).
 
-  `ffreadlog --selftest` runs these rules against a made-up process table (a lost stop then a reused pid, a loss counted late, a
+  `ffreadlog --selftest` runs these rules against a made-up process table (a lost stop then a reused pid, a short tool whose
+  opens are handled after it exited, a stop handled before a late open, a later holder's stop in place of the tool's, a
   process exiting between its check and its insert, a start event without its creation time); the
   Windows CI job runs it. A host that dies leaves its descendants followed (its orphaned tools are a worker's still, each
   checked by its own creation time) until they exit; the daemon keeps the host's name a day for their reads.
