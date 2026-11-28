@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FIXED_GIT_CONFIG, HOOKS, fenceArgs, firstWinsArgs, firstWinsRefusal, gitExecFileSync, gitFenceSync, gitSpawnSync, isGit, lazyFetchOff, needsScan, parseScan, refusal, scannedOverrides, splitGlobal, withConfigFirst } from './safeGit.ts';
+import { FIXED_GIT_CONFIG, HOOKS, SUBMODULE_GIT_CONFIG, submoduleRecursion, submoduleWarning, fenceArgs, firstWinsArgs, firstWinsRefusal, gitExecFileSync, gitFenceSync, gitSpawnSync, isGit, lazyFetchOff, needsScan, parseScan, refusal, scannedOverrides, splitGlobal, withConfigFirst } from './safeGit.ts';
 import { readGitStatus } from './gitStatus.ts';
 import { run } from './proc.ts';
 
@@ -646,6 +646,102 @@ test('w6082: a planted core.alternateRefsCommand runs on a plain fetch through a
     for (const args of [['rev-parse', '--verify', '--quiet', 'refs/heads/a'], ['symbolic-ref', '--short', 'HEAD'], ['config', '--get', 'core.alternateRefsCommand'], ['worktree', 'list', '--porcelain']])
       await run('git', ['-C', me, ...args]);
     assert.equal(f.ran(), '', 'no planted program ran');
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('w6630: a call that recurses into submodules by its own option is named; a repository with submodules warns on any call', () => {
+  for (const a of [['submodule', 'update', '--init'], ['-C', 'x', 'submodule', 'status'], ['fetch', '--recurse-submodules'], ['pull', '--recurse-submodules=on-demand'], ['checkout', '--recurse-sub', 'main'], ['status', '--ignore-submodules=none'], ['diff', '--ignore-submodules=untracked']])
+    assert.ok(submoduleRecursion(a), a.join(' '));
+  for (const a of [['fetch', 'origin'], ['fetch', '--no-recurse-submodules'], ['pull', '--recurse-submodules=no'], ['fetch', '--recurse-submodules-default=yes'], ['clone', '--recurse-submodules', 'u', 'd'], ['status', '--ignore-submodules=dirty'], ['log', '--', '--recurse-submodules']])
+    assert.equal(submoduleRecursion(a), undefined, a.join(' '));
+  const subs = parseScan('local\0submodule.sub.url\n/up/sub\0local\0submodule.sub.active\ntrue\0');
+  assert.match(submoduleWarning(['status'], subs) ?? '', /w6630.*submodule\.sub\.url.*submodule\.recurse=false, fetch\.recurseSubmodules=false, diff\.ignoreSubmodules=dirty/);
+  assert.match(submoduleWarning(['fetch', '--recurse-submodules'], []) ?? '', /w6630.*will be refused.*git -C <submodule>/);
+  assert.equal(submoduleWarning(['status'], parseScan('global\0submodule.active\ntrue\0')), undefined, 'the user’s own config is not the repository’s');
+  assert.equal(submoduleWarning(['status'], []), undefined);
+  // Scanned only to read: overriding a submodule's url or active would break the user's own submodule commands.
+  assert.deepEqual(scannedOverrides(subs), []);
+});
+
+test('w6630: a submodule’s planted uploadpack and filter run through the warn-only fence; SUBMODULE_GIT_CONFIG stops them', { skip }, async () => {
+  const f = fixture();
+  const sg = (cwd: string, ...a: string[]) => git(cwd, '-c', 'protocol.file.allow=always', ...a);
+  try {
+    const subsrc = path.join(f.root, 'subsrc');
+    fs.mkdirSync(subsrc);
+    sg(subsrc, 'init', '-q', '-b', 'master');
+    fs.writeFileSync(path.join(subsrc, 'a.txt'), 'one\n');
+    sg(subsrc, 'add', '.');
+    sg(subsrc, 'commit', '-qm', 's1');
+    const seed = path.join(f.root, 'seed');
+    fs.mkdirSync(seed);
+    sg(seed, 'init', '-q', '-b', 'master');
+    sg(seed, 'submodule', 'add', '-q', slash(subsrc), 'sub');
+    sg(seed, 'commit', '-qm', 'super1');
+    const up = path.join(f.root, 'up.git');
+    sg(f.root, 'clone', '-q', '--bare', slash(seed), up);
+    const victim = path.join(f.root, 'victim');
+    sg(f.root, 'clone', '-q', '--recurse-submodules', slash(up), victim);
+    // Moves the gitlink upstream, so a default (on-demand) fetch of the superproject fetches the submodule too.
+    let n = 0;
+    const advance = () => {
+      n++;
+      fs.writeFileSync(path.join(subsrc, 'a.txt'), `s${n}\n`);
+      sg(subsrc, 'commit', '-qam', `s${n}`);
+      const w = path.join(f.root, `w${n}`);
+      sg(f.root, 'clone', '-q', '--recurse-submodules', slash(up), w);
+      sg(path.join(w, 'sub'), 'pull', '-q', 'origin', 'master');
+      sg(w, 'commit', '-qam', `super${n}`);
+      sg(w, 'push', '-q', 'origin', 'master');
+    };
+    const pack = slash(path.join(f.root, 'pack.sh'));
+    fs.writeFileSync(pack, `#!/bin/sh\necho "pack $*" >> '${f.marker}'\nexit 1\n`, { mode: 0o755 });
+    const mod = path.join(victim, '.git', 'modules', 'sub');
+    const cfg = path.join(mod, 'config');
+    git(f.root, 'config', '--file', cfg, 'remote.origin.uploadpack', pack);
+    git(f.root, 'config', '--file', cfg, 'filter.w.clean', `${f.evil} clean`);
+    fs.mkdirSync(path.join(mod, 'info'), { recursive: true });
+    fs.writeFileSync(path.join(mod, 'info', 'attributes'), '*.txt filter=w\n');
+    const dirty = () => fs.writeFileSync(path.join(victim, 'sub', 'a.txt'), `changed ${Date.now()}\n`);
+
+    const warns: string[] = [];
+    const warn = console.warn;
+    console.warn = (m: string) => void warns.push(String(m));
+    try {
+      // The gap (warn step): a plain fenced fetch runs the submodule's uploadpack, a diff its filter.
+      advance();
+      gitSpawnSync(['fetch', 'origin'], { cwd: victim, encoding: 'utf8', timeout: 60_000 });
+      assert.match(f.ran(), /pack /, 'the submodule’s uploadpack ran through the fence on a plain fetch');
+      fs.rmSync(f.marker, { force: true });
+      dirty();
+      gitSpawnSync(['diff', '--submodule=diff'], { cwd: victim, encoding: 'utf8', timeout: 60_000 });
+      assert.match(f.ran(), /clean/, 'the submodule’s filter ran through the fence on a diff');
+      fs.rmSync(f.marker, { force: true });
+      gitSpawnSync(['fetch', '--recurse-submodules', 'origin'], { cwd: victim, encoding: 'utf8', timeout: 60_000 });
+      fs.rmSync(f.marker, { force: true });
+    } finally {
+      console.warn = warn;
+    }
+    assert.match(warns.join('\n'), /w6630.*has submodules \(submodule\.(sub\.)?(url|active)\).*`git fetch`/);
+    assert.match(warns.join('\n'), /w6630.*`git fetch` recurses into submodules \(`--recurse-submodules`\).*will be refused/);
+
+    // What the enforcing step forces: no program of the submodule's runs on a fetch, a pull, a status or a diff.
+    const forced = SUBMODULE_GIT_CONFIG.flatMap(([k, v]) => ['-c', `${k}=${v}`]);
+    advance();
+    const fetch = gitSpawnSync([...forced, 'fetch', 'origin'], { cwd: victim, encoding: 'utf8', timeout: 60_000 });
+    assert.equal(fetch.status, 0, fetch.stderr);
+    advance();
+    const pull = gitSpawnSync([...forced, '-c', 'user.name=t', '-c', 'user.email=t@users.noreply.github.com', 'pull', '-q', '--no-rebase', 'origin', 'master'], { cwd: victim, encoding: 'utf8', timeout: 60_000 });
+    assert.equal(pull.status, 0, pull.stderr);
+    dirty();
+    gitSpawnSync([...forced, 'status', '--porcelain'], { cwd: victim, encoding: 'utf8', timeout: 60_000 });
+    gitSpawnSync([...forced, 'diff', '--submodule=diff'], { cwd: victim, encoding: 'utf8', timeout: 60_000 });
+    assert.equal(f.ran(), '', 'no program of the submodule’s ran with SUBMODULE_GIT_CONFIG forced');
+    // Running git in the submodule itself scans its own config: the filter is overridden there.
+    gitSpawnSync(['status', '--porcelain'], { cwd: path.join(victim, 'sub'), encoding: 'utf8', timeout: 60_000 });
+    assert.equal(f.ran(), '', 'git in the submodule itself runs none of its programs');
   } finally {
     fs.rmSync(f.root, { recursive: true, force: true });
   }
