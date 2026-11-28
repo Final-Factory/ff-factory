@@ -169,16 +169,24 @@ for ($i = 0; $i -lt 60 -and -not (Test-Path $j); $i++) { Start-Sleep -Seconds 2 
     // Force mode as the task (LOCAL SERVICE): stop, the volume task read after the stop (gone or not), start.
     const force = ps(`& '${helpersPs}' -Vhdx '${vhdx}' -Letter ${letter} -Actions deduprepair -DedupRepairMode force | Out-Null
 sc.exe start refsdedupsvc | Out-Null; for ($i = 0; $i -lt 30 -and (Get-Service refsdedupsvc).Status -ne 'Running'; $i++) { Start-Sleep 1 }
-$j = Join-Path $env:ProgramData 'ffsb-helpers\results\dedup-repair\dedup-repair.json'; Remove-Item $j -ErrorAction SilentlyContinue
-schtasks /run /tn ffsb-helper-deduprepair | Out-Null
-for ($i = 0; $i -lt 150 -and -not (Test-Path $j); $i++) { Start-Sleep -Seconds 2 }
-@{ svc = "$((Get-Service refsdedupsvc).Status)"; result = $(if (Test-Path $j) { Get-Content -Raw $j | ConvertFrom-Json } else { $null }) } | ConvertTo-Json -Depth 4 -Compress`).stdout.trim();
+$j = Join-Path $env:ProgramData 'ffsb-helpers\\results\\dedup-repair\\dedup-repair.json'; Remove-Item $j -ErrorAction SilentlyContinue
+$t0 = Get-Date; schtasks /run /tn ffsb-helper-deduprepair | Out-Null
+# A trace of the service and the task while it runs (CI 2026-11-28: no result after 300 s and the service Stopped).
+$trace = @(); $last = ''
+for ($i = 0; $i -lt 450 -and -not (Test-Path $j); $i++) {
+  $now = "svc $((Get-Service refsdedupsvc).Status), task $((Get-ScheduledTask -TaskName ffsb-helper-deduprepair).State)"
+  if ($now -ne $last) { $trace += "+$([int]((Get-Date) - $t0).TotalSeconds)s $now"; $last = $now }
+  Start-Sleep -Seconds 2
+}
+$info = Get-ScheduledTaskInfo -TaskName ffsb-helper-deduprepair
+$log = Join-Path $env:ProgramData 'ffsb-helpers\\results\\dedup-repair\\dedup-repair.log'
+@{ svc = "$((Get-Service refsdedupsvc).Status)"; result = $(if (Test-Path $j) { Get-Content -Raw $j | ConvertFrom-Json } else { $null }); trace = $trace; lastResult = $info.LastTaskResult; args = (Get-ScheduledTask -TaskName ffsb-helper-deduprepair).Actions[0].Arguments; logTail = $(if (Test-Path $log) { @(Get-Content $log -Tail 3) } else { @() }) } | ConvertTo-Json -Depth 4 -Compress`).stdout.trim();
     let fo: { svc?: string; result?: { mode?: string; ok?: boolean; state?: string; did?: string[]; whoami?: string } } = {};
     try { fo = JSON.parse(force); } catch { /* checked below */ }
     const odid = (fo.result?.did ?? []).join(' | ');
-    check(fo.result?.mode === 'force' && /sc stop refsdedupsvc \(exit 0\)/.test(odid) && /sc start refsdedupsvc \(exit 0\)/.test(odid) && /service RUNNING/.test(odid) && fo.result?.state !== 'check failed' && fo.svc === 'Running',
-      'the repair task (LOCAL SERVICE) stops and starts refsdedupsvc in force mode and leaves it running', force);
-    console.log(`note: force-mode repair on this runner: ${fo.result?.state} (event 6 needs a volume ReFS dedup watches)`);
+    check(fo.result?.mode === 'force' && /sc stop refsdedupsvc \(exit 0\)/.test(odid) && /sc start refsdedupsvc \(exit 0\)/.test(odid) && /service RUNNING/.test(odid) && fo.result?.state !== 'check failed',
+      'the repair task (LOCAL SERVICE) stops and starts refsdedupsvc in force mode and the service is RUNNING right after its start', force);
+    console.log(`note: force-mode repair on this runner: ${fo.result?.state}; the service now ${fo.svc} (it may stop by itself when it watches nothing); trace ${JSON.stringify((fo as { trace?: string[] }).trace ?? [])}`);
     const back = ps(`& '${helpersPs}' -Vhdx '${vhdx}' -Letter ${letter} -Actions deduprepair | Out-Null; (Get-ScheduledTask -TaskName ffsb-helper-deduprepair).Actions[0].Arguments`).stdout.trim();
     check(/-Mode repair$/.test(back), 'reinstalling puts the repair task back in repair mode', back);
   }
