@@ -41,8 +41,14 @@ import { FIXED_GIT_CONFIG, HOOKS, SCANNED_KEYS, parseScan, scannedOverrides, wit
 export const AGENTS_REPO_URL = 'https://github.com/Final-Factory/final-factory-agents.git';
 export const MARKETPLACE = 'final-factory-agents';
 export const AGENT_PLUGINS = ['ff-agents', 'ff-speckit', 'ff-discord'] as const;
-/** What registerAgents.sh installs on every machine (its DEFAULT_PLUGINS); ff-discord only where a person asked for it. */
-export const DEFAULT_AGENT_PLUGINS: readonly string[] = ['ff-agents', 'ff-speckit'];
+/**
+ * What every machine has (w6603; lothsahn, 2026-11-27: "Install the Discord plugin on every machine through the installer"):
+ * registerAgents.sh's own DEFAULT_PLUGINS (ff-agents, ff-speckit) and ff-discord, which it adds only when asked
+ * (`--plugin`, `REGISTER_EXTRA`), so every machine of an OS loads the same plugins.
+ */
+export const DEFAULT_AGENT_PLUGINS: readonly string[] = AGENT_PLUGINS;
+/** The registerAgents.sh arguments that add the plugins beyond its own defaults (it remembers them for later bare runs). */
+export const REGISTER_EXTRA = ['--plugin', 'ff-discord'] as const;
 export const BRANCH = 'master';
 /** The registerAgents.sh run: a marketplace clone and three plugin installs on a slow link. */
 export const REGISTER_TIMEOUT_MS = 10 * 60_000;
@@ -397,7 +403,7 @@ async function registerInto(
   const registerEnv = await fencedRegisterEnv(d, claudeDir, { ...REGISTER_ENV, ...env }, label);
   if (!registerEnv) return EXIT.failed;
   const register = async () => {
-    const x = await d.exec(sh, ['registerAgents.sh', '--claude'], { cwd: run, env: registerEnv, timeoutMs: REGISTER_TIMEOUT_MS });
+    const x = await d.exec(sh, ['registerAgents.sh', '--claude', ...REGISTER_EXTRA], { cwd: run, env: registerEnv, timeoutMs: REGISTER_TIMEOUT_MS });
     for (const l of `${x.stdout}\n${x.stderr}`.split(/\r?\n/).filter((y) => y.trim())) d.say(`  ${l.trimEnd()}`);
     return x;
   };

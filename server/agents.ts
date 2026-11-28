@@ -1,5 +1,5 @@
 import { newCost, timedCost, type Cost } from './placeCost.ts';
-import { baselineDrift, driftLine, portalSettings } from '../shared/machineBaseline.ts';
+import { baselineDrift, daemonNodePinLine, driftLine, portalSettings } from '../shared/machineBaseline.ts';
 import { deployLead, deployStayNote, deployWaitLine } from './deployResume.ts';
 import { describePortalPin } from '../machine/portalPin.ts';
 import { crashHoldMark } from './crashHolds.ts';
@@ -8997,7 +8997,8 @@ ${w.repo ?? ''}
   /** Where a machine differs from the other machines of its OS (w6603): tools, daemon feature keys and the portal's own settings. */
   private baselineLine(m: Machine): string | undefined {
     const all = this.machines.list().map((x) => ({ id: x.id, platform: x.platform, baseline: x.info?.baseline, portal: portalSettings(poolSettingsOf(x)) }));
-    return m.platform ? driftLine(m.id, baselineDrift(all).get(m.platform)) : undefined;
+    const parts = [daemonNodePinLine(m.platform, m.info?.baseline), m.platform ? driftLine(m.id, baselineDrift(all).get(m.platform)) : undefined].filter(Boolean);
+    return parts.length ? parts.join('; ') : undefined;
   }
 
   /** "  placement: reserved for urgent work only (placement.minPriority urgent) ..." for list_machines (w1643), or undefined. */
