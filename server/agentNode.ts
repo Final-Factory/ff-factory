@@ -681,7 +681,10 @@ export function agentNodePathDir(root: string | undefined, platform: NodeJS.Plat
  * is in place: the daemon's own node, as before.
  */
 export function shimNode(root: string | undefined, platform: NodeJS.Platform = process.platform, exists: (p: string) => boolean = fs.existsSync, execPath: string = process.execPath): string {
-  return root && platform === 'win32' && exists(agentNodeExe(root)) ? agentNodeExe(root) : execPath;
+  if (!root || platform !== 'win32') return execPath;
+  // agentNodeExe's path, joined the Windows way on any host, as the tests run Windows layouts on Linux too.
+  const exe = path.win32.join(root, 'tools', 'node', 'node.exe');
+  return exists(exe) ? exe : execPath;
 }
 
 /** How Windows Firewall shows firewall.ps1's tailnet ($Tailnet: 100.64.0.0/10, fd7a:115c:a1e0::/48) in a rule's RemoteAddress. */
