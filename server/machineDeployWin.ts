@@ -666,9 +666,16 @@ $eligNext = [DateTime]::MinValue
 $rebootLast = $null
 $rebootLastLive = $null
 function Say($line) { "$(Get-Date -Format s) $line" | Out-File $log -Append -Encoding utf8 }
+# w6792: a state file another process reads, swapped in by ReplaceFile. Move-Item -Force deletes the old file before it moves the
+# new one in, and a reader in between found none (CI's w6792 test). ReplaceFile narrows that gap but does not close it, and a
+# reader can find the file busy while it runs (measured on BEAST, 3000 swaps against a reader: Move-Item 6184 reads found no
+# file, ReplaceFile 3152 found none and 4608 found it busy), so every reader tries again (askSupervisor, the daemon's next tick).
+function Put-File($tmp, $to) {
+  if ([IO.File]::Exists($to)) { [IO.File]::Replace($tmp, $to, [NullString]::Value) } else { [IO.File]::Move($tmp, $to) }
+}
 function Beat($daemonPid) {
   $alive = @($abandoned | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
-  try { [pscustomobject]@{ pid = $PID; daemonPid = $daemonPid; abandoned = $alive; at = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress | Set-Content -LiteralPath "$state.tmp" -Encoding utf8; Move-Item -LiteralPath "$state.tmp" -Destination $state -Force } catch { }
+  try { [pscustomobject]@{ pid = $PID; daemonPid = $daemonPid; abandoned = $alive; at = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress | Set-Content -LiteralPath "$state.tmp" -Encoding utf8; Put-File "$state.tmp" $state } catch { }
 }
 # A restart asked over ssh (controlScript): its why, once; the file is taken away so each ask acts once.
 function Take-Request {
@@ -730,7 +737,7 @@ function Write-RebootState {
   if ($rebootLast) { $o.last = $rebootLast }
   if ($skipNow) { $o.skip = $skipNow }
   if ($rebootLastLive) { $o.lastLiveAt = Iso $rebootLastLive }
-  try { [pscustomobject]$o | ConvertTo-Json -Compress -Depth 4 | Set-Content -LiteralPath "$rebootState.tmp" -Encoding utf8; Move-Item -LiteralPath "$rebootState.tmp" -Destination $rebootState -Force } catch { }
+  try { [pscustomobject]$o | ConvertTo-Json -Compress -Depth 4 | Set-Content -LiteralPath "$rebootState.tmp" -Encoding utf8; Put-File "$rebootState.tmp" $rebootState } catch { }
 }
 try {
   $r0 = Get-Content -LiteralPath $rebootState -Raw -ErrorAction Stop | ConvertFrom-Json
@@ -1158,11 +1165,14 @@ $viaSupervisor = $false
 $sj = Join-Path $F 'logs\\${SUPERVISOR_STATE}'
 $req = Join-Path $F 'logs\\${SUPERVISOR_REQUEST}'
 $live = $null
-if (Test-Path -LiteralPath $sj) {
+# Up to 5 tries 100 ms apart: the supervisor swaps the file in every few seconds, and a read in the swap finds none or finds it
+# busy (w6792); taken as no supervisor, a restart went the Task Scheduler route (w6784's ssh restart test on CI).
+for ($try = 0; $try -lt 5 -and -not $live; $try++) {
+  if ($try) { Start-Sleep -Milliseconds 100 }
   try {
     $s0 = Get-Content -LiteralPath $sj -Raw -ErrorAction Stop | ConvertFrom-Json
-    $age = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $sj).LastWriteTimeUtc).TotalSeconds
-    if ($age -lt ${SUPERVISOR_FRESH_S} -and (Get-Process -Id ([int]$s0.pid) -ErrorAction SilentlyContinue)) { $live = $s0 }
+    $age = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $sj -ErrorAction Stop).LastWriteTimeUtc).TotalSeconds
+    if ($age -lt ${SUPERVISOR_FRESH_S} -and (Get-Process -Id ([int]$s0.pid) -ErrorAction SilentlyContinue)) { $live = $s0 } else { break }
   } catch { }
 }
 if ($live) {

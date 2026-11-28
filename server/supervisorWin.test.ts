@@ -43,6 +43,19 @@ interface Rig {
   end: () => void;
 }
 
+// A state file the supervisor swaps in, read as its readers do: a read in the swap finds none or finds it busy, so up to 20
+// tries 50 ms apart (w6792; machineDeployWin.ts Put-File).
+function readState(file: string) {
+  for (let i = 0; ; i++) {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
+    } catch (e) {
+      if (i >= 19) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+}
+
 // w6792: the self-reboot's readers made files the test writes: elig.ps1 answers the eligibility check (not eligible unless a
 // test writes another), idle.txt the console's idle seconds, console.txt why the console is not this session's (empty: it is).
 const NOT_ELIGIBLE_PS = "param($taskName) [pscustomobject]@{ eligible = $false; why = 'test: not eligible'; task = $null }";
@@ -139,7 +152,7 @@ test('windows (real PowerShell): a daemon stuck mid-exit is ended again, then le
   assert.ok(log.indexOf('left behind') < log.indexOf(`started the daemon, pid ${fresh.pid}`));
   // The stuck one really still runs: left behind, never waited on.
   assert.doesNotThrow(() => process.kill(stuck.pid, 0));
-  const state = JSON.parse(fs.readFileSync(path.join(r.dir, 'logs', win.SUPERVISOR_STATE), 'utf8').replace(/^﻿/, ''));
+  const state = readState(path.join(r.dir, 'logs', win.SUPERVISOR_STATE));
   assert.deepEqual([state.abandoned].flat(), [stuck.pid]);
   if (process.platform === 'win32') assert.match(log, /daemon\.log is still held \(abandoned daemon pid\(s\) \d+\); this daemon writes daemon\.held1\.log/);
 });
@@ -268,7 +281,7 @@ test('windows (real PowerShell): an asked restart starts at once but keeps the b
 // Each test runs the whole supervisor with a 3 s stuck window for the 900 s one: a daemon stuck mid-exit is left behind (w6784)
 // and a fresh `live` one never says it works, so the episode goes on; stop.txt then ends the run.
 const REBOOT_AFTER_S = 3;
-const rebootState = (dir: string) => JSON.parse(fs.readFileSync(path.join(dir, 'logs', SELF_REBOOT_STATE), 'utf8').replace(/^\uFEFF/, ''));
+const rebootState = (dir: string) => readState(path.join(dir, 'logs', SELF_REBOOT_STATE));
 const stopRun = async (r: Rig, done: Promise<{ code: number | null }>) => {
   fs.writeFileSync(path.join(r.dir, 'stop.txt'), '');
   const { code } = await done;
