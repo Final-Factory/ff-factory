@@ -200,6 +200,9 @@ export class ReadLog {
     for (const h of hosts) this.sessions.set(h.pid, { session: h.session, ...(h.sandbox ? { sandbox: h.sandbox } : {}) });
     const roots = hosts.map((h) => h.pid).sort((a, b) => a - b).join(' ');
     if (roots === this.rootsSent) return;
+    // a host gone since the last roots line keeps its name until the next change, for the reads the helper sent meanwhile
+    const keep = new Set([...hosts.map((h) => h.pid), ...this.rootsSent.split(' ').filter(Boolean).map(Number)]);
+    for (const pid of [...this.sessions.keys()]) if (!keep.has(pid)) this.sessions.delete(pid);
     this.rootsSent = roots;
     child.stdin.write(`roots ${roots}\n`);
   }

@@ -480,6 +480,10 @@ folder and flags it, refusing nothing. It logs paths and the reading program onl
   carries FF_SESSION_ID (read from the process as `machine/leftovers.ts` does), or it runs a program from the work folder (a
   Git Bash tool shows no environment, w1575). Low alone is not enough: a person's Firefox, Slack, Discord, Signal, Spotify
   and Steam run Low processes too (found by w6715's review on BEAST), and their paths stay out of the log.
+- Windows hands a dead process's pid out again, and a process keeps naming its dead parent's pid (61 of BEAST's 132
+  processes did, Discord, Slack and Firefox among them, w6723's review). So the helper keeps each followed process's creation
+  time and follows a child only when it started at or after its parent; a host that exits is dropped at its own stop event,
+  and once an hour a followed pid whose process is gone or newer is dropped.
 - Each report goes to `<appDir>/logs/read-log-<UTC date>.jsonl` (`t`, `session`, `sandbox`, `pid`, `image`, `path`; at most
   50 MB a day, kept 14 days) and, once a day per worker and folder (a path's first three parts), to daemon.log as
   `read log: <session> (<sandbox>): <program> read <path>, outside the work folder and not on the allowlist (warn only:

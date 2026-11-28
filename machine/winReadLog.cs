@@ -110,6 +110,10 @@ static class FfReadLog
     static string Work = "";
     // Low processes found to be no worker's (a person's browser, chat or game launcher), so their memory is not read again
     static readonly HashSet<uint> NotWorker = new HashSet<uint>();
+    // w6723: each tracked pid's creation time (0: unread), so a pid Windows hands out again is never taken for the one tracked
+    static readonly Dictionary<uint, long> Started = new Dictionary<uint, long>();
+    // roots whose stop event came before the daemon's next `roots` line: never named again under that pid
+    static readonly HashSet<uint> DeadRoots = new HashSet<uint>();
     static List<KeyValuePair<string, string>> devices = new List<KeyValuePair<string, string>>();
     static long fileEvents, procEvents, reported, dropped;
     static int thisMinute;
@@ -168,7 +172,7 @@ static class FfReadLog
             Say("{\"event\":\"stat\",\"fileEvents\":" + Interlocked.Exchange(ref fileEvents, 0) + ",\"procEvents\":" + Interlocked.Exchange(ref procEvents, 0) + ",\"tracked\":" + tracked + ",\"reported\":" + Interlocked.Exchange(ref reported, 0) + ",\"dropped\":" + Interlocked.Exchange(ref dropped, 0) + ",\"lost\":" + lost + "}");
         }, null, 60000, 60000);
         // what was reported is reported again an hour later, so a long run still shows its reads
-        Timer hourly = new Timer(_ => { lock (Gate) { Seen.Clear(); NotWorker.Clear(); } Devices(); }, null, 3600000, 3600000);
+        Timer hourly = new Timer(_ => { lock (Gate) { Seen.Clear(); NotWorker.Clear(); } Devices(); DropStale(); }, null, 3600000, 3600000);
 
         string line;
         while ((line = Console.In.ReadLine()) != null)
@@ -258,11 +262,16 @@ static class FfReadLog
                 if (id == 1)
                 {
                     uint child = Number(rec, NameProcessId), parent = Number(rec, NameParentId);
+                    long started = StartOf(child);
                     lock (Gate)
                     {
                         uint root;
                         if (!Tracked.TryGetValue(parent, out root)) return;
+                        // a parent's own pid reused by a later process (a missed stop event) is no parent of this child
+                        long ps;
+                        if (started != 0 && Started.TryGetValue(parent, out ps) && ps != 0 && started < ps) return;
                         Tracked[child] = root;
+                        Started[child] = started;
                     }
                     string image = Dos(Text(rec, NameImage)) ?? Text(rec, NameImage) ?? "";
                     lock (Gate) Images[child] = image;
@@ -272,9 +281,12 @@ static class FfReadLog
                     uint gone = Number(rec, NameProcessId);
                     lock (Gate)
                     {
-                        if (Roots.Contains(gone)) return;
+                        // w6723: a root that exits is dropped at once, not at the daemon's next `roots` line 15 s later, so a
+                        // process given its pid meanwhile is not followed
+                        if (Roots.Remove(gone)) DeadRoots.Add(gone);
                         Tracked.Remove(gone);
                         Images.Remove(gone);
+                        Started.Remove(gone);
                     }
                 }
             }
@@ -313,17 +325,23 @@ static class FfReadLog
             if (uint.TryParse(s, out v)) now.Add(v);
         }
         List<uint> fresh = new List<uint>();
+        Dictionary<uint, long> starts = new Dictionary<uint, long>();
+        foreach (uint r in now) starts[r] = StartOf(r);
         lock (Gate)
         {
-            foreach (uint r in new List<uint>(Roots))
+            DeadRoots.IntersectWith(now);
+            HashSet<uint> gone = new HashSet<uint>(Roots);
+            gone.ExceptWith(now);
+            gone.UnionWith(DeadRoots);
+            List<uint> drop = new List<uint>();
+            foreach (KeyValuePair<uint, uint> t in Tracked) if (gone.Contains(t.Value)) drop.Add(t.Key);
+            foreach (uint d in drop) { Tracked.Remove(d); Images.Remove(d); Started.Remove(d); }
+            foreach (uint r in gone) Roots.Remove(r);
+            foreach (uint r in now)
             {
-                if (now.Contains(r)) continue;
-                Roots.Remove(r);
-                List<uint> drop = new List<uint>();
-                foreach (KeyValuePair<uint, uint> t in Tracked) if (t.Value == r) drop.Add(t.Key);
-                foreach (uint d in drop) { Tracked.Remove(d); Images.Remove(d); }
+                if (DeadRoots.Contains(r) || starts[r] == 0) continue;
+                if (Roots.Add(r)) { Tracked[r] = r; Started[r] = starts[r]; fresh.Add(r); }
             }
-            foreach (uint r in now) if (Roots.Add(r)) { Tracked[r] = r; fresh.Add(r); }
         }
         if (fresh.Count > 0) Seed(fresh);
     }
@@ -359,14 +377,22 @@ static class FfReadLog
                 uint p = q.Dequeue();
                 List<uint> l;
                 if (!children.TryGetValue(p, out l)) continue;
+                long ps;
+                lock (Gate) if (!Started.TryGetValue(p, out ps) || ps == 0) continue;
                 foreach (uint c in l)
                 {
+                    // w6723: toolhelp keeps a dead parent's pid, and Windows hands that pid out again: a process that started
+                    // before its named parent is an orphan of an earlier holder of the pid (a person's Slack, Discord or
+                    // Firefox whose updater exited), never this root's
+                    long cs = StartOf(c);
+                    if (cs == 0 || cs < ps) continue;
                     string image = ImageOf(c);
                     lock (Gate)
                     {
                         if (Tracked.ContainsKey(c)) continue;
                         Tracked[c] = root;
                         Images[c] = image;
+                        Started[c] = cs;
                     }
                     q.Enqueue(c);
                 }
@@ -388,8 +414,45 @@ static class FfReadLog
                 if (Tracked.ContainsKey(pid)) continue;
                 Tracked[pid] = 0;
                 Images[pid] = image;
+                Started[pid] = StartOf(pid);
             }
         }
+    }
+
+    [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr h, out long created, out long exited, out long kernel, out long user);
+
+    // A process's creation time (FILETIME ticks), or 0 when it is gone or cannot be opened.
+    static long StartOf(uint pid)
+    {
+        IntPtr h = OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+        if (h == IntPtr.Zero) return 0;
+        try
+        {
+            long c, x, k, u;
+            return GetProcessTimes(h, out c, out x, out k, out u) ? c : 0;
+        }
+        finally { CloseHandle(h); }
+    }
+
+    // Hourly: a tracked pid whose process is gone, or whose pid now names a later process (a stop event ETW lost), is dropped.
+    static void DropStale()
+    {
+        List<KeyValuePair<uint, long>> all;
+        lock (Gate) all = new List<KeyValuePair<uint, long>>(Started);
+        List<uint> stale = new List<uint>();
+        foreach (KeyValuePair<uint, long> t in all)
+        {
+            long now = StartOf(t.Key);
+            if (now == 0 || (t.Value != 0 && now != t.Value)) stale.Add(t.Key);
+        }
+        lock (Gate)
+            foreach (uint d in stale)
+            {
+                if (Roots.Remove(d)) DeadRoots.Add(d);
+                Tracked.Remove(d);
+                Images.Remove(d);
+                Started.Remove(d);
+            }
     }
 
     static bool IsWorkers(uint pid, string image)
