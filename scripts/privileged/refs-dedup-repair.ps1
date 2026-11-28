@@ -8,7 +8,7 @@
 # It runs as the task ffsb-helper-deduprepair (install-privileged-helpers.ps1 -Actions deduprepair): LOCAL SERVICE with the task's
 # own SID (ProcessTokenSidType Unrestricted) and no privilege but SeChangeNotifyPrivilege. That task SID is granted query,
 # start and stop on refsdedupsvc and nothing else (its service DACL), and write on <ResultDir> only. Every read here works
-# without administrator rights: the two event logs (readable by service accounts), mountvol, schtasks /query. The night's
+# without administrator rights: the two event logs (readable by service accounts), mountvol, the Task Scheduler and service status queries. The night's
 # dedup itself is the service's own task (SYSTEM), whose trigger runs it after this.
 #
 #   -Mode repair   find and repair (the task's mode)
@@ -71,18 +71,37 @@ function Events([string]$logName, [int[]]$ids, [int]$max, [scriptblock]$where) {
   $ev
 }
 function Newest6([string]$mp) { Events $Log 6 20 { (MountPoints $_) -contains $mp } | Select-Object -First 1 }
-function TaskStatus([string]$tn) {
-  # A service stop deletes the volume task, so 'missing' is an answer here, not an error (w6597 forced test).
-  $x = Native $schtasks @('/query', '/tn', $tn, '/fo', 'csv', '/nh')
-  # Only "cannot find" is missing; a refusal (access denied as LOCAL SERVICE) is unreadable, never taken as healthy (w6623 H2).
-  if ($x.code -ne 0) { if ($x.out -match 'cannot find') { return 'missing' }; return "unreadable ($($x.out))" }
-  $f = ($x.out -split '","')
-  return $f[-1].Trim('"')
+# The volume task through the Task Scheduler's own API (the one schtasks.exe uses), not schtasks' text: its messages and
+# field names are translated on a non-English Windows, its exit code is 1 for both "not found" and "access denied", and the
+# API answers with error codes and a typed state and next run time (w6796).
+function TaskInfo([string]$tn) {
+  try {
+    $ts = New-Object -ComObject Schedule.Service
+    $ts.Connect()
+    # Folder, then name: GetTask with the whole path from the root answers 0x80070003 for this task (measured, LothDesktop).
+    $i = $tn.LastIndexOf('\')
+    $t = $ts.GetFolder($(if ($i -gt 0) { $tn.Substring(0, $i) } else { '\' })).GetTask($tn.Substring($i + 1))
+    $states = @{ 0 = 'Unknown'; 1 = 'Disabled'; 2 = 'Queued'; 3 = 'Ready'; 4 = 'Running' }
+    $next = $t.NextRunTime
+    [pscustomobject]@{ state = $(if ($states.ContainsKey([int]$t.State)) { $states[[int]$t.State] } else { "state $($t.State)" }); next = $(if ($next -is [datetime] -and $next.Year -gt 2000) { $next } else { $null }) }
+  } catch {
+    $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
+    $h = '0x{0:X8}' -f $e.HResult
+    # A service stop deletes the volume task, so 'missing' is an answer here, not an error (w6597 forced test). Only "file
+    # or path not found" is missing; a refusal (access denied as LOCAL SERVICE) is unreadable, never healthy (w6623 H2).
+    if ($h -eq '0x80070002' -or $h -eq '0x80070003') { return [pscustomobject]@{ state = 'missing'; next = $null } }
+    [pscustomobject]@{ state = "unreadable ($h $($e.Message.Trim()))"; next = $null }
+  }
 }
+function TaskStatus([string]$tn) { (TaskInfo $tn).state }
+# The service's state through the service controller, not sc.exe's text (translated on a non-English Windows; w6796).
+# Reading the status needs only SERVICE_QUERY_STATUS, which the task's ACE grants (LC).
+Add-Type -AssemblyName System.ServiceProcess
 function ServiceState {
-  $o = (Native $sc @('query', $Service)).out
-  if ($o -match 'STATE\s+:\s+\d+\s+(\w+)') { return $Matches[1] }
-  return "unknown ($($o -replace '\s+', ' '))"
+  try {
+    $c = New-Object System.ServiceProcess.ServiceController $Service
+    try { $c.Refresh(); return (($c.Status.ToString() -creplace '(?<=[a-z])([A-Z])', '_$1').ToUpper()) } finally { $c.Dispose() }
+  } catch { return "unknown ($($_.Exception.Message.Trim()))" }
 }
 function WaitService([string]$want, [int]$sec) {
   for ($i = 0; $i -lt $sec; $i += 2) { if ((ServiceState) -eq $want) { return $true }; Start-Sleep -Seconds 2 }
@@ -108,7 +127,7 @@ try {
   $ev6 = Newest6 $mp
   $dm = Events 'Microsoft-Windows-ReFS/Operational' 303 200 { $_.Message -match [regex]::Escape($guid) } | Select-Object -First 1
   $end = Events $Log 4, 13 60 { (MountPoints $_) -contains $mp } | Select-Object -First 1
-  $task = TaskStatus $tn
+  $info0 = TaskInfo $tn; $task = $info0.state
 
   if ($dm -and (-not $ev6 -or $ev6.TimeCreated -lt $dm.TimeCreated)) {
     $r.reasons += "not watched: no 'started monitoring' (event 6) for $mp since its dismount at $($dm.TimeCreated.ToUniversalTime().ToString('s'))Z"
@@ -126,8 +145,25 @@ try {
   }
   if ($Mode -eq 'force') { $r.reasons += "forced test (-Mode force): repair whatever the state (task $task, service $(ServiceState))" }
   if (-not $r.reasons.Count -and $task -like 'unreadable*') { $r.ok = $false; $r.state = "healthy by the event logs, but the volume task's state is $task, so a stuck task cannot be seen"; Save }
-  if (-not $r.reasons.Count) { $r.state = "healthy (service $(ServiceState), task $task)"; Save }
+  # A task that is there but will never run (Disabled, or no trigger) is no nightly job: reported, not repaired, since a
+  # service restart does not change a task's settings (w6799 F1).
+  if (-not $r.reasons.Count -and -not $info0.next -and $task -ne 'Running' -and $task -ne 'missing') { $r.ok = $false; $r.state = "the volume task $tn is $task with no next run time, so no nightly dedup job (not restarting: a restart does not change the task)"; Save }
+  if (-not $r.reasons.Count) { $r.state = "healthy (service $(ServiceState), task $task, next run $(if ($info0.next) { "$($info0.next.ToUniversalTime().ToString('s'))Z" } else { 'none' }))"; Save }
   if ($Mode -eq 'check') { $r.state = 'broken (check only: nothing changed)'; $r.ok = $false; Save }
+  # Back off (w6796): a volume task still missing after a repair whose restart did not bring it back (dedup turned off on
+  # V:, say) is restarted for once, not every night. Until V: is next dismounted, each run only reports it (ok=false, so the
+  # watch still warns). Any other reason, or force mode, repairs as usual.
+  if ($Mode -eq 'repair' -and $r.reasons.Count -eq 1 -and "$($r.reasons[0])" -like 'no volume task*') {
+    $prev = $null
+    try { $prev = Get-Content -Raw (Join-Path $ResultDir 'dedup-repair.json') -ErrorAction Stop | ConvertFrom-Json } catch { $prev = $null }
+    $since = $null
+    if ($prev -and "$($prev.taskMissingSince)") { try { $since = [datetime]::Parse("$($prev.taskMissingSince)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) } catch { $since = $null } }
+    if ($since -and (-not $dm -or $dm.TimeCreated.ToUniversalTime() -lt $since.ToUniversalTime())) {
+      $r.taskMissingSince = $prev.taskMissingSince; $r.ok = $false
+      $r.state = "volume task still missing since the repair at $($prev.taskMissingSince), so the nightly job has no trigger; not restarting the service again until $($Letter): is next mounted (is dedup off on $($Letter):? docs/sandbox-disk.md, To undo)"
+      Save
+    }
+  }
 
   # The repair. Once the service is stopped it is started again whatever happens next (finally).
   $t0 = Get-Date
@@ -166,17 +202,16 @@ try {
     $task = TaskStatus $tn
     if (-not $seen -or $task -eq 'missing') { Start-Sleep -Seconds 2 }
   }
-  $next = ''
-  if ($task -ne 'missing' -and $task -notlike 'unreadable*') {
-    $q = Native $schtasks @('/query', '/tn', $tn, '/fo', 'list')
-    $next = [regex]::Match($q.out, 'Next Run Time:\s+(.+?)\s+Status:').Groups[1].Value
-  }
-  if ($seen -and $task -ne 'Running' -and $task -ne 'missing' -and $task -notlike 'unreadable*') {
-    $r.state = "repaired: the service watches $mp again (event 6 at $($seen.TimeCreated.ToUniversalTime().ToString('s'))Z), volume task back ($task, next run $next)"
+  # The nightly trigger is back only with a next run time: a Disabled task, or one with no trigger, has none (w6796).
+  $info = TaskInfo $tn; $task = $info.state; $next = $info.next
+  if ($seen -and $next -and $task -ne 'Running' -and $task -ne 'missing' -and $task -notlike 'unreadable*') {
+    $r.state = "repaired: the service watches $mp again (event 6 at $($seen.TimeCreated.ToUniversalTime().ToString('s'))Z), volume task back ($task, next run $($next.ToUniversalTime().ToString('s'))Z)"
   } else {
     $r.ok = $false
-    $why = if ($task -eq 'missing') { "the volume task $tn is not back, so the nightly job has no trigger" } else { "task $task" }
+    $why = if ($task -eq 'missing') { "the volume task $tn is not back, so the nightly job has no trigger" } elseif (-not $next -and $task -ne 'Running' -and $task -notlike 'unreadable*') { "the volume task $tn is back but $task with no next run time, so the nightly job has no trigger" } else { "task $task" }
     $r.state = "repair did not finish: event 6 $(if ($seen) { 'seen' } else { 'not seen within 120 s' }), service $(ServiceState), $why"
+    # The next runs back off while the task stays missing and V: is not remounted (above).
+    if ($task -eq 'missing') { $r.taskMissingSince = "$($t0.ToUniversalTime().ToString('s'))Z" }
   }
   Save
 } catch {
