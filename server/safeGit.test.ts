@@ -787,6 +787,9 @@ test('w6630: a call that recurses into submodules by its own option is named; a 
     assert.ok(submoduleRecursion(a), a.join(' '));
   for (const a of [['fetch', 'origin'], ['fetch', '--no-recurse-submodules'], ['pull', '--recurse-submodules=no'], ['fetch', '--recurse-submodules-default=yes'], ['clone', '--recurse-submodules', 'u', 'd'], ['status', '--ignore-submodules=dirty'], ['log', '--', '--recurse-submodules'], ['diff', '--submodule=short'], ['fetch', '--submodule-prefix=x/'], ['-c', 'fetch.recurseSubmodules=false', 'fetch'], ['-c', 'diff.submodule=short', 'diff'], ['-c', 'user.name=t', 'commit']])
     assert.equal(submoduleRecursion(a), undefined, a.join(' '));
+  // A global option with its value missing puts the subcommand past the end (Windows CI, scripts/updatePath.test.ts).
+  assert.equal(submoduleRecursion(['-C']), undefined);
+  assert.equal(submoduleRecursion(['-c']), undefined);
   const subs = parseScan('local\0submodule.sub.url\n/up/sub\0local\0submodule.sub.active\ntrue\0');
   const none = path.join(os.tmpdir(), 'w6630-no-such-folder');
   assert.match(submoduleWarning(['status'], subs, none) ?? '', /w6630.*submodule\.sub\.url.*submodule\.recurse=false, fetch\.recurseSubmodules=false, diff\.ignoreSubmodules=dirty, status\.submoduleSummary=false, diff\.submodule=short.*cannot stop are refused/);

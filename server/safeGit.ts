@@ -202,8 +202,8 @@ export function submoduleRecursion(args: string[]): string | undefined {
   const name = args[sub] ?? '';
   // A clone's submodules are new repositories whose config git writes itself.
   if (name === 'clone') return undefined;
-  for (let i = 0; i < sub; i++) {
-    const a = args[i];
+  for (let i = 0; i < Math.min(sub, args.length); i++) {
+    const a = args[i] ?? '';
     const pair = a === '-c' || a === '--config-env' ? args[i + 1] ?? '' : a.startsWith('--config-env=') ? a.slice(13) : a.startsWith('-c') ? a.slice(2) : '';
     const eq = pair.indexOf('=');
     const key = (eq < 0 ? pair : pair.slice(0, eq)).toLowerCase();
@@ -619,7 +619,13 @@ function fenced(args: string[], env: Env, scanOut: string, cwd: string | undefin
       args: [`--${no.replace(/\s+/g, '-')}`],
       env: withConfigFirst(env, FIXED_GIT_CONFIG),
     };
-  if (cwd !== null) warnOnce(submoduleWarning(args, rows, cwd, env));
+  // Warn-only: nothing in the warning may fail the call.
+  if (cwd !== null)
+    try {
+      warnOnce(submoduleWarning(args, rows, cwd, env));
+    } catch {
+      // A warning that cannot be built is skipped.
+    }
   const out = withConfigFirst(env, [...fixedFor(args), ...scannedOverrides(rows)]);
   return {
     args: fenceArgs(firstWinsArgs(args, rows)),
