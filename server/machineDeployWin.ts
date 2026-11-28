@@ -797,16 +797,23 @@ function Reboot-Skip {
   if ($rebootLastLive -and ((Get-Date).ToUniversalTime() - $rebootLastLive).TotalSeconds -lt $rebootEveryS) { return @{ key = 'rate'; why = "it rebooted itself at $(Iso $rebootLastLive), under $([int]($rebootEveryS / 3600)) h ago" } }
   $null
 }
-# Every step: the eligibility check's answer; a stuck episode ended by a working daemon, or held back, or answered.
+# Every step: the eligibility check's answer; a stuck episode ended by a working daemon, or held back, or answered. Its own
+# failure is said once and never reaches w6784's loop, where a throw reads as "could not start" (w6809's review).
 function Watch-Reboot($daemonPid) {
+  try { Watch-RebootStep $daemonPid } catch { if (-not $watchFailSaid) { Say "self-reboot: its check failed: $($_.Exception.Message) (w6792)"; $script:watchFailSaid = $true } }
+}
+function Watch-RebootStep($daemonPid) {
   Check-Eligible
   if (-not $stuckSince) { return }
   $mins = [int](((Get-Date).ToUniversalTime() - $stuckSince).TotalMinutes)
   if ($daemonPid) {
     try {
       $a = Get-Content -LiteralPath $aliveFile -Raw -ErrorAction Stop | ConvertFrom-Json
-      $age = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $aliveFile).LastWriteTimeUtc).TotalSeconds
-      if ([int]$a.pid -eq $daemonPid -and $a.linked -eq $true -and $age -le ${DAEMON_ALIVE_FRESH_S}) { End-Stuck "self-reboot: the daemon, pid $daemonPid, works (linked to the portal) $mins min after the stuck state began: the episode is over, no reboot (w6792)"; return }
+      # Written since the stuck state began: with supervisor-warn-only a stuck daemon keeps its pid, and its last heartbeat,
+      # from before it said it ends, is still under ${DAEMON_ALIVE_FRESH_S} s old (w6809's review).
+      $wrote = (Get-Item -LiteralPath $aliveFile).LastWriteTimeUtc
+      $age = ((Get-Date).ToUniversalTime() - $wrote).TotalSeconds
+      if ([int]$a.pid -eq $daemonPid -and $a.linked -eq $true -and $age -le ${DAEMON_ALIVE_FRESH_S} -and $wrote -gt $stuckSince) { End-Stuck "self-reboot: the daemon, pid $daemonPid, works (linked to the portal) $mins min after the stuck state began: the episode is over, no reboot (w6792)"; return }
     } catch { }
   }
   if ($rebootSaid -or ((Get-Date).ToUniversalTime() - $stuckSince).TotalSeconds -lt $rebootAfterS) { return }

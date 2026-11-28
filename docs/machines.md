@@ -153,8 +153,8 @@ lines on the real machines look right (lothsahn's lockout rule).
   after each hello, the portal logs `machine X: self-reboot: ...` and `machine X: would have rebooted itself at T (warn
   only): ...`, and the machine's panel shows a **Self-reboot** chip (warn only, on, off, stuck) with the last one and why.
   After a real reboot the next daemon reports the same file, so the panel says when and why it rebooted.
-- Workers gain nothing: the supervisor runs at the user's own level from its logon task, takes no command from a file or the
-  link, and its script has no reboot call at all in warn mode (a test checks it); a worker's shutdown command stays refused
+- Workers gain nothing: the supervisor runs at the user's own level from its logon task, takes no reboot command from a file or
+  the link (w6784's restart request asks only for a restart of the daemon), and its script has no reboot call at all in warn mode (a test checks it); a worker's shutdown command stays refused
   by the guard (`runsPowerOff`).
 
 **The offline backstop (w6784).** The offline redeploy above leaves two kinds of machine alone: a worker root install

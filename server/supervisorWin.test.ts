@@ -29,6 +29,11 @@ console.log('run ' + n + ': ' + what);
 if (what === 'yield') process.exit(75);
 if (what === 'stuck') fs.writeFileSync(path.join(dir, 'logs', '${DAEMON_ENDING_MARKER}'), JSON.stringify({ pid: process.pid, at: new Date().toISOString(), why: 'test: stuck' }));
 // w6792: \`linked\` says it works as a real daemon does (machine/selfReboot.ts writeAlive); stop.txt ends any run with 75.
+// \`linkedstuck\` said it works once, then 1 s later writes its ending marker and never exits: its heartbeat is still fresh.
+if (what === 'linkedstuck') {
+  fs.writeFileSync(path.join(dir, 'logs', '${DAEMON_ALIVE}'), JSON.stringify({ pid: process.pid, at: new Date().toISOString(), linked: true }));
+  setTimeout(() => fs.writeFileSync(path.join(dir, 'logs', '${DAEMON_ENDING_MARKER}'), JSON.stringify({ pid: process.pid, at: new Date().toISOString(), why: 'test: stuck' })), 1000);
+}
 if (what === 'linked') setInterval(() => fs.writeFileSync(path.join(dir, 'logs', '${DAEMON_ALIVE}'), JSON.stringify({ pid: process.pid, at: new Date().toISOString(), linked: true })), 100);
 setInterval(() => {
   if (fs.existsSync(path.join(dir, 'stop.txt'))) process.exit(75);
@@ -325,6 +330,18 @@ test('windows (real PowerShell): a fresh daemon that says it works ends the stuc
   const st = rebootState(r.dir);
   assert.equal(st.stuckSince, undefined);
   assert.equal(st.last, undefined);
+});
+
+test('windows (real PowerShell): a heartbeat the stuck daemon wrote before it said it ends does not end the episode (w6809 review)', { skip }, async (t) => {
+  // supervisor-warn-only keeps the stuck daemon (w6784), so the supervisor's daemon is still the one whose heartbeat is fresh.
+  const r = rig(t, 'linkedstuck,yield', { rebootAfterS: REBOOT_AFTER_S });
+  fs.writeFileSync(path.join(r.dir, 'elig.ps1'), ELIGIBLE_PS);
+  fs.writeFileSync(path.join(r.dir, win.SUPERVISOR_WARN_ONLY), '');
+  const done = r.run({ noKill: true });
+  await until('would reboot', () => r.log().includes('would reboot now'));
+  await stopRun(r, done);
+  assert.match(r.log(), /self-reboot: a stuck episode began/);
+  assert.doesNotMatch(r.log(), /the episode is over/);
 });
 
 test('windows (real PowerShell): a machine that would not come back by itself only logs why (w6792)', { skip }, async (t) => {
