@@ -155,6 +155,24 @@ export function baselineDrift(machines: BaselineMachine[]): Map<MachinePlatform,
   return out;
 }
 
+/**
+ * The node each OS's daemon is to run on (w6603; lothsahn, 2026-11-27: "every windows box should be the same ... We
+ * shouldn't have different scripts, etc." and "Python being in the work folder, and any other tools, should be part of
+ * the install process"): the agents' pinned node, `AGENT_NODE` in server/agentNode.ts (a test keeps the two equal). Only
+ * Windows has a pinned node so far; a Mac or Linux daemon is compared with its peers only (`baselineDrift`).
+ */
+export const PINNED_DAEMON_NODE: Partial<Record<MachinePlatform, string>> = { win32: '24.22.1' };
+
+/**
+ * Warn only (w6603): "daemon node 22.17.0, not the pinned 24.22.1" when a daemon reports another node than its OS's pin,
+ * else undefined. Nothing acts on it yet: the installer moves the daemon onto the pinned node in a later change.
+ */
+export function daemonNodePinLine(platform: MachinePlatform | undefined, baseline: MachineBaseline | undefined): string | undefined {
+  const pin = platform ? PINNED_DAEMON_NODE[platform] : undefined;
+  const own = baseline?.tools?.daemonNode;
+  return pin && own && own !== pin ? `daemon node ${own}, not the pinned ${pin}` : undefined;
+}
+
 /** One machine's drift in a line ("tool.python 3.10.11 (beast: 3.12.10 lothdesktop)"), or undefined when none. */
 export function driftLine(id: string, drifts: Drift[] | undefined): string | undefined {
   const mine = (drifts ?? []).filter((d) => d.values.some((v) => v.machines.includes(id)));

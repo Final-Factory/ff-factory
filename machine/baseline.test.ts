@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { agentClaude, probeBaseline, toolCommands } from './baseline.ts';
-import { FEATURE_KEYS, NON_FEATURE_KEYS, baselineDrift, driftLine, featureFlags, flagValue, portalSettings, sanitizeBaseline, versionOf } from '../shared/machineBaseline.ts';
+import { AGENT_NODE } from '../server/agentNode.ts';
+import { FEATURE_KEYS, NON_FEATURE_KEYS, PINNED_DAEMON_NODE, baselineDrift, daemonNodePinLine, driftLine, featureFlags, flagValue, portalSettings, sanitizeBaseline, versionOf } from '../shared/machineBaseline.ts';
 
 test('w6603: versionOf reads the version from each tool line, past node warnings', () => {
   assert.equal(versionOf('git version 2.56.1.windows.1\n'), '2.56.1.windows.1');
@@ -103,4 +104,17 @@ test('w6603 (w6613 review): the sanitiser caps keys, and a key with three values
   assert.deepEqual(sanitizeBaseline({ tools: { ['x'.repeat(41)]: 'v', 'a.b-c_1': 'v' } })!.tools, { 'a.b-c_1': 'v' });
   const d = baselineDrift(['1', '2', '2', '3'].map((v, i) => ({ id: `m${i}`, platform: 'linux' as const, baseline: { tools: { git: v }, flags: {} } })));
   assert.equal(driftLine('m0', d.get('linux')), 'tool.git 1 (2 on m1, m2; 3 on m3)');
+});
+
+test('w6603: a daemon off its OS pinned node is named, warn only; an OS with no pin and an unreported node are not', () => {
+  assert.equal(daemonNodePinLine('win32', { tools: { daemonNode: '22.17.0' }, flags: {} }), 'daemon node 22.17.0, not the pinned 24.22.1');
+  assert.equal(daemonNodePinLine('win32', { tools: { daemonNode: '24.22.1' }, flags: {} }), undefined);
+  assert.equal(daemonNodePinLine('win32', { tools: {}, flags: {} }), undefined);
+  assert.equal(daemonNodePinLine('win32', undefined), undefined);
+  assert.equal(daemonNodePinLine('darwin', { tools: { daemonNode: '26.5.0' }, flags: {} }), undefined);
+  assert.equal(daemonNodePinLine(undefined, { tools: { daemonNode: '26.5.0' }, flags: {} }), undefined);
+});
+
+test("w6603: the Windows daemon's pin is the agents' pinned node", () => {
+  assert.equal(`v${PINNED_DAEMON_NODE.win32}`, AGENT_NODE.version);
 });

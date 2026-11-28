@@ -663,6 +663,15 @@ settings for it (Library seed set or not, editors below normal, slot repos, comm
 machine reports is no drift. It changes and refuses nothing: the fix for a difference is the installer/updater or the
 portal setting, never a hand edit on one machine.
 
+**The daemon's node (w6603, warn only).** Each OS has one node its daemon is to run on, `PINNED_DAEMON_NODE` in
+shared/machineBaseline.ts: on Windows the agents' pinned node (`AGENT_NODE` in server/agentNode.ts, v24.22.1, at
+`<root>\tools\node\node.exe`; a test keeps the two equal). Mac and Linux have no pin yet and are compared with their peers
+only. A daemon on another node shows first in that line (`daemon node 22.17.0, not the pinned 24.22.1`), even when every
+machine of its OS agrees, and the installer's Windows daemon step says `Daemon node (w6603, warn only): ...` and leaves the
+daemon on the node it found (`installDaemonWin`, scripts/worker/worker.ts). Moving the daemon onto the pinned node is a
+separate change with its own recovery (lothsahn, 2026-11-27: "Python being in the work folder, and any other tools, should
+be part of the install process").
+
 ## The daemon's logs
 
 A machine daemon logs to `<app_dir>/logs/` on its machine: `<root>/daemon/logs` on a worker install (`F:\ffw\daemon\logs`
