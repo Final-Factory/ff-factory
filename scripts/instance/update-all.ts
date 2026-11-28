@@ -24,6 +24,8 @@
 //        again; the next one the lead verifies is.
 //   4. Checks each instance's settings against the list's `expect` (new shared features that need a per-portal switch:
 //      deviceApproval, trustProxy, machines.keepAgentsOnRestart) and logs the ones that differ. It never changes a config.
+//   5. Checks each listed instance's start-portal.sh (Windows) against the one scripts/instance/new.ts writes now and logs
+//      what it lacks (w6603, warn only: startScriptProblem). It never changes the script.
 //
 // Its state and log are beside the list: update-all.json, update-all.log. No npm package: it runs before npm ci.
 //
@@ -84,6 +86,8 @@ export interface State {
   ahead?: Record<string, string>;
   /** Instances whose tasks this user cannot control (Resolved.control), with the reason: said once, retried each pass. */
   blocked?: Record<string, string>;
+  /** What each instance's start-portal.sh lacks (startScriptProblem), "" when nothing: said when it changes (w6603). */
+  scripts?: Record<string, string>;
 }
 
 /** What the updater does to the world: injected, so the tests drive it with fakes. */
@@ -160,6 +164,18 @@ export function settingsDiff(config: Record<string, unknown>, expect: Record<str
   return out;
 }
 
+/**
+ * What a Windows instance's start-portal.sh lacks next to the one scripts/instance/new.ts writes now (w6603, warn only),
+ * or undefined when it has it: the portal priority raise (w6221) with the winpid read again (w6542, ff-factory #1508). A
+ * one-shot read could name the forked bash.exe instead of the portal's node.exe, so the raise missed the portal.
+ */
+export function startScriptProblem(text: string): string | undefined {
+  if (text.includes('FF_PORTAL_PID=$(cat "/proc/$portal/winpid")')) return "has the one-shot priority raise ff-factory #1508 replaced (w6542): it can raise a bash.exe and leave the portal at its task's low priority";
+  if (!text.includes("read -r -d '' PRIO")) return "raises no priority (w6221): the portal runs at its task's below-normal CPU, I/O and memory priority";
+  if (!text.includes('for try in 1 2 3 4 5')) return 'has an older priority raise without the winpid retry (w6542)';
+  return undefined;
+}
+
 export const sameCommit = (a: string | undefined, b: string | undefined) => !!a && !!b && (a.startsWith(b) || b.startsWith(a));
 
 /**
@@ -188,6 +204,19 @@ export async function tick(l: InstanceList, state: State, d: Deps, o: { dryRun?:
   const lead = await d.health(l.leader.url);
   const short = stableTarget(lead, state, d.now(), l.leader.stableMinutes ?? DEFAULTS.stableMinutes);
   const instances = l.instances.filter((i) => i.enabled !== false).map(resolve);
+  // w6603: each listed instance's start-portal.sh, against the one new.ts writes now; logged when it changes, never fixed here.
+  for (const i of l.instances) {
+    const file = path.join(i.dir, 'start-portal.sh');
+    let problem = '';
+    try {
+      problem = fs.existsSync(file) ? (startScriptProblem(fs.readFileSync(file, 'utf8')) ?? '') : '';
+    } catch (e) {
+      problem = `cannot be read: ${(e as Error).message}`;
+    }
+    state.scripts ??= {};
+    if (problem !== (state.scripts[i.name] ?? '')) d.log(`${i.name}: start-portal.sh ${problem ? `${problem} (w6603: scripts/instance/new.ts writes the current one; not changed here)` : 'matches the current one'}`);
+    state.scripts[i.name] = problem;
+  }
   for (const i of instances) {
     try {
       const diff = settingsDiff(JSON.parse(stripBom(fs.readFileSync(i.config, 'utf8'))), i.expect);
