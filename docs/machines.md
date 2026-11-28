@@ -655,6 +655,10 @@ thresholds) and its folders may differ. Each daemon reports, in its hello (probe
   similar; sandboxCacheTrim only as `on`/`off`, its numbers being sizing), each as JSON with paths under its root written
   `<root>`; `unset` when absent. Every other DaemonConfig key is listed in `NON_FEATURE_KEYS`, and a test fails on a new key
   in neither list. The report is taken at each hello (a link that stays up keeps the one from its connect).
+- with the flags, the helpers the installer put outside its root, from root.json's outside list (`installHelpersOf`,
+  machine/installSsh.ts): `install.firewallGroups` (how many Windows Firewall groups firewall.ps1 made; it also writes
+  player-slots.json) and `install.portalSsh` (`yes` when the portal's ssh key is authorized). A PC that joined with the
+  worker join (join.ps1, w1596) has neither by design, so a 0 and a `no` there are drift to decide, not a broken install.
 
 list_machines compares each machine with every other machine of its OS that has a report (an offline one by its last
 report), adding the portal's own sandbox

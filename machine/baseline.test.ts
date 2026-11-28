@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { agentClaude, probeBaseline, toolCommands } from './baseline.ts';
+import { installHelpersOf } from './installSsh.ts';
 import { AGENT_NODE } from '../server/agentNode.ts';
 import { FEATURE_KEYS, NON_FEATURE_KEYS, PINNED_DAEMON_NODE, baselineDrift, daemonNodePinLine, driftLine, featureFlags, flagValue, portalSettings, sanitizeBaseline, versionOf } from '../shared/machineBaseline.ts';
 
@@ -117,4 +119,22 @@ test('w6603: a daemon off its OS pinned node is named, warn only; an OS with no 
 
 test("w6603: the Windows daemon's pin is the agents' pinned node", () => {
   assert.equal(`v${PINNED_DAEMON_NODE.win32}`, AGENT_NODE.version);
+});
+
+test("w6603: the installer's helpers outside the root are reported from root.json, and nothing without one", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), 'w6603-helpers-'));
+  assert.deepEqual(installHelpersOf(root), {});
+  assert.deepEqual(installHelpersOf(undefined), {});
+  const outside = [
+    { kind: 'task', name: 'FFMachineDaemon' },
+    { kind: 'firewall-group', name: 'Final Factory player slots' },
+    { kind: 'firewall-group', name: 'Final Factory agent node' },
+    { kind: 'firewall-group', name: 'Final Factory agent node' },
+    { kind: 'authorized-key', name: 'portal' },
+  ];
+  fs.writeFileSync(path.join(root, 'root.json'), JSON.stringify({ outside }));
+  assert.deepEqual(installHelpersOf(root), { 'install.firewallGroups': '2', 'install.portalSsh': 'yes' });
+  fs.writeFileSync(path.join(root, 'root.json'), JSON.stringify({ outside: [{ kind: 'task', name: 'FFMachineDaemon' }] }));
+  assert.deepEqual(installHelpersOf(root), { 'install.firewallGroups': '0', 'install.portalSsh': 'no' }, 'a join with -NoSsh and no firewall step (w1596)');
+  fs.rmSync(root, { recursive: true, force: true });
 });

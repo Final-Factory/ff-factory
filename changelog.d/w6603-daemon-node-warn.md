@@ -1,1 +1,2 @@
 - list_machines now names a Windows daemon that runs another node than the agents' pinned one (`daemon node 22.17.0, not the pinned 24.22.1`), and the installer's daemon step says so; warn only, nothing moves yet (w6603).
+- The machine baseline also reports how many Windows Firewall groups the installer made and whether the portal's ssh key is authorized, so list_machines names a machine without them (w6603, warn only).
