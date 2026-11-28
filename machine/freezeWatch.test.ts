@@ -127,11 +127,11 @@ const fd = fs.openSync(${JSON.stringify(log)}, 'a');
 startFreezeWatch({ afterMs: 1000, repeatMs: 60_000, exitMs: 3000, fd, beatMs: 50, everyMs: 50 });
 function holdTheLoopFor(ms) { const end = Date.now() + ms; let n = 0; while (Date.now() < end) n++; return n; }
 let prev = Date.now();
-fs.writeSync(fd, 'READY\n');
+fs.writeSync(fd, 'READY\\n');
 const t = setInterval(() => {
   const now = Date.now();
   // Woken: a 2 s job, under exitMs from the wake but far over it from the beat before the stop.
-  if (now - prev > 3000) { clearInterval(t); holdTheLoopFor(2000); fs.writeSync(fd, 'SURVIVED\n'); process.exit(0); }
+  if (now - prev > 3000) { clearInterval(t); holdTheLoopFor(2000); fs.writeSync(fd, 'SURVIVED\\n'); process.exit(0); }
   prev = now;
 }, 100);
 `,
