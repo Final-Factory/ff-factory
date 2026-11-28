@@ -112,8 +112,19 @@ static class FfReadLog
         public long From, Exit;
         // events seen after its process had gone but before its stop: each runs only if stamped before that stop (w6599 CI: the
         // session delivers about a second late, so a short tool has always gone by the time its opens are handled)
-        public readonly List<KeyValuePair<long, Action>> Waiting = new List<KeyValuePair<long, Action>>();
+        public readonly List<Waiter> Waiting = new List<Waiter>();
+        // w6599 CI: a child whose start waits for its parent's own stop (the parent had gone when the start was handled) is held
+        // from its start event on, pending, so its own opens, children and stop, handled before the parent's stop, wait with it;
+        // its parent's verdict confirms it (they run, if its own) or drops it (and they never run)
+        public bool Pending;
         public bool Swept;   // the minute check found it gone once already
+    }
+
+    // an event that waits: Run once it is found to be its process's own, Drop (may be null) once it is found not to be
+    sealed class Waiter
+    {
+        public long Ts;
+        public Action Run, Drop;
     }
 
     static readonly object Gate = new object();
@@ -339,38 +350,81 @@ static class FfReadLog
     // started when e says holds the pid now, so the event is e's. A pid with no running process (or another one) is never
     // trusted on its own: the event waits for e's stop and runs only if stamped before it; with no such stop (lost, or the pid's
     // later holder's stop came instead) it never runs.
-    static void When(uint pid, Entry e, long ts, Action act)
+    static void When(uint pid, Entry e, long ts, Action act, Action drop = null)
     {
         bool live = StartOfFn(pid) == e.Start;
-        Tr("when pid " + pid + " ts " + ts + " from " + e.From + " exit " + e.Exit + " start " + e.Start + " live " + live + " waiting " + e.Waiting.Count);
+        Tr("when pid " + pid + " ts " + ts + " from " + e.From + " exit " + e.Exit + " start " + e.Start + " live " + live + " pending " + e.Pending + " waiting " + e.Waiting.Count);
+        bool run = false;
         lock (Gate)
         {
-            if (ts < e.From) return;
-            if (e.Exit != 0) { if (ts > e.Exit) return; }
-            else if (!live)
+            if (ts < e.From) { }
+            else if (e.Exit != 0 && ts > e.Exit) { }
+            else if (e.Pending || (e.Exit == 0 && !live))
             {
+                // a pending entry's events wait for its parent's verdict, a gone process's for its own stop
                 Entry t;
-                if (Tracked.TryGetValue(pid, out t) && t == e && e.Waiting.Count < MAX_WAITING) e.Waiting.Add(new KeyValuePair<long, Action>(ts, act));
-                return;
+                if (Tracked.TryGetValue(pid, out t) && t == e && e.Waiting.Count < MAX_WAITING)
+                {
+                    e.Waiting.Add(new Waiter { Ts = ts, Run = act, Drop = drop });
+                    return;
+                }
             }
+            else run = true;
         }
-        act();
+        if (run) act();
+        else if (drop != null) drop();
+    }
+
+    // what waited on an entry found not to be its process's own: each told so (a pending child it started is dropped too)
+    static void DropAll(List<Waiter> ws)
+    {
+        foreach (Waiter w in ws) if (w.Drop != null) w.Drop();
     }
 
     // A followed process started a child: followed too, if its start event is its parent's own (When) and the child started at
     // or after the parent. w6734 B4: the child's creation time comes from the event only; the live process on its pid may be a
-    // later holder's, so a start event without one is not followed.
+    // later holder's, so a start event without one is not followed. The child is held pending from the start event on (w6599
+    // CI): when the parent has gone before its child's start is handled, the child's own opens and stop come in before the
+    // parent's stop says whether the start was the parent's, and they must wait on the child rather than be lost.
     static void OnStart(uint child, uint parent, long created, string image, long ts)
     {
         Entry p;
         lock (Gate) if (!Tracked.TryGetValue(parent, out p)) return;
         if (created == 0 || created < p.Start) return;
-        When(parent, p, ts, () =>
+        Entry c = new Entry { Root = p.Root, RootAt = p.RootAt, Start = created, Image = image, From = ts, Pending = true };
+        // a start handled late does not replace a later holder of the child's pid
+        lock (Gate) { Entry old; if (Tracked.TryGetValue(child, out old) && old.From > ts) return; Tracked[child] = c; }
+        When(parent, p, ts, () => Confirm(child, c), () => Reject(child, c));
+    }
+
+    // a pending child's start was its parent's own: it is followed, and what waited on it is judged again as its own events
+    static void Confirm(uint child, Entry c)
+    {
+        List<Waiter> ws;
+        lock (Gate)
         {
-            Entry c = new Entry { Root = p.Root, RootAt = p.RootAt, Start = created, Image = image, From = ts };
-            // a start that waited for its parent's stop does not replace a later holder of the child's pid
-            lock (Gate) { Entry old; if (!Tracked.TryGetValue(child, out old) || old.From <= ts) Tracked[child] = c; }
-        });
+            c.Pending = false;
+            ws = new List<Waiter>(c.Waiting);
+            c.Waiting.Clear();
+        }
+        Tr("confirm " + child + " start " + c.Start + " exit " + c.Exit + " waited " + ws.Count);
+        foreach (Waiter w in ws) When(child, c, w.Ts, w.Run, w.Drop);
+    }
+
+    // a pending child's start was not its parent's own (a later holder of the parent's pid): it is not followed, nor is
+    // anything it started
+    static void Reject(uint child, Entry c)
+    {
+        List<Waiter> ws;
+        lock (Gate)
+        {
+            Entry t;
+            if (Tracked.TryGetValue(child, out t) && t == c) Tracked.Remove(child);
+            ws = new List<Waiter>(c.Waiting);
+            c.Waiting.Clear();
+        }
+        Tr("reject " + child + " start " + c.Start);
+        DropAll(ws);
     }
 
     // A followed pid's stop. Its creation time says whose: the followed process's own stop closes its span, and the events that
@@ -379,19 +433,31 @@ static class FfReadLog
     // started when its host did.
     static void OnStop(uint gone, long created, long ts)
     {
-        List<KeyValuePair<long, Action>> run = new List<KeyValuePair<long, Action>>();
+        List<Waiter> run = new List<Waiter>();
+        List<Waiter> drop = new List<Waiter>();
         lock (Gate)
         {
             Entry e;
             Roots.Remove(gone);
             if (!Tracked.TryGetValue(gone, out e)) return;
-            Tr("stop: entry start " + e.Start + " from " + e.From + " waiting " + e.Waiting.Count);
-            if (created == 0 || created != e.Start || ts < e.From) { Tracked.Remove(gone); e.Waiting.Clear(); return; }
-            e.Exit = ts;
-            foreach (KeyValuePair<long, Action> w in e.Waiting) if (w.Key <= ts) run.Add(w);
-            e.Waiting.Clear();
+            Tr("stop: entry start " + e.Start + " from " + e.From + " pending " + e.Pending + " waiting " + e.Waiting.Count);
+            if (created == 0 || created != e.Start || ts < e.From)
+            {
+                Tracked.Remove(gone);
+                drop.AddRange(e.Waiting);
+                e.Waiting.Clear();
+            }
+            else
+            {
+                e.Exit = ts;
+                foreach (Waiter w in e.Waiting) (w.Ts <= ts ? run : drop).Add(w);
+                e.Waiting.Clear();
+                // a pending entry keeps its events stamped before its stop for its parent's verdict (Confirm runs them)
+                if (e.Pending) { e.Waiting.AddRange(run); run.Clear(); }
+            }
         }
-        foreach (KeyValuePair<long, Action> w in run) w.Value();
+        DropAll(drop);
+        foreach (Waiter w in run) w.Run();
     }
 
     static void OnOpen(uint pid, string path, long ts)
@@ -589,6 +655,7 @@ static class FfReadLog
     static void DropStale()
     {
         List<KeyValuePair<uint, Entry>> all;
+        List<Waiter> gone = new List<Waiter>();
         lock (Gate) all = new List<KeyValuePair<uint, Entry>>(Tracked);
         foreach (KeyValuePair<uint, Entry> t in all)
         {
@@ -600,9 +667,11 @@ static class FfReadLog
                 if (!e.Swept) { e.Swept = true; continue; }
                 Tracked.Remove(t.Key);
                 Roots.Remove(t.Key);
+                gone.AddRange(e.Waiting);
                 e.Waiting.Clear();
             }
         }
+        DropAll(gone);
     }
 
     static long Long(IntPtr rec, IntPtr name)
@@ -640,6 +709,7 @@ static class FfReadLog
         int passed = 0;
         Action<bool, string> check = (ok, what) => { if (ok) passed++; else fails.Add(what); };
         Func<string, bool> said = s => Captured.Exists(l => l.Contains(s));
+        Func<uint, bool> followed = p => Tracked.ContainsKey(p) && !Tracked[p].Pending;
         Command("allow c:\\ffw");
         Command("work c:\\ffw");
 
@@ -661,7 +731,7 @@ static class FfReadLog
         check(!said("secret.txt"), "a person's process holding a lost worker's pid is not reported");
         // and the app's child is not followed through the old entry either
         OnStart(201, 200, T + 600, "C:\\apps\\child.exe", tick());
-        check(!Tracked.ContainsKey(201), "a person's child, started under a reused pid, is not followed");
+        check(!followed(201), "a person's child, started under a reused pid, is not followed");
         // the app's own stop (another creation time) drops the stale entry and what waited for a stop
         exit(200);
         OnStop(200, T + 500, tick());
@@ -733,9 +803,44 @@ static class FfReadLog
         long start311 = tick();
         exit(310);
         OnStart(311, 310, T + 860, "C:\\apps\\tool.exe", start311);
-        check(!Tracked.ContainsKey(311), "a child of an exited parent waits for the parent's stop");
+        check(!followed(311), "a child of an exited parent waits for the parent's stop");
         OnStop(310, T + 850, tick());
-        check(Tracked.ContainsKey(311), "it is followed once the parent's own stop, stamped after the start, is seen");
+        check(followed(311), "it is followed once the parent's own stop, stamped after the start, is seen");
+        exit(311);
+
+        // w6599 CI (Windows tests on 0f25417b): the host's short child (`cmd /c type`, 320) opens a file and exits, and the host
+        // (here a followed parent, 312) exits too, all before the child's start is handled; the child's open and stop come in
+        // before the parent's stop. The open waits on the pending child and is reported once the parent's stop confirms it.
+        run(312, 100, T + 870);
+        OnStart(312, 100, T + 870, "C:\\ffw\\tools\\node.exe", tick());
+        run(320, 312, T + 880);
+        long start320 = tick();
+        long open320 = tick();
+        long stop320 = tick();
+        long stop312 = tick();
+        exit(320);
+        exit(312);
+        OnStart(320, 312, T + 880, "C:\\Windows\\System32\\cmd.exe", start320);
+        OnOpen(320, "C:\\Users\\me\\pending.txt", open320);
+        OnStop(320, T + 880, stop320);
+        check(!said("pending.txt"), "a pending child's open waits for its parent's verdict");
+        OnStop(312, T + 870, stop312);
+        check(said("pending.txt"), "a pending child's open, stamped before its own stop, is reported once its parent's stop confirms it");
+        // and the same order under a later holder of the parent's pid: the child and its open are dropped at that holder's stop
+        run(313, 100, T + 890);
+        OnStart(313, 100, T + 890, "C:\\ffw\\tools\\node.exe", tick());
+        exit(313);
+        run(313, 4, T + 895);
+        run(321, 313, T + 896);
+        long start321 = tick();
+        long open321 = tick();
+        exit(321);
+        exit(313);
+        OnStart(321, 313, T + 896, "C:\\apps\\app.exe", start321);
+        OnOpen(321, "C:\\Users\\me\\holderchild.txt", open321);
+        OnStop(321, T + 896, tick());
+        OnStop(313, T + 895, tick());
+        check(!said("holderchild.txt") && !Tracked.ContainsKey(321), "a pending child of a later holder of its parent's pid is dropped with its open");
 
         // w6734 B4: a start event without a creation time is not followed, even when a process now holds the child's pid
         run(301, 100, T + 900);
