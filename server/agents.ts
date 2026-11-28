@@ -42,7 +42,7 @@ import { inlineReviewMedia, MEDIA_FILE, outsideReview, publishedCopy, reviewRoot
 import { visualAskCheck } from './visualAsk.ts';
 import { ciPushHold } from './savePushHold.ts';
 import { lostLine, lostStands, type LostCheckIn } from '../shared/lostCheckIn.ts';
-import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, offSince, onRequest, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
+import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, othersGates, latestWorker, newestFirst, offSince, onRequest, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
 import { isSamePerson, personForWork, poolOwnerOf, tokenPersonForWork, vaultContext, withPool } from './vault.ts';
 import { ghRunner, githubFromVault, githubPersonOf, githubTokens } from './githubTokens.ts';
 import { clashLine, expectedFiles, type FfuClash, ffuStartClashes, FfuPrReads, peerFilesNote, sharedFilesNote } from './ffuOverlap.ts';
@@ -4592,7 +4592,10 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       // computer away past the grace, else its worker woken again where it is (a wake refused at the agent limit, say).
       const machine = gone ? undefined : this.store.sessions.get(sessionId)?.machineId;
       const route: 'fresh' | 'move' | 'again' = gone ? 'fresh' : machine && this.longAwayOf(machine, now) ? 'move' : 'again';
-      const would = { fresh: "start a fresh worker for it where it fits, with the check-in's note", move: `move it to a computer with room with the check-in's note, as a stopped worker's work is moved off an away computer (w2544)`, again: `wake its worker ${sessionId} again where it is with the check-in's note, or move it if its computer stays away past the grace` }[route];
+      // w6782 (review w6777, N2): a request whose gate holds its worker's resumes (gateHolds) is not woken in place: its
+      // gate's own resume wakes the worker when it clears.
+      const held = route === 'again' && this.gateHolds(w, sessionId) ? gatesName(gatesOf(w), now) : undefined;
+      const would = held ? `leave its worker ${sessionId} to the resume of its gate (${held}), which wakes it when that clears` : { fresh: "start a fresh worker for it where it fits, with the check-in's note", move: `move it to a computer with room with the check-in's note, as a stopped worker's work is moved off an away computer (w2544)`, again: `wake its worker ${sessionId} again where it is with the check-in's note, or move it if its computer stays away past the grace` }[route];
       const on = (this.cfg.lostCheckIns ?? 'on') === 'on';
       const line = on ? `${lostLine(l)} (w6768): FF Factory will ${would} once it can` : `${lostLine(l)}: nothing resumes it (w6768); lostCheckIns is "warn", so nothing moves: "on" would ${would}`;
       console.warn(`lost check-in: ${w.id}: ${line}`);
@@ -4600,7 +4603,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
         x.lostCheckIn = l;
       });
       const how = { fresh: 'start a worker for it with start_agent (an agent slot is enough unless its brief needs more)', move: `stop_agent its worker ${sessionId} with move_to a computer with room`, again: `message_agent its worker ${sessionId}` }[route];
-      const act = on
+      const act = held && on
+        ? `FF Factory does not wake its worker ${sessionId} in place: ${w.id} is held on ${held}, whose resume wakes it when that clears (lostCheckIns "on"). Only if it still reads Stalled once that clears, ${how}, passing its note: "${l.note.slice(0, 600) || '(none)'}".`
+        : on
         ? `FF Factory ${{ fresh: 'starts a fresh worker for it', move: 'moves it off that computer', again: `wakes its worker ${sessionId} again where it is` }[route]} by itself, with the check-in's note, ${route === 'again' ? 'as soon as it can be woken' : 'as soon as a computer has room'} (lostCheckIns "on"). Only if it still reads Stalled for this in 15 min, ${how}, passing its note: "${l.note.slice(0, 600) || '(none)'}".`
         : `${how[0].toUpperCase()}${how.slice(1)}, passing its note: "${l.note.slice(0, 600) || '(none)'}".`;
       this.orchestrators.toDispatcher(
@@ -4819,12 +4824,26 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * with its lost check-in's note, as its wake would have. Its computer offline within the grace waits; a wake refused (the
    * agent limit, its computer's hold) is tried again after 10 min. Its next turn ends the lost check-in.
    */
+  /**
+   * w6782 (review w6777, N1): whether request `w`'s gates hold a resume of worker `sid` (staleResume keeps it in heldCheckIns
+   * until they clear): blocked or on a question with a gate left, and not only on other live workers' gates (w2153).
+   */
+  private gateHolds(w: WorkItem, sid: string): boolean {
+    if (!w.blocked || (w.status !== 'blocked' && w.status !== 'question')) return false;
+    const gates = gatesOf(w);
+    return !(gates.length > 0 && othersGates(w, sid).length === gates.length);
+  }
+
   private wakeLost(w: WorkItem, l: LostCheckIn, info: SessionInfo, now: number): { did: string } | undefined {
     if (info.machineId && !this.machines.isOnline(info.machineId)) return undefined;
-    // Not for a request blocked or waiting on a person (review w6776, R1): its gate's own resume wakes the worker for it,
-    // and a wake sent for it is held there (staleResume) without reaching the worker, which would use up the once-only
-    // wake below for the worker's other, active request.
-    if (w.status === 'blocked' || w.status === 'question') return undefined;
+    // Not for a request whose gate holds the worker's resumes (review w6776, R1; w6782, review w6777 N1: staleResume's own
+    // condition): its gate's resume wakes the worker for it, and a wake sent for it is held there without reaching the
+    // worker, which would use up the once-only wake below for the worker's other, active request. A request blocked only
+    // on another live worker's gate (a pair run's other leg), or with no gate left, is woken in place.
+    if (this.gateHolds(w, info.id)) return undefined;
+    // w6782 (review w6777, N3): a message already waiting for it (a gate's resume held for room, say) wakes it; one sent now
+    // would queue behind it and be delivered as a second turn. Tried again on a later pass while the lost check-in stands.
+    if (this.sessions.queued().some((q) => q.id === info.id)) return undefined;
     // Keyed by the worker, not the request (review w6775, B1): a worker on two open requests holds the same lost check-in on
     // each, and is woken once for both. In memory only: a portal restart while a send is held could send it once more.
     const key = `${info.id}@${l.due}`;

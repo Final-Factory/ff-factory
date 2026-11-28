@@ -594,3 +594,61 @@ test("w6774 (review w6776, R1): a blocked request listed first does not use up t
   assert.equal(sent.length, 1);
   assert.equal(starts.length, 0);
 });
+
+// ---------------------------------------------------------------- w6782: the non-blocking nits of review w6777
+
+async function wakeSetup(t: Parameters<typeof moveSetup>[0]) {
+  const s = await moveSetup(t);
+  const sent: string[] = [];
+  (s.agents as unknown as Sender).sessions.send = (id, text) => {
+    sent.push(`${id}: ${text}`);
+    return 'u1';
+  };
+  s.store.putSession(worker('dddd4444', { machineId: 'lothdesktop', machineSandbox: 'slot1' }));
+  return { ...s, sent };
+}
+const WOKEN = 'its worker dddd4444 woken again where it is for its lost check-in (w6774)';
+
+test('w6782 (N1): a request blocked only on a pair run\'s other leg is woken in place', async (t) => {
+  const { store, agents, request, sent } = await wakeSetup(t);
+  store.putSession(worker('ffff6666', { machineId: 'm3', machineSandbox: 'slot1' }));
+  const at = new Date(Date.now() - MIN).toISOString();
+  request({ id: 'w6500', sessionIds: ['ffff6666', 'dddd4444'], status: 'blocked', blocked: { kind: 'request', ref: 'w6499', on: 'report', what: "the other leg's report", at, by: 'worker ffff6666' } as never });
+  assert.deepEqual(agents.lostCheckIn('dddd4444', { at: Date.now() - MIN, note: 'x' }, 'could not be woken (at the agent limit)'), ['w6500']);
+  assert.deepEqual(agents.moveAwayWork(Date.now()), [['w6500', WOKEN]]);
+  assert.equal(sent.length, 1);
+});
+
+test('w6782 (N1): a request "blocked" with no gate left is woken in place', async (t) => {
+  const { agents, request, sent } = await wakeSetup(t);
+  request({ id: 'w6501', sessionIds: ['dddd4444'], status: 'blocked' });
+  agents.lostCheckIn('dddd4444', { at: Date.now() - MIN, note: 'y' }, 'could not be woken (at the agent limit)');
+  assert.deepEqual(agents.moveAwayWork(Date.now()), [['w6501', WOKEN]]);
+  assert.equal(sent.length, 1);
+});
+
+test("w6782 (N2): a blocked request's dispatcher line does not name the in-place wake", async (t) => {
+  const { agents, request, told, sent } = await wakeSetup(t);
+  const at = new Date(Date.now() - MIN).toISOString();
+  request({ id: 'w6500', sessionIds: ['dddd4444'], status: 'blocked', blocked: { kind: 'pr', ref: 'Final-Factory/ff-factory#1', what: 'PR #1 merging', at, by: 'worker dddd4444' } as never });
+  agents.lostCheckIn('dddd4444', { at: Date.now() - MIN, note: 'x' }, 'could not be woken (at the agent limit)');
+  assert.match(told[0]!, /FF Factory does not wake its worker dddd4444 in place: w6500 is held on .*whose resume wakes it when that clears/);
+  assert.doesNotMatch(told[0]!, /wakes its worker dddd4444 again where it is/);
+  assert.deepEqual(agents.moveAwayWork(Date.now()), []);
+  assert.equal(sent.length, 0);
+});
+
+test('w6782 (N3): no in-place wake while a message already waits for the worker; it goes once the queue is clear', async (t) => {
+  const { agents, request, sent } = await wakeSetup(t);
+  const x = (agents as unknown as { sessions: { queued: () => { id: string }[] } }).sessions;
+  let waiting = [{ id: 'dddd4444' }];
+  x.queued = () => waiting;
+  request({ id: 'w6500', sessionIds: ['dddd4444'] });
+  agents.lostCheckIn('dddd4444', { at: Date.now() - MIN, note: 'x' }, 'could not be woken (at the agent limit)');
+  const now = Date.now();
+  assert.deepEqual(agents.moveAwayWork(now), []);
+  assert.equal(sent.length, 0, 'a gate resume held for room wakes it: nothing queued behind it');
+  waiting = [];
+  assert.deepEqual(agents.moveAwayWork(now + MIN), [['w6500', WOKEN]], 'not stamped as tried: goes on the next pass');
+  assert.equal(sent.length, 1);
+});
