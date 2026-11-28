@@ -1122,6 +1122,77 @@ test('w6451: the queue re-check forgets runs that are no longer queued and marke
   assert.deepEqual(asked, ['ac80d7b0']);
 });
 
+// w6680 (for lothsahn): w6678, a pair run of A at the pre-1.0 tip dc4643b4c2 and B at PR #4463's head 718a14689a, kept its
+// pre-w5297 mark because its legacy_data named dc4643b4c2 and only the pair's commit 718a14689a was read; both carry the
+// FF_GAME_DATA_DIR backport (w6679), so the run waited for a Medium-integrity computer none had. The mark and words are w6678's.
+const W6680_A = 'dc4643b4c204739e37b9cb024446053598441c7f';
+const W6680_B = '718a14689a4e05d4b23f391f9bddd5e4e45db3e4';
+const W6680_MARK = 'run A is a pre-1.0 player at dc4643b4c2 (0.50.0.120), which predates w5297; its legacy_data names commit dc4643b4c2, but FF Factory checked only 718a14689a for the FF_GAME_DATA_DIR backport, so the mark stays (w6235)';
+const W6680_BRIEF = `For w6673: the pre-1.0 port. A) origin/pre-1.0 at ${W6680_A}, without the fix. B) the PR head ${W6680_B}, with the fix. Both runs: python scripts/nightly/ffnightly.py run --sha <that commit> --scenarios-from ${W6680_B} --no-retry.`;
+const w6680Reads = (lacks: string[], asked: string[]) => (c: string): Promise<DataDirVerdict> => {
+  asked.push(c);
+  const full = [W6680_A, W6680_B].find((k) => k.startsWith(c));
+  return Promise.resolve(!full ? { reads: false, checked: false, why: `GitHub knows no commit ${c.slice(0, 10)}` }
+    : lacks.includes(full) ? { reads: false, checked: true, why: `Assets/Scripts/FFCore/GameData/GameDataPaths.cs at ${full.slice(0, 10)} does not read FF_GAME_DATA_DIR: it predates the backport (game PR #4357; w6189)` }
+    : { reads: true, commit: full });
+};
+const w6680Run = (id: string) => ({ id, by: LOTH, status: 'queued' as const, queuedFor: { at: T0 }, title: 'Pair run for w6673: MP-W6673-guardian-midfight-join, red on pre-1.0 vs green on PR #4463', brief: `${W6680_BRIEF}\n\nFF Factory filed this for worker d2f77c4f on w6673 (w1945, request_pair): a pair run of 1 leg.`, pair: { legs: 1, legacyData: W6680_MARK, commit: W6680_B } });
+
+test('w6680: the queue re-check and start_agent read every player commit of a two-commit pair, and clear it when both have the backport', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, dispatcher, call, machines } = env;
+  const asked: string[] = [];
+  agents.gameDataDirAt = w6680Reads([], asked);
+  putRequests(store, [w6680Run('w6678'), w6680Run('w6681')]);
+  // w6678 queued with the stale mark: the minute re-check reads dc4643b4c2 as well as the pair's own 718a14689a, and clears it.
+  assert.deepEqual(await agents.recheckLegacyPairs(Date.parse(T0)), ['w6678', 'w6681']);
+  const w = store.work.get('w6678')!;
+  assert.equal(w.pair?.legacyData, undefined);
+  assert.match(w.pair?.dataDirChecked ?? '', /^its players at 718a14689a and dc4643b4c2 all read FF_GAME_DATA_DIR/);
+  assert.ok(w.log.some((l) => /the queue re-check: its players at 718a14689a and dc4643b4c2 all read FF_GAME_DATA_DIR/.test(l)), w.log.join('\n'));
+  assert.ok(asked.some((c) => W6680_A.startsWith(c)), `the non-head commit was read: ${asked.join(', ')}`);
+  // Placement then lets its leg on a fenced (Low-integrity) Windows sandbox; start_agent agrees on a fresh marked copy.
+  assert.equal(unfitWhy(w, 'pc', { pc: { platform: 'win32', fence: 'on', agentIntegrity: 'low' } }), undefined);
+  for (const id of ['w6678', 'w6681']) store.work.get(id)!.status = 'done';
+  putRequests(store, [w6680Run('w6682')]);
+  machines.update('pc', { platform: 'win32', fence: { state: 'on', kind: 'low', agentIntegrity: 'low' } });
+  const r = await call(dispatcher().info, 'start_agent', { work_id: 'w6682', prompt: 'Run the pair.', title: 'pair', sandbox: 'pc/alpha' });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(store.work.get('w6682')!.pair?.legacyData, undefined);
+});
+
+test('w6680: a two-commit pair where one commit lacks the backport keeps the mark at the re-check, start_agent and request_pair', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, dispatcher, call, machines } = env;
+  agentsRoom(agents, []);
+  const asked: string[] = [];
+  agents.gameDataDirAt = w6680Reads([W6680_A], asked);
+  putRequests(store, [w6680Run('w6683'), w6680Run('w6684'), { id: 'w6685', by: LOTH }]);
+  assert.deepEqual(await agents.recheckLegacyPairs(Date.parse(T0)), []);
+  assert.equal(store.work.get('w6683')!.pair?.legacyData, W6680_MARK, 'the head reads it, but A does not: the mark stays');
+  assert.ok(asked.some((c) => W6680_A.startsWith(c)), `A was read: ${asked.join(', ')}`);
+  machines.update('pc', { platform: 'win32', fence: { state: 'on', kind: 'low', agentIntegrity: 'low' } });
+  const r = await call(dispatcher().info, 'start_agent', { work_id: 'w6684', prompt: 'Run the pair.', title: 'pair', sandbox: 'pc/alpha' });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /leg 1 \(the host\) on pc\/alpha: pc: its sandbox agents were measured at Low integrity/);
+  const s = await startedFor(env, 'w6685');
+  const before = store.work.size;
+  await assert.rejects(
+    async () => s.h.request_pair!({ what: 'MP-W6673-guardian-midfight-join, red on pre-1.0 vs green on PR #4463', brief: W6680_BRIEF, commit: W6680_B, legacy_data: 'run A is a pre-1.0 player at dc4643b4c2 (0.50.0.120), which predates w5297' }),
+    /^Error: Nothing filed: no computer fits a pair run of a pre-w5297 player \(run A is .*GameDataPaths\.cs at dc4643b4c2 does not read FF_GAME_DATA_DIR.*one of the 2 player commits the run names \(718a14689a, dc4643b4c2\)/,
+  );
+  assert.equal(store.work.size, before, 'nothing filed');
+  // Both with the backport: request_pair files it unmarked, naming both commits (the queued copies dropped first, since a
+  // pair run of the same PR and commit answers a new filing).
+  for (const id of ['w6683', 'w6684']) store.work.delete(id);
+  agents.gameDataDirAt = w6680Reads([], asked);
+  const out = String(await s.h.request_pair!({ what: 'MP-W6673-guardian-midfight-join, red on pre-1.0 vs green on PR #4463', brief: W6680_BRIEF, commit: W6680_B, legacy_data: 'run A is a pre-1.0 player at dc4643b4c2 (0.50.0.120), which predates w5297' }));
+  const p = store.work.get(/^Filed (w\d+)/.exec(out)?.[1] ?? '')!;
+  assert.ok(p, out);
+  assert.equal(p.pair?.legacyData, undefined);
+  assert.match(out, /Not a pre-w5297 run: its players at 718a14689a and dc4643b4c2 all read FF_GAME_DATA_DIR/);
+});
+
 test('w6451: pairAskWords keeps the worker\'s own words of a filed pair run', () => {
   assert.deepEqual(pairAskWords({ title: 'Pair run for w12: MP check', brief: `Run it.${PAIR_FILED_BY}e425e43b on w12.` }), { what: 'MP check', brief: 'Run it.' });
 });

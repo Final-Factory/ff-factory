@@ -133,7 +133,7 @@ import { RELEASE_RULES } from './releaseLanes.ts';
 import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
 import { steamLabel, steamLacks } from '../shared/steam.ts';
 import { desktopLabel, desktopLacks, linuxLockWarn, needsWindow, pairDrivesMenus, saysNone, screenUnlockAskProblem, windowLacks } from '../shared/desktop.ts';
-import { dataDirClearedText, gameCommitAt, otherPlayerInWords, pairAskWords, gameDataDirAt, type CommitVerdict, type DataDirVerdict } from './gameDataDir.ts';
+import { dataDirClearedText, gameCommitAt, pairAskWords, pairDataDirAt, gameDataDirAt, type CommitVerdict, type DataDirVerdict, type PairDataDirVerdict } from './gameDataDir.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
 import { TITLE_HELP, TITLE_MAX, jobTitle } from './jobTitle.ts';
@@ -2343,17 +2343,16 @@ export class Agents {
    * w6189: the data-folder verdict for a request_pair call that its words or legacy_data would mark pre-w5297, or undefined
    * when nothing would mark it (no GitHub call) or no commit is known (filePair then keeps the refusal and says so).
    */
-  private async pairDataDir(a: Record<string, unknown>, player: PairPlayer | undefined): Promise<DataDirVerdict | undefined> {
+  private async pairDataDir(a: Record<string, unknown>, player: PairPlayer | undefined): Promise<PairDataDirVerdict | undefined> {
     const said = typeof a.legacy_data === 'string' ? a.legacy_data.trim() : '';
     if (saysNone(said)) return undefined;
-    if (!said && !mentionsLegacyPlayer(typeof a.what === 'string' ? a.what : '', typeof a.brief === 'string' ? a.brief : '')) return undefined;
+    const what = typeof a.what === 'string' ? a.what : '';
+    const brief = typeof a.brief === 'string' ? a.brief : '';
+    if (!said && !mentionsLegacyPlayer(what, brief)) return undefined;
     const commit = (typeof a.commit === 'string' ? a.commit.trim().toLowerCase() : '') || player?.key.slice(0, 40);
     if (!commit || !/^[0-9a-f]{7,40}$/.test(commit)) return undefined;
-    try {
-      return await this.gameDataDirAt(commit);
-    } catch (e) {
-      return { reads: false, checked: false, why: `FF Factory could not check ${commit.slice(0, 10)} for the FF_GAME_DATA_DIR backport (${clip((e as Error).message, 160)}; w6189)` };
-    }
+    // w6680: every player commit the run names (its A/B shas, legacy_data's), not only `commit`.
+    return pairDataDirAt(this.gameDataDirAt, commit, said, what, brief, { readFirst: true });
   }
 
   /**
@@ -2366,13 +2365,14 @@ export class Agents {
     if (!w.pair?.legacyData || !commit) return false;
     // w6451: the run's own what and brief too, for a run marked from them before request_pair kept their reason in the mark.
     const own = pairAskWords(w);
-    if (otherPlayerInWords(commit, w.pair.legacyData, own.what, own.brief)) return false;
-    const v = await this.gameDataDirAt(commit).catch((): undefined => undefined);
-    if (!v?.reads || !sameCommit(v.commit, commit)) return false;
+    // w6680: every player commit the run names is read (w6678: A at dc4643b4c2, B at 718a14689a, and only the second was);
+    // the mark goes only when each one reads FF_GAME_DATA_DIR, and any build named without a commit keeps it.
+    const v = await pairDataDirAt(this.gameDataDirAt, commit, w.pair.legacyData, own.what, own.brief);
+    if (!v.reads || !sameCommit(v.commit, commit)) return false;
     // The read awaited GitHub: act on the request as it is now, and only while it is still marked for that same commit.
     const now = this.store.work.get(w.id) ?? w;
     if (!now.pair?.legacyData || now.pair.commit !== commit) return false;
-    const cleared = dataDirClearedText(v.commit);
+    const cleared = dataDirClearedText(v.commit, v.commits.slice(1));
     const { legacyData: was, ...rest } = now.pair;
     now.pair = { ...rest, dataDirChecked: cleared };
     now.log = [...now.log, logLine(new Date(), `${by}: ${cleared}; it was marked "${clip(was ?? '', 120)}"`)].slice(-40);

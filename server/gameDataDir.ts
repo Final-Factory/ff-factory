@@ -73,25 +73,108 @@ export async function gameDataDirAt(gh: Runner, repo: string, commit: string): P
   return v;
 }
 
-/** What a pair run says once its commit was found to read FF_GAME_DATA_DIR (WorkPair.dataDirChecked). */
-export const dataDirClearedText = (commit: string): string =>
-  `its player at ${commit.slice(0, 10)} reads FF_GAME_DATA_DIR (${GAME_DATA_PATHS}, the backport of game PR #4357), so it is not a pre-w5297 player and its legs may go where sandbox agents measure Low (w6189)`;
+/**
+ * The commits a check read (DataDirVerdict, plus every other player commit a pair run names: PairDataDirVerdict.commits).
+ * w6680: a pair run's verdict covers each commit in it, the pair's own first.
+ */
+export type PairDataDirVerdict = { reads: true; commit: string; commits: string[] } | { reads: false; checked: boolean; why: string };
+
+/** What a pair run says once its commit (and, w6680, every other player commit it names) was found to read FF_GAME_DATA_DIR (WorkPair.dataDirChecked). */
+export const dataDirClearedText = (commit: string, others: readonly string[] = []): string => {
+  const rest = others.filter((o) => !covers([commit], o));
+  return rest.length
+    ? `its players at ${[commit, ...rest].map((c) => c.slice(0, 10)).join(' and ')} all read FF_GAME_DATA_DIR (${GAME_DATA_PATHS}, the backport of game PR #4357, read at each commit; w6680), so it is not a pre-w5297 run and its legs may go where sandbox agents measure Low (w6189)`
+    : `its player at ${commit.slice(0, 10)} reads FF_GAME_DATA_DIR (${GAME_DATA_PATHS}, the backport of game PR #4357), so it is not a pre-w5297 player and its legs may go where sandbox agents measure Low (w6189)`;
+};
+
+/** A sha as otherPlayerIn reads one: a hex word of 7 to 40 characters with a digit in it. */
+const SHA_WORD = /\b[0-9a-f]{7,40}\b/gi;
+const isSha = (h: string) => /\d/.test(h);
+const covers = (checked: readonly string[], h: string) => {
+  const x = h.toLowerCase();
+  return checked.some((c0) => { const c = c0.toLowerCase(); return x.startsWith(c) || c.startsWith(x); });
+};
+
+/**
+ * w6680: a 0.50.x.y version written in parentheses right after a sha that was read, "dc4643b4c2 (0.50.0.120)", is that
+ * commit's version, not another build: w6678's legacy_data said "run A is a pre-1.0 player at dc4643b4c2 (0.50.0.120)".
+ * Only that shape; "ac80d7b0 is 0.50.0.47" or "Steam 0.50.0.47" still name a build no commit is.
+ */
+const versionOfChecked = (said: string, at: number, checked: readonly string[]): boolean => {
+  const m = /\b([0-9a-f]{7,40})\s*\(\s*v?$/i.exec(said.slice(Math.max(0, at - 60), at));
+  return !!m && isSha(m[1]) && covers(checked, m[1]);
+};
 
 /**
  * w6235 (w6192's review of PR #1402): the check reads only the pair's `commit`, but a pair run can run more than one player
  * (pairCommitsOf), and a worker's legacy_data may be about another one: "the host runs the Steam pre-1.0 0.50.0.47 build"
  * while `commit` is the PR head checked against it. Such words keep the mark. A sha is a hex word of 7 to 40 characters with
  * a digit in it (so English words such as "acceded" are none); one that is `commit` (either a prefix of the other) is the
- * checked player. Any 0.50.x.y version is a build, not a commit, so nothing here checked it. Answers why, or undefined.
+ * checked player. w6680: `checked` lists every commit that was read (pairDataDirAt reads each sha the run names); a sha in
+ * it is a checked player too. Any 0.50.x.y version is a build, not a commit, so nothing here checked it, except one written
+ * as a checked sha's version (versionOfChecked). Answers why, or undefined.
  */
-export function otherPlayerIn(said: string, commit: string, where = 'legacy_data'): string | undefined {
+export function otherPlayerIn(said: string, commit: string, where = 'legacy_data', checked: readonly string[] = [commit]): string | undefined {
   const c = commit.toLowerCase();
-  const sha = (said.match(/\b[0-9a-f]{7,40}\b/gi) ?? []).find((h) => /\d/.test(h) && !(h.toLowerCase().startsWith(c) || c.startsWith(h.toLowerCase())));
-  const version = /\b0\.50\.\d+\.\d+\b/.exec(said)?.[0];
+  const read = checked.length ? checked : [commit];
+  const sha = (said.match(SHA_WORD) ?? []).find((h) => isSha(h) && !covers(read, h) && !(h.toLowerCase().startsWith(c) || c.startsWith(h.toLowerCase())));
+  const version = [...said.matchAll(/\b0\.50\.\d+\.\d+\b/g)].find((m) => !versionOfChecked(said, m.index, read))?.[0];
   const installed = sha || version ? undefined : installedBuildIn(said);
   if (!sha && !version && !installed) return undefined;
   const named = sha ? `commit ${sha.slice(0, 10)}` : version ? `build ${version}` : `a build no commit is ("${clip(installed!.replace(/\s+/g, ' '), 60)}")`;
-  return `its ${where} names ${named}, but FF Factory checked only ${c.slice(0, 10)} for the FF_GAME_DATA_DIR backport, so the mark stays (w6235)`;
+  const which = read.length > 1 ? read.map((x) => x.slice(0, 10)).join(' and ') : c.slice(0, 10);
+  return `its ${where} names ${named}, but FF Factory checked only ${which} for the FF_GAME_DATA_DIR backport, so the mark stays (w6235)`;
+}
+
+/**
+ * w6680: every player commit a pair run names, the pair's own `commit` first: each sha in its legacy_data, what and brief
+ * (the A/B commits of a brief, legacy_data's commit, the --scenarios-from head), once each (a short sha and its full id are
+ * one). w6678 ran A at dc4643b4c2 and B at 718a14689a, and only 718a14689a was read.
+ */
+export function pairPlayerShas(commit: string, words: readonly string[]): string[] {
+  const out: string[] = [commit.toLowerCase()];
+  for (const w of words) {
+    for (const h of w.match(SHA_WORD) ?? []) {
+      if (!isSha(h)) continue;
+      const x = h.toLowerCase();
+      const i = out.findIndex((o) => o.startsWith(x) || x.startsWith(o));
+      if (i < 0) out.push(x);
+      else if (x.length > out[i].length && i > 0) out[i] = x;
+    }
+  }
+  return out;
+}
+
+/** w6680: at most this many commits are read for one pair run; a run that names more keeps its mark. */
+export const PAIR_COMMITS_MAX = 8;
+
+/**
+ * w6680: does every player a pair run names read FF_GAME_DATA_DIR? Each commit pairPlayerShas finds is read through `read`
+ * (gameDataDirAt); the mark is cleared only when every one positively reads it. It fails closed: any commit that lacks the
+ * backport or cannot be read, a verdict for another commit, a 0.50.x.y build or a Steam or installed player named (no commit
+ * to read), or more than PAIR_COMMITS_MAX commits, answers reads false with the reason.
+ */
+export async function pairDataDirAt(read: (commit: string) => Promise<DataDirVerdict>, commit: string, legacy: string, what: string, brief: string, o: { readFirst?: boolean } = {}): Promise<PairDataDirVerdict> {
+  const shas = pairPlayerShas(commit, [legacy, what, brief]);
+  const build = otherPlayerInWords(commit, legacy, what, brief, shas);
+  // The queue's re-check asks GitHub nothing for a run that names a build (w6235); request_pair (readFirst) reads the commits
+  // first, so its refusal leads with what the commits say and filePair adds the build after it (w6451).
+  if (build && !o.readFirst) return { reads: false, checked: false, why: build };
+  if (shas.length > PAIR_COMMITS_MAX) return { reads: false, checked: false, why: `it names ${shas.length} commits, more than the ${PAIR_COMMITS_MAX} FF Factory reads for the FF_GAME_DATA_DIR backport, so the mark stays (w6680)` };
+  const fulls: string[] = [];
+  for (const sha of shas) {
+    let v: DataDirVerdict;
+    try {
+      v = await read(sha);
+    } catch (e) {
+      return { reads: false, checked: false, why: `FF Factory could not check ${sha.slice(0, 10)} for the FF_GAME_DATA_DIR backport (${clip((e as Error).message, 160)}; w6189)` };
+    }
+    if (!v.reads) return shas.length > 1 ? { ...v, why: `${v.why}; it is one of the ${shas.length} player commits the run names (${shas.map((x) => x.slice(0, 10)).join(', ')}), so the mark stays (w6680)` } : v;
+    if (!covers([v.commit], sha)) return { reads: false, checked: false, why: `FF Factory's check answered for ${v.commit.slice(0, 10)}, not ${sha.slice(0, 10)}, so ${sha.slice(0, 10)} was not checked for the FF_GAME_DATA_DIR backport (w6235)` };
+    fulls.push(v.commit);
+  }
+  if (build) return { reads: false, checked: false, why: build };
+  return { reads: true, commit: fulls[0], commits: fulls };
 }
 
 /**
@@ -167,8 +250,8 @@ export function installedBuildIn(said: string): string | undefined {
  * may name the other player ("the host runs Steam 0.50.0.47") with legacy_data empty. The first such reason in legacy_data,
  * what or brief, in that order, or undefined. `legacy` "none" (saysNone) is passed by the caller as ''.
  */
-export const otherPlayerInWords = (commit: string, legacy: string, what: string, brief: string): string | undefined =>
-  (legacy ? otherPlayerIn(legacy, commit) : undefined) ?? otherPlayerIn(what, commit, 'what') ?? otherPlayerIn(brief, commit, 'brief');
+export const otherPlayerInWords = (commit: string, legacy: string, what: string, brief: string, checked: readonly string[] = [commit]): string | undefined =>
+  (legacy ? otherPlayerIn(legacy, commit, 'legacy_data', checked) : undefined) ?? otherPlayerIn(what, commit, 'what', checked) ?? otherPlayerIn(brief, commit, 'brief', checked);
 
 /** What newPair puts after the worker's own brief in a pair run's brief: the words that follow are FF Factory's, not the worker's. */
 export const PAIR_FILED_BY = '\n\nFF Factory filed this for worker ';
