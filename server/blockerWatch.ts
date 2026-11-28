@@ -438,7 +438,12 @@ export class BlockerWatch {
       // A Steam pair run on a fleet short of computers signed in to Steam (w2459): Blocked on that, not Queued.
       for (const id of this.d.orchestrators.holdSteamPairs?.() ?? []) did.set(id, 'blocked: too few computers signed in to Steam for its pair run (w2459)');
       // w6687 stage 1: machine exclusions that cite no live hold, config rule, capability or person's words are logged, not dropped.
-      for (const id of this.d.orchestrators.auditExclusions?.() ?? []) did.set(id, 'logged: an exclusion enforcing would drop (w6687, warn-only)');
+      // Its own catch (w6697 review): a throw in the audit must not skip the pair cut and the room flag below.
+      try {
+        for (const id of this.d.orchestrators.auditExclusions?.() ?? []) did.set(id, 'logged: an exclusion enforcing would drop (w6687, warn-only)');
+      } catch (e) {
+        console.warn(`blocker watch: exclusion audit (w6687): ${(e as Error).message}`);
+      }
       // w4618: a Queued pair run that one computer runs (no reason to need computers at once) is cut to one leg, once.
       for (const id of this.d.orchestrators.cutDefaultPairs?.() ?? []) did.set(id, 'cut to one leg: a pair run with no reason to need computers at once (w4618)');
       // Queued with room (w643): the same room test the page and decide_work queue read, for game work and for agent-slot work (w1098).
