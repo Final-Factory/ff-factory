@@ -16,7 +16,7 @@ server/machineSandboxesLife.test.ts | server/proc.ts, machine/sandboxes.ts | git
 server/machineSandboxesTrim.test.ts | server/proc.ts, machine/sandboxes.ts | git worktrees copied with robocopy and removed with rd on NTFS
 server/copyTree.test.ts | server/proc.ts | copyTree's robocopy /XD and Copy-Item branches
 server/hostWatch.test.ts | machine/hostWatch.ts | taskkill /T /F, and Windows locking a live process's folder
-server/readLog.test.ts | machine/readLog.ts, machine/winReadLog.cs | the worker read log's ETW helper for real (w6599): built with Add-Type, a real-time Kernel-File session as an administrator, and a file a host's child opens outside the allowlist reported with its program
+server/readLog.test.ts | machine/readLog.ts, machine/winReadLog.cs | the worker read log's ETW helper for real (w6599): its pid rules against a made-up process table (--selftest, w6728); built with Add-Type, a real-time Kernel-File session as an administrator, and a file a host's child opens outside the allowlist reported with its program
 server/workerCaps.test.ts | machine/workerCaps.ts, machine/winJob.cs | the worker caps' job object for real (w5554): the helper built with Add-Type, a fork bomb refused past its active-process limit and a commit past its memory limit, and its tools ended while the host and its claude go on
 server/unityReaper.test.ts | machine/unityReaper.ts | the process list from CIM
 server/leftovers.test.ts | machine/leftovers.ts | another process's environment block read through Windows PowerShell 5.1 (Add-Type, the PEB): whose worker started it; the ff-leftovers shim under Git Bash, whose fork+exec breaks the Windows parent chain (w1222)

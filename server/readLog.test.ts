@@ -3,13 +3,13 @@
 // member of Administrators or Performance Log Users.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { READ_LOG_SESSION, ReadLog, folderOf, readAllowWin, readLogModeOf } from '../machine/readLog.ts';
+import { READ_LOG_LINES_A_DAY, READ_LOG_SESSION, ReadLog, folderOf, readAllowWin, readLogModeOf } from '../machine/readLog.ts';
 import { csHelper } from '../machine/workerCaps.ts';
 
 const ENV = { SystemRoot: 'C:\\Windows', ProgramFiles: 'C:\\Program Files', 'ProgramFiles(x86)': 'C:\\Program Files (x86)', ProgramData: 'C:\\ProgramData' };
@@ -52,7 +52,7 @@ test('w6599: the daemon sends the allowlist and the live hosts, writes each read
   const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'readlog-'));
   const f = fakeHelper();
   const lines: string[] = [];
-  let hosts = [{ session: 'sess-1', pid: 100, sandbox: 'agent5' }];
+  let hosts: { session: string; pid: number; startedAt?: number; sandbox: string }[] = [{ session: 'sess-1', pid: 100, startedAt: 1000, sandbox: 'agent5' }, { session: 'no-record', pid: 70, sandbox: 'x' }];
   const started: string[][] = [];
   const r = new ReadLog({
     appDir, root: 'F:\\ffw', mode: 'warn', platform: 'win32', env: ENV, hosts: () => hosts, log: (l) => lines.push(l),
@@ -65,29 +65,34 @@ test('w6599: the daemon sends the allowlist and the live hosts, writes each read
   assert.deepEqual(started, [['ffreadlog.exe', READ_LOG_SESSION]]);
   assert.ok(f.sent.includes('work F:\\ffw'), 'the work folder, for telling a worker\'s orphaned Low process from a person\'s app (w6715)');
   assert.ok(f.sent.includes('allow F:\\ffw') &&f.sent.includes('exact C:\\') && f.sent.includes('allow C:\\ProgramData'));
-  assert.equal(f.sent.at(-1), 'roots 100');
+  assert.equal(f.sent.at(-1), 'roots 100:1000', 'each host with the start time its record gives; one with no start time is not sent (w6728)');
   r.tick();
   await flush();
   assert.equal(f.sent.filter((l) => l.startsWith('roots')).length, 1, 'unchanged hosts are not sent again');
-  hosts = [...hosts, { session: 'sess-2', pid: 50, sandbox: 'slot1' }];
+  hosts = [...hosts, { session: 'sess-2', pid: 50, startedAt: 2000, sandbox: 'slot1' }];
   r.tick();
   await flush();
-  assert.equal(f.sent.at(-1), 'roots 50 100');
+  assert.equal(f.sent.at(-1), 'roots 100:1000 50:2000');
 
   f.say({ event: 'ready' });
-  f.say({ event: 'read', root: 100, pid: 101, image: 'F:\\ffw\\tools\\git\\usr\\bin\\cat.exe', path: 'C:\\Users\\rydin\\.ssh\\config' });
-  f.say({ event: 'read', root: 100, pid: 101, image: 'F:\\ffw\\tools\\git\\usr\\bin\\cat.exe', path: 'C:\\Users\\rydin\\.ssh\\known_hosts' });
-  f.say({ event: 'read', root: 50, pid: 51, image: 'C:\\x\\node.exe', path: 'C:\\Users\\Public\\a.txt' });
+  f.say({ event: 'read', root: 100, rootAt: 1000, pid: 101, image: 'F:\\ffw\\tools\\git\\usr\\bin\\cat.exe', path: 'C:\\Users\\rydin\\.ssh\\config' });
+  f.say({ event: 'read', root: 100, rootAt: 1000, pid: 101, image: 'F:\\ffw\\tools\\git\\usr\\bin\\cat.exe', path: 'C:\\Users\\rydin\\.ssh\\known_hosts' });
+  f.say({ event: 'read', root: 50, rootAt: 2000, pid: 51, image: 'C:\\x\\node.exe', path: 'C:\\Users\\Public\\a.txt' });
+  // a read whose host pid came back with another start time names no session (a reused pid, w6728)
+  f.say({ event: 'read', root: 100, rootAt: 9999, pid: 102, image: 'C:\\x\\a.exe', path: 'D:\\other\\x.txt' });
+  f.say({ event: 'root-refused', root: '70', why: 'its process started at another time than its host' });
   f.say({ event: 'stat', fileEvents: 900, procEvents: 4, tracked: 3, reported: 3, dropped: 0, lost: 0 });
   await flush();
   assert.ok(lines.some((l) => l.startsWith('read log: running')));
   const flagged = lines.filter((l) => l.includes(' read C:\\'));
+  assert.ok(lines.some((l) => l.startsWith('read log: agent host 100: a.exe read D:\\other\\x.txt')), 'a reused host pid is not named as the old session');
+  assert.ok(lines.includes('read log: agent host 70 not followed: its process started at another time than its host'));
   assert.equal(flagged.length, 2, 'the second read in C:\\Users\\rydin by sess-1 is in the file, not flagged again');
   assert.match(flagged[0]!, /^read log: sess-1 \(agent5\): cat\.exe read C:\\Users\\rydin\\\.ssh\\config, outside the work folder and not on the allowlist \(warn only: nothing was refused\)$/);
   assert.match(flagged[1]!, /^read log: sess-2 \(slot1\): node\.exe read C:\\Users\\Public\\a\.txt/);
   assert.ok(lines.some((l) => l.startsWith('read log: its first minute saw 900 file opens')));
   const file = fs.readFileSync(path.join(appDir, 'logs', 'read-log-2026-11-27.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  assert.equal(file.length, 3);
+  assert.equal(file.length, 4);
   assert.deepEqual(Object.keys(file[0]).sort(), ['image', 'path', 'pid', 'sandbox', 'session', 't'], 'paths and the reading process only');
   r.stop();
   fs.rmSync(appDir, { recursive: true, force: true });
@@ -127,6 +132,40 @@ test('w6599: read-log files older than 14 days go at start', () => {
 
 // The real helper: a root process (standing in for an agent host) starts a child that reads a file outside the allowed folders;
 // the log names that file and the child's program. A file the root itself opens, and one in an allowed folder, are not reported.
+test('w6728 N3: past the day\'s lines only the count grows, not the set of flagged folders', async () => {
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'readlog-'));
+  const f = fakeHelper();
+  const lines: string[] = [];
+  let now = new Date('2026-11-27T12:00:00Z');
+  const r = new ReadLog({ appDir, root: 'F:\\ffw', mode: 'warn', platform: 'win32', env: ENV, hosts: () => [{ session: 's', pid: 100, startedAt: 1 }], log: (l) => lines.push(l), now: () => now, helper: () => 'x.exe', start: () => f.child });
+  r.start();
+  for (let i = 0; i < READ_LOG_LINES_A_DAY + 50; i++) f.say({ event: 'read', root: 100, rootAt: 1, pid: 101, image: 'C:\\x\\a.exe', path: `C:\\Users\\u${i}\\f.txt` });
+  await flush();
+  assert.equal(lines.filter((l) => l.includes(' read C:\\')).length, READ_LOG_LINES_A_DAY);
+  assert.equal((r as unknown as { flagged: Set<string> }).flagged.size, READ_LOG_LINES_A_DAY, 'the set stops at the cap');
+  now = new Date('2026-11-28T00:00:01Z');
+  f.say({ event: 'read', root: 100, rootAt: 1, pid: 101, image: 'C:\\x\\a.exe', path: 'C:\\Users\\next\\f.txt' });
+  await flush();
+  assert.ok(lines.some((l) => l.startsWith('read log: 50 more reads outside the work folder on 2026-11-27')), lines.slice(-3).join('\\n'));
+  r.stop();
+  fs.rmSync(appDir, { recursive: true, force: true });
+});
+
+test('w6728: the helper\'s pid rules, against a made-up process table (Windows: --selftest, no ETW session, any account)', { skip: process.platform !== 'win32' }, (t) => {
+  // a lost stop event and the pid given to a person's process, a reused parent pid, an orphan older than its named parent, a
+  // root whose process is not its host's, a dead host's reused pid, the Low-process cache keyed by creation time
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'readlog-st-'));
+  try {
+    const exe = csHelper(appDir, path.join(import.meta.dirname, '..', 'machine', 'winReadLog.cs'), 'ffreadlog', 'read log selftest', (l) => t.diagnostic(l));
+    assert.ok(exe, 'the helper builds with Add-Type');
+    const r = spawnSync(exe, ['--selftest'], { encoding: 'utf8', timeout: 60_000 });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /selftest: \d+ passed, 0 failed/);
+  } finally {
+    fs.rmSync(appDir, { recursive: true, force: true });
+  }
+});
+
 test('w6599: the real ETW helper reports a file a host\'s child opens outside the allowlist (Windows)', { skip: process.platform !== 'win32' }, async (t) => {
   // the long name: a runner's TEMP is an 8.3 one (RUNNER~1), and ETW gives the path as it is on disk
   const tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'readlog-real-')));
@@ -140,9 +179,10 @@ test('w6599: the real ETW helper reports a file a host\'s child opens outside th
   const exe = csHelper(appDir, path.join(import.meta.dirname, '..', 'machine', 'winReadLog.cs'), 'ffreadlog', 'read log test', (l) => t.diagnostic(l));
   assert.ok(exe, 'the helper builds with Add-Type');
   // the root waits for "go", then has cmd read both files
+  const hostAt = Date.now();
   const host = spawn(process.execPath, ['-e', `process.stdin.once('data', () => { const r = require('child_process').spawnSync('cmd.exe', ['/d', '/c', 'type', ${JSON.stringify(outside)}, '&', 'type', ${JSON.stringify(inside)}], { stdio: 'ignore' }); process.exit(r.status ?? 1); });`], { stdio: ['pipe', 'ignore', 'ignore'] });
   const lines: string[] = [];
-  const r = new ReadLog({ appDir, root, mode: 'warn', platform: 'win32', hosts: () => [{ session: 'test-session', pid: host.pid! }], log: (l) => (lines.push(l), t.diagnostic(l)), helper: () => exe });
+  const r = new ReadLog({ appDir, root, mode: 'warn', platform: 'win32', hosts: () => [{ session: 'test-session', pid: host.pid!, startedAt: hostAt }], log: (l) => (lines.push(l), t.diagnostic(l)), helper: () => exe });
   try {
     r.start();
     const until = async (ok: () => boolean, ms: number) => {

@@ -481,14 +481,31 @@ folder and flags it, refusing nothing. It logs paths and the reading program onl
   Git Bash tool shows no environment, w1575). Low alone is not enough: a person's Firefox, Slack, Discord, Signal, Spotify
   and Steam run Low processes too (found by w6715's review on BEAST), and their paths stay out of the log.
 - Windows hands a dead process's pid out again, and a process keeps naming its dead parent's pid (61 of BEAST's 132
-  processes did, Discord, Slack and Firefox among them, w6723's review). So the helper keeps each followed process's creation
-  time and follows a child only when it started at or after its parent; a host that exits is dropped at its own stop event,
-  and once an hour a followed pid whose process is gone or newer is dropped.
+  processes did, Discord, Slack and Firefox among them, w6723's review). And ETW may lose a stop event, so a followed pid's
+  entry can outlive its process while Windows gives the pid to a person's (w6728's review). So no pid is trusted on its own
+  anywhere in the helper; every followed process is known by its pid and its creation time:
+  - a root: the daemon sends each host as `<pid>:<startedAt>`, the start time its host record gives, and the helper takes
+    the pid only if its process started within the daemon's own window of that time (90 s before to 5 s after, as
+    `machine/hostWatch.ts` checks a host). Else it says `root-refused`, logged as `read log: agent host <pid> not followed`.
+    A host that exits is dropped at its stop event and is never taken back under a reused pid. A read names its host by both
+    numbers, so a reused host pid never names another session;
+  - a child (at its start event, and in the walk when a root is named): followed only when its creation time (from the event,
+    or the process) is at or after its parent's, and only after the parent's pid is checked to still be the process followed;
+  - an open: before it is reported, the pid's process must have the entry's creation time. A pid with no process to check (it
+    has just exited, its stop on the way) counts only if the session lost no events since the entry was recorded: the stream
+    is whole then, and its events come in order, so no later holder of the pid can have started yet;
+  - a Low orphan: its creation time is read before and after its checks and must be the same, and a person's process is
+    remembered as not a worker's by pid and creation time, so a worker's process given the pid later is looked at afresh;
+  - every minute, each followed pid whose process is gone or has another creation time is dropped.
+
+  `ffreadlog --selftest` runs these rules against a made-up process table (a lost stop then a reused pid among them); the
+  Windows CI job runs it. A host that dies leaves its descendants followed (its orphaned tools are a worker's still, each
+  checked by its own creation time) until they exit; the daemon keeps the host's name a day for their reads.
 - Each report goes to `<appDir>/logs/read-log-<UTC date>.jsonl` (`t`, `session`, `sandbox`, `pid`, `image`, `path`; at most
   50 MB a day, kept 14 days) and, once a day per worker and folder (a path's first three parts), to daemon.log as
   `read log: <session> (<sandbox>): <program> read <path>, outside the work folder and not on the allowlist (warn only:
   nothing was refused)`, at most 300 such lines a day. Its first minute says how many file opens it saw, so a session that
-  sees nothing shows.
+  sees nothing shows. Past the 300 lines only a count goes on (`read log: <n> more reads outside the work folder on <date>`).
 - The allowlist: the work folder; `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` and `%ProgramData%` (lothsahn's
   w6599 answer kept ProgramData readable); a drive's root and the folders above the work folder, as paths only. Each entry
   carries its reason in the code. Profiles (`C:\Users\...`) and Public are not on it: a read there is what the log is for. A

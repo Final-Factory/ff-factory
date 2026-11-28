@@ -7,12 +7,13 @@
 //   ffreadlog.exe <session name> stop     stop a session of that name a helper before this one left behind, then exit
 //
 // stdin: "allow <folder>" (one per line, before or after "roots": a path at or under it is not reported), "exact <path>" (that
-// path alone, such as a drive's root), "roots <pid>..." (the
-// agent hosts now: the whole set each time; their descendants are followed, the hosts' own opens are not reported). EOF (the
+// path alone, such as a drive's root), "work <folder>", "roots <pid>:<started ms>..." (the agent hosts now, each with the start
+// time its host record gives: the whole set each time; their descendants are followed, the hosts' own opens are not reported).
+// "--selftest" instead of a session name runs the pid rules against a made-up process table. EOF (the
 // daemon is gone) stops the session and ends the helper.
 // stdout, one JSON object a line: {"event":"ready"}, {"event":"error","why":"..."} (then it exits 1),
-// {"event":"read","root":R,"pid":P,"image":"C:\\...\\x.exe","path":"C:\\..."} (each root, program and path once an hour, at most
-// MAX_PER_MINUTE a minute) and each minute {"event":"stat","fileEvents":N,"procEvents":N,"tracked":N,"reported":N,"dropped":N,
+// {"event":"read","root":R,"rootAt":MS,"pid":P,"image":"C:\\...\\x.exe","path":"C:\\..."} (each root, program and path once an hour, at most
+// MAX_PER_MINUTE a minute), {"event":"root-refused","root":"R","why":"..."} (once an hour) and each minute {"event":"stat","fileEvents":N,"procEvents":N,"tracked":N,"reported":N,"dropped":N,
 // "lost":N}.
 //
 // Starting a session needs Administrators or Performance Log Users (the daemon runs at Medium, as a member of one of them), never
@@ -97,23 +98,30 @@ static class FfReadLog
     [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
     [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthority(IntPtr sid, uint n);
 
+    // A followed process, known by its pid AND its creation time (w6723, w6728): Windows hands a dead process's pid out again,
+    // and a process keeps naming its dead parent's pid, so a pid alone never says whose a process is.
+    sealed class Entry
+    {
+        public uint Root;    // its agent host's pid (a root's own entry: itself), or 0 for a worker's orphan
+        public long RootAt;  // the start time (Unix ms) the daemon gave with that root, so the daemon names the right session
+        public long Start;   // its creation time (FILETIME ticks), never 0: a process whose start cannot be read is not followed
+        public long Lost;    // the session's lost-event count when it was recorded
+        public string Image;
+    }
+
     static readonly object Gate = new object();
     static readonly object OutGate = new object();
-    // pid -> its root (an agent host's pid); a root maps to itself, and its own opens are not reported
-    static readonly Dictionary<uint, uint> Tracked = new Dictionary<uint, uint>();
-    static readonly Dictionary<uint, string> Images = new Dictionary<uint, string>();
+    static readonly Dictionary<uint, Entry> Tracked = new Dictionary<uint, Entry>();
     static readonly HashSet<uint> Roots = new HashSet<uint>();
     static readonly List<string> Allow = new List<string>();
     static readonly HashSet<string> AllowExact = new HashSet<string>();
     static readonly HashSet<string> Seen = new HashSet<string>();
     // the work folder (`work <folder>`): an orphaned Low process running a program from it is a worker's
     static string Work = "";
-    // Low processes found to be no worker's (a person's browser, chat or game launcher), so their memory is not read again
-    static readonly HashSet<uint> NotWorker = new HashSet<uint>();
-    // w6723: each tracked pid's creation time (0: unread), so a pid Windows hands out again is never taken for the one tracked
-    static readonly Dictionary<uint, long> Started = new Dictionary<uint, long>();
-    // roots whose stop event came before the daemon's next `roots` line: never named again under that pid
-    static readonly HashSet<uint> DeadRoots = new HashSet<uint>();
+    // Low processes found to be no worker's (a person's browser, chat or game launcher), by pid and creation time, so their
+    // memory is not read again; a later process given the pid is looked at afresh
+    static readonly Dictionary<uint, long> NotWorker = new Dictionary<uint, long>();
+    static readonly HashSet<string> RefusedRoots = new HashSet<string>();
     static List<KeyValuePair<string, string>> devices = new List<KeyValuePair<string, string>>();
     static long fileEvents, procEvents, reported, dropped;
     static int thisMinute;
@@ -121,11 +129,22 @@ static class FfReadLog
     static readonly IntPtr NameFileName = Marshal.StringToHGlobalUni("FileName");
     static readonly IntPtr NameProcessId = Marshal.StringToHGlobalUni("ProcessID");
     static readonly IntPtr NameParentId = Marshal.StringToHGlobalUni("ParentProcessID");
+    static readonly IntPtr NameCreateTime = Marshal.StringToHGlobalUni("CreateTime");
     static readonly IntPtr NameImage = Marshal.StringToHGlobalUni("ImageName");
+
+    // What the helper asks Windows, as functions the self-test (--selftest) replaces with a made-up process table.
+    static Func<uint, long> StartOfFn = StartOf;
+    static Func<uint, bool> IsLowFn = IsLow;
+    static Func<uint, string> ImageOfFn = ImageOf;
+    static Func<uint, string, bool> IsWorkersFn = IsWorkers;
+    static Func<List<KeyValuePair<uint, uint>>> SnapshotFn = Snapshot;
+    static Func<long> LostFn = () => 0;
+    static List<string> Captured; // the self-test's stdout
 
     static int Main(string[] args)
     {
-        if (args.Length < 1) { Say("{\"event\":\"error\",\"why\":\"usage: ffreadlog <session name> [stop]\"}"); return 1; }
+        if (args.Length < 1) { Say("{\"event\":\"error\",\"why\":\"usage: ffreadlog <session name> [stop] | --selftest\"}"); return 1; }
+        if (args[0] == "--selftest") return SelfTest();
         string name = args[0];
         if (args.Length > 1 && args[1] == "stop") { Stop(name); return 0; }
         if (IntPtr.Size != 8) { Say("{\"event\":\"error\",\"why\":\"64-bit only\"}"); return 1; }
@@ -150,6 +169,19 @@ static class FfReadLog
         if (rc == 0) rc = EnableTraceEx2(session, ref kf, EVENT_CONTROL_CODE_ENABLE_PROVIDER, 4, 0x80, 0, 0, IntPtr.Zero);
         if (rc != 0) { ControlTraceW(session, null, props, EVENT_TRACE_CONTROL_STOP); Say("{\"event\":\"error\",\"why\":\"EnableTraceEx2 failed: " + Why(rc) + "\"}"); return 1; }
 
+        // the session's lost events and buffers so far, read when a followed pid cannot be checked against its process
+        IntPtr query = NewProperties(name);
+        object queryGate = new object();
+        LostFn = () =>
+        {
+            lock (queryGate)
+            {
+                if (ControlTraceW(session, null, query, EVENT_TRACE_CONTROL_QUERY) != 0) return -1;
+                Properties q = (Properties)Marshal.PtrToStructure(query, typeof(Properties));
+                return (long)q.EventsLost + q.RealTimeBuffersLost;
+            }
+        };
+
         keep = OnRecord;
         Logfile lf = new Logfile { LoggerName = name, ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD, CurrentEvent = new byte[88], LogfileHeader = new byte[280], EventRecordCallback = keep };
         ulong trace = OpenTraceW(ref lf);
@@ -158,48 +190,49 @@ static class FfReadLog
         collector.Start();
         Say("{\"event\":\"ready\"}");
 
-        IntPtr query = NewProperties(name);
+        long lostBefore = 0;
         Timer minute = new Timer(_ =>
         {
-            uint lost = 0;
-            if (ControlTraceW(session, null, query, EVENT_TRACE_CONTROL_QUERY) == 0)
-            {
-                Properties q = (Properties)Marshal.PtrToStructure(query, typeof(Properties));
-                lost = q.EventsLost + q.RealTimeBuffersLost;
-            }
+            long lost = Math.Max(0, LostFn());
+            // w6728: every minute, each followed pid is checked against its process (one OpenProcess each), so an entry whose
+            // stop event ETW lost is gone within a minute, before its pid can be taken for a person's process for long
+            DropStale();
             int tracked;
             lock (Gate) { tracked = Tracked.Count; thisMinute = 0; }
-            Say("{\"event\":\"stat\",\"fileEvents\":" + Interlocked.Exchange(ref fileEvents, 0) + ",\"procEvents\":" + Interlocked.Exchange(ref procEvents, 0) + ",\"tracked\":" + tracked + ",\"reported\":" + Interlocked.Exchange(ref reported, 0) + ",\"dropped\":" + Interlocked.Exchange(ref dropped, 0) + ",\"lost\":" + lost + "}");
+            Say("{\"event\":\"stat\",\"fileEvents\":" + Interlocked.Exchange(ref fileEvents, 0) + ",\"procEvents\":" + Interlocked.Exchange(ref procEvents, 0) + ",\"tracked\":" + tracked + ",\"reported\":" + Interlocked.Exchange(ref reported, 0) + ",\"dropped\":" + Interlocked.Exchange(ref dropped, 0) + ",\"lost\":" + (lost - lostBefore) + "}");
+            lostBefore = lost;
         }, null, 60000, 60000);
         // what was reported is reported again an hour later, so a long run still shows its reads
-        Timer hourly = new Timer(_ => { lock (Gate) { Seen.Clear(); NotWorker.Clear(); } Devices(); DropStale(); }, null, 3600000, 3600000);
+        Timer hourly = new Timer(_ => { lock (Gate) { Seen.Clear(); NotWorker.Clear(); RefusedRoots.Clear(); } Devices(); }, null, 3600000, 3600000);
 
         string line;
-        while ((line = Console.In.ReadLine()) != null)
-        {
-            line = line.Trim();
-            if (line.StartsWith("allow "))
-            {
-                string p = Norm(line.Substring(6).Trim());
-                if (p.Length > 0) lock (Gate) Allow.Add(p.TrimEnd('\\'));
-            }
-            else if (line.StartsWith("work "))
-            {
-                string p = Norm(line.Substring(5).Trim()).TrimEnd('\\');
-                lock (Gate) Work = p;
-            }
-            else if (line.StartsWith("exact "))
-            {
-                string p = Norm(line.Substring(6).Trim());
-                if (p.Length > 0) lock (Gate) AllowExact.Add(p);
-            }
-            else if (line.StartsWith("roots")) SetRoots(line.Substring(5));
-        }
+        while ((line = Console.In.ReadLine()) != null) Command(line);
         minute.Dispose();
         hourly.Dispose();
         ControlTraceW(session, null, props, EVENT_TRACE_CONTROL_STOP);
         CloseTrace(trace);
         return 0;
+    }
+
+    static void Command(string line)
+    {
+        line = line.Trim();
+        if (line.StartsWith("allow "))
+        {
+            string p = Norm(line.Substring(6).Trim());
+            if (p.Length > 0) lock (Gate) Allow.Add(p.TrimEnd('\\'));
+        }
+        else if (line.StartsWith("work "))
+        {
+            string p = Norm(line.Substring(5).Trim()).TrimEnd('\\');
+            lock (Gate) Work = p;
+        }
+        else if (line.StartsWith("exact "))
+        {
+            string p = Norm(line.Substring(6).Trim());
+            if (p.Length > 0) lock (Gate) AllowExact.Add(p);
+        }
+        else if (line.StartsWith("roots")) SetRoots(line.Substring(5));
     }
 
     static IntPtr NewProperties(string name)
@@ -245,50 +278,24 @@ static class FfReadLog
             {
                 if (id != 12) return;
                 Interlocked.Increment(ref fileEvents);
-                uint root;
-                string image;
                 lock (Gate)
                 {
-                    if (!Tracked.TryGetValue(pid, out root) || root == pid) return;
-                    Images.TryGetValue(pid, out image);
+                    Entry e;
+                    if (!Tracked.TryGetValue(pid, out e) || e.Root == pid) return;
                 }
                 string path = Dos(Text(rec, NameFileName));
-                if (path == null) return;
-                OnOpen(root, pid, image ?? "", path);
+                if (path != null) OnOpen(pid, path);
             }
             else if (provider == KernelProcess)
             {
                 Interlocked.Increment(ref procEvents);
                 if (id == 1)
                 {
-                    uint child = Number(rec, NameProcessId), parent = Number(rec, NameParentId);
-                    long started = StartOf(child);
-                    lock (Gate)
-                    {
-                        uint root;
-                        if (!Tracked.TryGetValue(parent, out root)) return;
-                        // a parent's own pid reused by a later process (a missed stop event) is no parent of this child
-                        long ps;
-                        if (started != 0 && Started.TryGetValue(parent, out ps) && ps != 0 && started < ps) return;
-                        Tracked[child] = root;
-                        Started[child] = started;
-                    }
-                    string image = Dos(Text(rec, NameImage)) ?? Text(rec, NameImage) ?? "";
-                    lock (Gate) Images[child] = image;
+                    uint parent = Number(rec, NameParentId);
+                    lock (Gate) if (!Tracked.ContainsKey(parent)) return;
+                    OnStart(Number(rec, NameProcessId), parent, Long(rec, NameCreateTime), Dos(Text(rec, NameImage)) ?? Text(rec, NameImage) ?? "");
                 }
-                else if (id == 2)
-                {
-                    uint gone = Number(rec, NameProcessId);
-                    lock (Gate)
-                    {
-                        // w6723: a root that exits is dropped at once, not at the daemon's next `roots` line 15 s later, so a
-                        // process given its pid meanwhile is not followed
-                        if (Roots.Remove(gone)) DeadRoots.Add(gone);
-                        Tracked.Remove(gone);
-                        Images.Remove(gone);
-                        Started.Remove(gone);
-                    }
-                }
+                else if (id == 2) OnStop(Number(rec, NameProcessId));
             }
         }
         catch
@@ -297,15 +304,55 @@ static class FfReadLog
         }
     }
 
-    static void OnOpen(uint root, uint pid, string image, string path)
+    // Is this entry still the process that holds its pid? Yes when the pid's process started when the entry says. When the pid
+    // has no process the helper can open (it exited and its stop event is still on its way), yes only if the session lost no
+    // events since the entry was recorded: then the stream is whole, and its events come in order, so no later holder of the pid
+    // can have started yet. The entry is dropped on a no.
+    static bool Current(uint pid, Entry e)
+    {
+        long now = StartOfFn(pid);
+        bool ok = now == e.Start || (now == 0 && LostFn() == e.Lost);
+        if (!ok) lock (Gate) { Entry t; if (Tracked.TryGetValue(pid, out t) && t == e) { Tracked.Remove(pid); Roots.Remove(pid); } }
+        return ok;
+    }
+
+    // A followed process started a child: followed too, once its parent is checked to be the one followed (w6728: a parent whose
+    // stop event was lost and whose pid now holds a person's process starts no child of ours) and the child started after it.
+    static void OnStart(uint child, uint parent, long created, string image)
+    {
+        Entry p;
+        lock (Gate) if (!Tracked.TryGetValue(parent, out p)) return;
+        if (created == 0) created = StartOfFn(child);
+        if (created == 0 || created < p.Start || !Current(parent, p)) return;
+        Entry c = new Entry { Root = p.Root, RootAt = p.RootAt, Start = created, Lost = LostFn(), Image = image };
+        lock (Gate) Tracked[child] = c;
+    }
+
+    static void OnStop(uint gone)
+    {
+        // a root that exits is dropped at once too, and is taken back only for a process that started when its host did
+        lock (Gate) { Tracked.Remove(gone); Roots.Remove(gone); }
+    }
+
+    static void OnOpen(uint pid, string path)
     {
         string norm = Norm(path);
+        Entry e;
+        string key;
         lock (Gate)
         {
+            if (!Tracked.TryGetValue(pid, out e) || e.Root == pid) return;
             if (AllowExact.Contains(norm) || AllowExact.Contains(norm.TrimEnd('\\'))) return;
             foreach (string a in Allow)
                 if (norm == a || (norm.Length > a.Length && norm.StartsWith(a) && norm[a.Length] == '\\')) return;
-            string key = root + "|" + image + "|" + norm;
+            key = e.Root + "|" + e.Image + "|" + norm;
+            if (Seen.Contains(key)) return;
+            if (thisMinute >= MAX_PER_MINUTE) { Interlocked.Increment(ref dropped); return; }
+        }
+        // checked against its process before anything is said (w6728): at most a few hundred opens a minute get this far
+        if (!Current(pid, e)) return;
+        lock (Gate)
+        {
             if (Seen.Contains(key)) return;
             if (thisMinute >= MAX_PER_MINUTE) { Interlocked.Increment(ref dropped); return; }
             if (Seen.Count >= SEEN_CAP) Seen.Clear();
@@ -313,37 +360,68 @@ static class FfReadLog
             thisMinute++;
         }
         Interlocked.Increment(ref reported);
-        Say("{\"event\":\"read\",\"root\":" + root + ",\"pid\":" + pid + ",\"image\":\"" + Esc(image) + "\",\"path\":\"" + Esc(path) + "\"}");
+        Say("{\"event\":\"read\",\"root\":" + e.Root + ",\"rootAt\":" + e.RootAt + ",\"pid\":" + pid + ",\"image\":\"" + Esc(e.Image) + "\",\"path\":\"" + Esc(path) + "\"}");
     }
 
+    // FILETIME ticks to Unix milliseconds.
+    static long UnixMs(long filetime) { return (filetime - 116444736000000000L) / 10000; }
+
+    // `roots <pid>:<started ms> ...`: the agent hosts now, each with the time its host record says it started (w6728 N1). A pid
+    // is taken as a host only when its process started within the daemon's own window of that time (machine/hostWatch.ts
+    // sameHost: 90 s before to 5 s after), so a host that died, its pid since given to a person's program, is never named. A
+    // root the daemon no longer names is dropped; its descendants stay followed (workers' orphans are what the log is for, and
+    // each is checked by its own creation time), until they exit.
     static void SetRoots(string list)
     {
-        HashSet<uint> now = new HashSet<uint>();
+        Dictionary<uint, long> now = new Dictionary<uint, long>();
         foreach (string s in list.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
         {
-            uint v;
-            if (uint.TryParse(s, out v)) now.Add(v);
+            string[] kv = s.Split(':');
+            uint pid; long at;
+            if (kv.Length == 2 && uint.TryParse(kv[0], out pid) && long.TryParse(kv[1], out at)) now[pid] = at;
+            else if (RefusedRoots.Add(s)) Say("{\"event\":\"root-refused\",\"root\":\"" + Esc(s) + "\",\"why\":\"no start time given\"}");
         }
         List<uint> fresh = new List<uint>();
         Dictionary<uint, long> starts = new Dictionary<uint, long>();
-        foreach (uint r in now) starts[r] = StartOf(r);
+        Dictionary<uint, long> given = new Dictionary<uint, long>();
+        foreach (KeyValuePair<uint, long> r in now)
+        {
+            long st = StartOfFn(r.Key);
+            long ms = UnixMs(st);
+            if (st != 0 && ms <= r.Value + 5000 && ms >= r.Value - 90000) { starts[r.Key] = st; given[r.Key] = r.Value; }
+            else if (RefusedRoots.Add(r.Key + ":" + r.Value)) Say("{\"event\":\"root-refused\",\"root\":\"" + r.Key + "\",\"why\":\"" + (st == 0 ? "no such process" : "its process started at another time than its host") + "\"}");
+        }
+        long lost = LostFn();
         lock (Gate)
         {
-            DeadRoots.IntersectWith(now);
-            HashSet<uint> gone = new HashSet<uint>(Roots);
-            gone.ExceptWith(now);
-            gone.UnionWith(DeadRoots);
-            List<uint> drop = new List<uint>();
-            foreach (KeyValuePair<uint, uint> t in Tracked) if (gone.Contains(t.Value)) drop.Add(t.Key);
-            foreach (uint d in drop) { Tracked.Remove(d); Images.Remove(d); Started.Remove(d); }
-            foreach (uint r in gone) Roots.Remove(r);
-            foreach (uint r in now)
+            foreach (uint r in new List<uint>(Roots))
             {
-                if (DeadRoots.Contains(r) || starts[r] == 0) continue;
-                if (Roots.Add(r)) { Tracked[r] = r; Started[r] = starts[r]; fresh.Add(r); }
+                Entry e;
+                if (starts.ContainsKey(r) && Tracked.TryGetValue(r, out e) && e.Start == starts[r]) continue;
+                Roots.Remove(r);
+                if (Tracked.TryGetValue(r, out e) && e.Root == r) Tracked.Remove(r);
+            }
+            foreach (KeyValuePair<uint, long> r in starts)
+            {
+                if (Roots.Contains(r.Key)) continue;
+                Roots.Add(r.Key);
+                Tracked[r.Key] = new Entry { Root = r.Key, RootAt = given[r.Key], Start = r.Value, Lost = lost, Image = "" };
+                fresh.Add(r.Key);
             }
         }
         if (fresh.Count > 0) Seed(fresh);
+    }
+
+    static List<KeyValuePair<uint, uint>> Snapshot()
+    {
+        List<KeyValuePair<uint, uint>> l = new List<KeyValuePair<uint, uint>>();
+        IntPtr snap = CreateToolhelp32Snapshot(2, 0); // TH32CS_SNAPPROCESS
+        if (snap == new IntPtr(-1)) return l;
+        ProcessEntry e = new ProcessEntry { dwSize = (uint)Marshal.SizeOf(typeof(ProcessEntry)) };
+        for (bool ok = Process32FirstW(snap, ref e); ok; ok = Process32NextW(snap, ref e))
+            if (e.th32ProcessID != e.th32ParentProcessID) l.Add(new KeyValuePair<uint, uint>(e.th32ProcessID, e.th32ParentProcessID));
+        CloseHandle(snap);
+        return l;
     }
 
     // A root's descendants that already run when it is named (those it starts later come from Kernel-Process). Then each other
@@ -355,18 +433,14 @@ static class FfReadLog
     static void Seed(List<uint> roots)
     {
         Dictionary<uint, List<uint>> children = new Dictionary<uint, List<uint>>();
-        IntPtr snap = CreateToolhelp32Snapshot(2, 0); // TH32CS_SNAPPROCESS
-        if (snap == new IntPtr(-1)) return;
-        ProcessEntry e = new ProcessEntry { dwSize = (uint)Marshal.SizeOf(typeof(ProcessEntry)) };
-        for (bool ok = Process32FirstW(snap, ref e); ok; ok = Process32NextW(snap, ref e))
+        HashSet<uint> all = new HashSet<uint>();
+        foreach (KeyValuePair<uint, uint> pc in SnapshotFn())
         {
             List<uint> l;
-            if (!children.TryGetValue(e.th32ParentProcessID, out l)) children[e.th32ParentProcessID] = l = new List<uint>();
-            if (e.th32ProcessID != e.th32ParentProcessID) l.Add(e.th32ProcessID);
+            if (!children.TryGetValue(pc.Value, out l)) children[pc.Value] = l = new List<uint>();
+            l.Add(pc.Key);
+            all.Add(pc.Key);
         }
-        CloseHandle(snap);
-        HashSet<uint> all = new HashSet<uint>();
-        foreach (List<uint> l in children.Values) foreach (uint c in l) all.Add(c);
         foreach (uint root in roots)
         {
             Queue<uint> q = new Queue<uint>();
@@ -376,23 +450,25 @@ static class FfReadLog
             {
                 uint p = q.Dequeue();
                 List<uint> l;
+                Entry pe;
                 if (!children.TryGetValue(p, out l)) continue;
-                long ps;
-                lock (Gate) if (!Started.TryGetValue(p, out ps) || ps == 0) continue;
+                lock (Gate) if (!Tracked.TryGetValue(p, out pe)) continue;
+                // the parent must still be the process followed: a child that names a pid whose holder changed is no child of it
+                if (StartOfFn(p) != pe.Start) continue;
                 foreach (uint c in l)
                 {
                     // w6723: toolhelp keeps a dead parent's pid, and Windows hands that pid out again: a process that started
                     // before its named parent is an orphan of an earlier holder of the pid (a person's Slack, Discord or
                     // Firefox whose updater exited), never this root's
-                    long cs = StartOf(c);
-                    if (cs == 0 || cs < ps) continue;
-                    string image = ImageOf(c);
+                    long cs = StartOfFn(c);
+                    if (cs == 0 || cs < pe.Start) continue;
+                    string image = ImageOfFn(c);
+                    if (StartOfFn(c) != cs) continue;
+                    long lost = LostFn();
                     lock (Gate)
                     {
                         if (Tracked.ContainsKey(c)) continue;
-                        Tracked[c] = root;
-                        Images[c] = image;
-                        Started[c] = cs;
+                        Tracked[c] = new Entry { Root = root, RootAt = pe.RootAt, Start = cs, Lost = lost, Image = image };
                     }
                     q.Enqueue(c);
                 }
@@ -400,21 +476,26 @@ static class FfReadLog
         }
         foreach (uint pid in all)
         {
+            long ns;
             lock (Gate) if (Tracked.ContainsKey(pid)) continue;
-            lock (Gate) if (NotWorker.Contains(pid)) continue;
-            if (!IsLow(pid)) continue;
-            string image = ImageOf(pid);
-            if (!IsWorkers(pid, image))
+            // w6728 N4: the creation time first, and again after the checks, so a pid given out again between them is not taken
+            long s1 = StartOfFn(pid);
+            if (s1 == 0) continue;
+            lock (Gate) if (NotWorker.TryGetValue(pid, out ns) && ns == s1) continue;
+            if (!IsLowFn(pid)) continue;
+            string image = ImageOfFn(pid);
+            bool worker = IsWorkersFn(pid, image);
+            if (StartOfFn(pid) != s1) continue;
+            if (!worker)
             {
-                lock (Gate) NotWorker.Add(pid);
+                lock (Gate) NotWorker[pid] = s1;
                 continue;
             }
+            long lost = LostFn();
             lock (Gate)
             {
                 if (Tracked.ContainsKey(pid)) continue;
-                Tracked[pid] = 0;
-                Images[pid] = image;
-                Started[pid] = StartOf(pid);
+                Tracked[pid] = new Entry { Root = 0, Start = s1, Lost = lost, Image = image };
             }
         }
     }
@@ -434,25 +515,147 @@ static class FfReadLog
         finally { CloseHandle(h); }
     }
 
-    // Hourly: a tracked pid whose process is gone, or whose pid now names a later process (a stop event ETW lost), is dropped.
+    // Each minute: a followed pid whose process is gone, or whose pid now names another process (a stop event ETW lost), is
+    // dropped. Gone means gone here (no lost-event grace): a stop on its way is for a process that has exited anyway.
     static void DropStale()
     {
-        List<KeyValuePair<uint, long>> all;
-        lock (Gate) all = new List<KeyValuePair<uint, long>>(Started);
-        List<uint> stale = new List<uint>();
-        foreach (KeyValuePair<uint, long> t in all)
+        List<KeyValuePair<uint, Entry>> all;
+        lock (Gate) all = new List<KeyValuePair<uint, Entry>>(Tracked);
+        foreach (KeyValuePair<uint, Entry> t in all)
         {
-            long now = StartOf(t.Key);
-            if (now == 0 || (t.Value != 0 && now != t.Value)) stale.Add(t.Key);
-        }
-        lock (Gate)
-            foreach (uint d in stale)
+            if (StartOfFn(t.Key) == t.Value.Start) continue;
+            lock (Gate)
             {
-                if (Roots.Remove(d)) DeadRoots.Add(d);
-                Tracked.Remove(d);
-                Images.Remove(d);
-                Started.Remove(d);
+                Entry e;
+                if (Tracked.TryGetValue(t.Key, out e) && e == t.Value) { Tracked.Remove(t.Key); Roots.Remove(t.Key); }
             }
+        }
+    }
+
+    static long Long(IntPtr rec, IntPtr name)
+    {
+        PropertyDescriptor d = new PropertyDescriptor { PropertyName = name, ArrayIndex = 0xFFFFFFFF };
+        uint size;
+        if (TdhGetPropertySize(rec, 0, IntPtr.Zero, 1, ref d, out size) != 0 || size < 8) return 0;
+        IntPtr buf = Marshal.AllocHGlobal((int)size);
+        try { return TdhGetProperty(rec, 0, IntPtr.Zero, 1, ref d, size, buf) == 0 ? Marshal.ReadInt64(buf) : 0; }
+        finally { Marshal.FreeHGlobal(buf); }
+    }
+
+    // --selftest: the pid rules above against a made-up process table, with no ETW session (any account may run it; the Windows
+    // CI job does, server/readLog.test.ts). Prints "selftest: N passed" or each failure, and exits 0 or 1.
+    static int SelfTest()
+    {
+        Dictionary<uint, long> start = new Dictionary<uint, long>();   // pid -> creation time of its process now
+        Dictionary<uint, uint> parent = new Dictionary<uint, uint>();  // pid -> the parent pid it names
+        HashSet<uint> low = new HashSet<uint>();
+        HashSet<uint> marked = new HashSet<uint>();                     // FF_SESSION_ID in its environment
+        long lost = 0;
+        const long T = 133000000000000000L;                             // a FILETIME in 2022
+        StartOfFn = p => { long s; return start.TryGetValue(p, out s) ? s : 0; };
+        IsLowFn = p => low.Contains(p);
+        ImageOfFn = p => "C:\\apps\\p" + p + ".exe";
+        IsWorkersFn = (p, image) => marked.Contains(p);
+        SnapshotFn = () => { List<KeyValuePair<uint, uint>> l = new List<KeyValuePair<uint, uint>>(); foreach (KeyValuePair<uint, uint> x in parent) if (start.ContainsKey(x.Key)) l.Add(x); return l; };
+        LostFn = () => lost;
+        Captured = new List<string>();
+        Action<uint, uint, long> run = (p, par, s) => { start[p] = s; parent[p] = par; };
+        Action<uint> exit = p => { start.Remove(p); };
+        Func<long, long> ms = ft => UnixMs(ft);
+        List<string> fails = new List<string>();
+        int passed = 0;
+        Action<bool, string> check = (ok, what) => { if (ok) passed++; else fails.Add(what); };
+        Func<string, bool> said = s => Captured.Exists(l => l.Contains(s));
+        Command("allow c:\\ffw");
+        Command("work c:\\ffw");
+
+        // a host (100) and its worker child (200): the child's read outside the allowlist is reported, its read inside is not
+        run(100, 4, T);
+        run(200, 100, T + 10);
+        Command("roots 100:" + ms(T));
+        check(Tracked.ContainsKey(200), "a host's running child is followed at seed");
+        OnOpen(200, "C:\\Users\\me\\a.txt");
+        OnOpen(200, "C:\\ffw\\x\\b.txt");
+        check(said("C:\\\\Users\\\\me\\\\a.txt") && !said("b.txt"), "a worker's read outside is reported, inside is not");
+        check(said("\"root\":100,\"rootAt\":" + ms(T) + ","), "a read names its host by pid and start time");
+
+        // B1: 200's stop event is lost, and Windows gives pid 200 to a person's app (started later, Low, no FF_SESSION_ID)
+        lost = 1;
+        exit(200);
+        run(200, 4, T + 500);
+        low.Add(200);
+        OnOpen(200, "C:\\Users\\me\\secret.txt");
+        check(!said("secret.txt"), "a person's process holding a lost worker's pid is not reported");
+        check(!Tracked.ContainsKey(200), "the stale entry is dropped on the first open checked");
+        // and the app's child is not followed through the old entry either
+        Tracked[200] = new Entry { Root = 100, Start = T + 10, Lost = 0, Image = "x" }; // the stale entry again
+        OnStart(201, 200, T + 600, "C:\\apps\\child.exe");
+        check(!Tracked.ContainsKey(201), "a person's child, started under a reused pid, is not followed");
+        check(!Tracked.ContainsKey(200), "the reused parent's entry is dropped at its child's start");
+        // and the minute check drops a stale entry nobody touched
+        Tracked[200] = new Entry { Root = 100, Start = T + 10, Lost = 0, Image = "x" };
+        DropStale();
+        check(!Tracked.ContainsKey(200), "the minute check drops an entry whose pid holds another process");
+
+        // an exited worker child whose stop is on its way, with no events lost since: its reads already in the stream count
+        lost = 1;
+        run(300, 100, T + 700);
+        OnStart(300, 100, T + 700, "C:\\ffw\\tools\\git\\usr\\bin\\cat.exe");
+        check(Tracked.ContainsKey(300), "a host's new child is followed at its start event");
+        exit(300);
+        OnOpen(300, "C:\\Users\\me\\late.txt");
+        check(said("late.txt"), "an exited child's last read is reported while the stream lost nothing since");
+        Tracked[300].Start = T + 700;
+        lost = 2;
+        OnOpen(300, "C:\\Users\\me\\later.txt");
+        check(!said("later.txt"), "after a loss, a pid with no process to check is not trusted");
+
+        // a child whose start time cannot be read (the event carries none and it is gone) is not followed
+        OnStart(301, 100, 0, "x");
+        check(!Tracked.ContainsKey(301), "a process with no creation time is not followed");
+
+        // Seed: an orphan that names the host's pid but started before the host (a person's app whose updater held the pid)
+        Command("roots");
+        run(110, 4, T + 1000);
+        run(400, 110, T + 900);
+        low.Add(400);
+        run(401, 110, T + 1100);
+        Command("roots 110:" + ms(T + 1000));
+        check(!Tracked.ContainsKey(400), "seed: a process older than the host it names is not its child");
+        check(Tracked.ContainsKey(401), "seed: a process younger than its host is");
+
+        // N1: a root whose process started at another time than its host record says is refused
+        run(120, 4, T + 999999999);
+        Command("roots 110:" + ms(T + 1000) + " 120:" + ms(T));
+        check(!Roots.Contains(120) && said("root-refused"), "a pid whose process is not the host's is refused");
+        check(Roots.Contains(110), "a pid whose process is its host's stays a root");
+        // a host that exits is dropped at its stop, and its pid given to another process is not taken back
+        OnStop(110);
+        exit(110);
+        run(110, 4, T + 5000000000);
+        Command("roots 110:" + ms(T + 1000));
+        check(!Roots.Contains(110) && !Tracked.ContainsKey(110), "a host's reused pid is not taken back as a root");
+        check(Tracked.ContainsKey(401), "the dead host's worker child stays followed (an orphaned tool)");
+
+        // orphans: a Low process with FF_SESSION_ID is a worker's; one without is a person's and is cached by its start
+        Command("roots");
+        run(500, 9999, T + 2000); low.Add(500); marked.Add(500);
+        run(501, 9999, T + 2000); low.Add(501);
+        run(130, 4, T + 3000);
+        Command("roots 130:" + ms(T + 3000));
+        check(Tracked.ContainsKey(500) && Tracked[500].Root == 0, "a Low orphan with FF_SESSION_ID is followed as a worker's");
+        check(!Tracked.ContainsKey(501), "a Low orphan without it is not");
+        // 501's pid goes to a worker's tool: the cache, keyed by creation time, does not hide it
+        exit(501); run(501, 9999, T + 4000); marked.Add(501);
+        Command("roots"); Command("roots 130:" + ms(T + 3000));
+        run(131, 4, T + 3001);
+        Command("roots 130:" + ms(T + 3000) + " 131:" + ms(T + 3001));
+        check(Tracked.ContainsKey(501), "a worker's process given a person's old pid is not hidden by the cache");
+
+        Captured = null;
+        foreach (string f in fails) Console.Out.WriteLine("selftest FAIL: " + f);
+        Console.Out.WriteLine("selftest: " + passed + " passed, " + fails.Count + " failed");
+        return fails.Count == 0 ? 0 : 1;
     }
 
     static bool IsWorkers(uint pid, string image)
@@ -605,6 +808,7 @@ static class FfReadLog
     {
         lock (OutGate)
         {
+            if (Captured != null) { Captured.Add(json); return; }
             try
             {
                 Console.Out.WriteLine(json);

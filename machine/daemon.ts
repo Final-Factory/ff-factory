@@ -1361,7 +1361,8 @@ export class Daemon {
       platform: real ? process.platform : 'linux',
       hosts: () => [...this.hostSessions].filter(([, h]) => h.live && h.hostPid).map(([session, h]) => {
         const sandbox = hostPlace(h.dir)?.sandbox;
-        return { session, pid: h.hostPid!, ...(sandbox ? { sandbox } : {}) };
+        // w6728: the time its host record says it started, so the helper takes the pid only for the process that started then
+        return { session, pid: h.hostPid!, startedAt: hostStartedAt(h.dir), ...(sandbox ? { sandbox } : {}) };
       }),
       log: (line) => log(line),
     });

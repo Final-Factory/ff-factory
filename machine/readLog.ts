@@ -62,6 +62,8 @@ export function readAllowWin(env: NodeJS.ProcessEnv, root: string): AllowEntry[]
 
 export interface ReadLine {
   root: number;
+  /** The host record's start time (Unix ms) the daemon sent with the root, so a reused root pid names no other session. */
+  rootAt?: number;
   pid: number;
   image: string;
   path: string;
@@ -84,7 +86,7 @@ export interface ReadLogDeps {
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
   /** The live agent hosts: their processes' descendants are the workers whose reads are logged. */
-  hosts: () => { session: string; pid: number; sandbox?: string }[];
+  hosts: () => { session: string; pid: number; startedAt?: number; sandbox?: string }[];
   log: (line: string) => void;
   now?: () => Date;
   /** The helper's exe; csHelper by default. */
@@ -99,6 +101,8 @@ export const READ_LOG_MAX_BYTES = 50 * 1024 * 1024;
 export const READ_LOG_KEEP_DAYS = 14;
 /** daemon.log lines a day (one per worker and folder); past it, only the count. */
 export const READ_LOG_LINES_A_DAY = 300;
+/** A host's name is kept this long after it was last live, for the reads of its orphaned tools (they stay followed). */
+const NAME_KEEP_MS = 24 * 60 * 60_000;
 const RETRY_MS = 60 * 60_000;
 
 /** The folder a path's log line is grouped by: the path's first three parts (`C:\Users\rydin`), the file for a shorter one. */
@@ -119,7 +123,8 @@ export class ReadLog {
   private lines = 0;
   private unflagged = 0;
   private bytes = 0;
-  private readonly sessions = new Map<number, { session: string; sandbox?: string }>();
+  /** By `<pid>:<startedAt>`, as the helper names a read's host. */
+  private readonly sessions = new Map<string, { session: string; sandbox?: string; seen: number }>();
   private readonly now: () => Date;
   private readonly platform: NodeJS.Platform;
 
@@ -184,6 +189,7 @@ export class ReadLog {
       else if (m.event === 'error') error = String(m.why);
       else if (m.event === 'read') this.onRead(m as unknown as ReadLine);
       else if (m.event === 'stat') this.onStat(m as unknown as ReadStat);
+      else if (m.event === 'root-refused') this.d.log(`read log: agent host ${String(m.root)} not followed: ${String(m.why)}`);
     });
     child.on('exit', (code) => {
       if (this.child === child) this.child = undefined;
@@ -196,13 +202,14 @@ export class ReadLog {
   tick(): void {
     const child = this.child;
     if (!child?.stdin || this.stopped) return;
-    const hosts = this.d.hosts().filter((h) => h.pid > 0);
-    for (const h of hosts) this.sessions.set(h.pid, { session: h.session, ...(h.sandbox ? { sandbox: h.sandbox } : {}) });
-    const roots = hosts.map((h) => h.pid).sort((a, b) => a - b).join(' ');
+    // w6728: a host without a start time is not sent: the helper takes a pid only for the process that started with its host
+    const hosts = this.d.hosts().filter((h) => h.pid > 0 && h.startedAt);
+    const now = this.now().getTime();
+    for (const h of hosts) this.sessions.set(`${h.pid}:${h.startedAt}`, { session: h.session, ...(h.sandbox ? { sandbox: h.sandbox } : {}), seen: now });
+    // a host gone keeps its name a day: its orphaned tools stay followed, each by its own creation time
+    for (const [k, s] of this.sessions) if (now - s.seen > NAME_KEEP_MS) this.sessions.delete(k);
+    const roots = hosts.map((h) => `${h.pid}:${h.startedAt}`).sort().join(' ');
     if (roots === this.rootsSent) return;
-    // a host gone since the last roots line keeps its name until the next change, for the reads the helper sent meanwhile
-    const keep = new Set([...hosts.map((h) => h.pid), ...this.rootsSent.split(' ').filter(Boolean).map(Number)]);
-    for (const pid of [...this.sessions.keys()]) if (!keep.has(pid)) this.sessions.delete(pid);
     this.rootsSent = roots;
     child.stdin.write(`roots ${roots}\n`);
   }
@@ -222,7 +229,7 @@ export class ReadLog {
     const t = this.now();
     const day = t.toISOString().slice(0, 10);
     if (day !== this.day) {
-      if (this.day && this.unflagged) this.d.log(`read log: ${this.unflagged} more folders read outside the work folder on ${this.day}, past ${READ_LOG_LINES_A_DAY} lines (in ${this.file(new Date(`${this.day}T00:00:00Z`))})`);
+      if (this.day && this.unflagged) this.d.log(`read log: ${this.unflagged} more reads outside the work folder on ${this.day}, past ${READ_LOG_LINES_A_DAY} lines (in ${this.file(new Date(`${this.day}T00:00:00Z`))})`);
       this.day = day;
       this.flagged.clear();
       this.lines = 0;
@@ -233,7 +240,7 @@ export class ReadLog {
         this.bytes = 0;
       }
     }
-    const who = this.sessions.get(r.root);
+    const who = this.sessions.get(`${r.root}:${r.rootAt}`);
     const entry = JSON.stringify({ t: t.toISOString(), session: who?.session ?? null, ...(who?.sandbox ? { sandbox: who.sandbox } : {}), pid: r.pid, image: r.image, path: r.path });
     if (this.bytes < READ_LOG_MAX_BYTES) {
       try {
@@ -247,11 +254,12 @@ export class ReadLog {
     const folder = folderOf(r.path);
     const key = `${who?.session ?? r.root}|${folder.toLowerCase()}`;
     if (this.flagged.has(key)) return;
-    this.flagged.add(key);
+    // past the day's lines only the count goes on, and the set stops growing (w6728 N3): a read counted twice is fine
     if (this.lines >= READ_LOG_LINES_A_DAY) {
       this.unflagged++;
       return;
     }
+    this.flagged.add(key);
     this.lines++;
     // root 0: a Low process found at the helper's start with no living parent (a tool whose shell exited)
     const name = who ? `${who.session}${who.sandbox ? ` (${who.sandbox})` : ''}` : r.root === 0 ? 'a Low worker process' : `agent host ${r.root}`;
