@@ -35,8 +35,8 @@ param(
   [string]$WorkerRoot = '',
   [string]$Skip = '',
   [string[]]$Actions = @(),
-  # ffsb-helper-deduprepair's mode (w6597): repair, or check (find and log, change nothing).
-  [ValidateSet('repair', 'check')][string]$DedupRepairMode = 'repair'
+  # ffsb-helper-deduprepair's mode (w6597): repair, check (find and log, change nothing), or force (the forced test only: repairs whatever the state; reinstall in repair mode after).
+  [ValidateSet('repair', 'check', 'force')][string]$DedupRepairMode = 'repair'
 )
 $ErrorActionPreference = 'Stop'
 $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()

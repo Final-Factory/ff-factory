@@ -253,6 +253,24 @@ back to confirm the ACE is gone. Neither is a lasting off switch: the next `devd
 registers the task again in repair mode.
 A read the repair cannot make fails loudly (`ok=false`): an event log it may not read, or a volume task whose state
 `schtasks /query` refuses it (`unreadable`), is never taken as "nothing to repair" or "repaired".
+Once it has stopped the service it always starts it again, whatever fails after the stop. Stopping the service
+deletes the volume task, so a missing task after the stop is expected; the service makes it again when it starts. (The
+first forced test on LothDesktop, 2026-11-28, left the service stopped: `schtasks /query` of the deleted task wrote to
+stderr, which Windows PowerShell 5.1 treats as a terminating error under `Stop`. Native commands now run through a helper
+that keeps their stderr as text.)
+
+**The forced test.** Starting the volume task by hand does not trigger a repair: it logs a fresh job start, and a task is
+stuck only after 3 hours Running. The test mode does: `install-privileged-helpers.ps1 -Actions deduprepair -DedupRepairMode
+force` registers the task to repair whatever the state. Then, elevated:
+1. `schtasks /run /tn "\Microsoft\Windows\ReFsDedupSvc\{<volume GUID>}"` and check it shows Running (a real dedup job
+   starts; the repair cancels it, which is safe). This makes the test cover ending a Running task.
+2. `schtasks /run /tn ffsb-helper-deduprepair`, wait until it is not Running, and read `dedup-repair.json`. Want `did` to
+   list the stop, the task gone or ended, the start and `service RUNNING`; `state` "repaired" with a new event 6; and the
+   volume task not Running.
+3. `install-privileged-helpers.ps1 -Actions deduprepair` again, which puts it back in repair mode. Never leave it in force
+   mode: it would restart the service every night.
+The Dev Drive e2e runs force mode as the task (LOCAL SERVICE) on windows-latest, and runs the script elevated with
+`-FailAfterStop` to prove the service is started again after a fault.
 
 The full log is `C:\ProgramData\ffsb-helpers\results\refs-dedup-trial.log`. To undo:
 `Clear-ReFSDedupSchedule -Volume V:` then `Disable-ReFSDedup -Volume V:`. Data already shared stays shared (sourced).
