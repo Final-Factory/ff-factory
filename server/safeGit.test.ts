@@ -46,6 +46,7 @@ const NOT_GIT: Record<string, string> = {
   'server/spawnThread.ts|s.cmd': 'an agent host (node and its script), started detached by launchDetached for machine/agentHost.ts launchHost, never git (w6639)',
   'server/rerunGuard.ts|trustedGh(': 'gh (resolved from a trusted PATH, w5542)',
   'machine/ownerSecrets.ts|cmd': 'gh auth token (trustedGh, w5548)',
+  'machine/steamStart.ts|exe': 'the Steam client exe from its install record (an absolute path to steam.exe that exists), never git (w6727)',
   'machine/lowIntegrity.ts|cmd': 'icacls (LowCopies execSync, w5838)',
   'machine/ownerSecrets.ts|trustedGh(': 'gh auth status, token and login for the owner gh login move (realGhRun, w5749)',
   'machine/timedRunner.ts|process.execPath': 'a node watchdog',
