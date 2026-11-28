@@ -175,8 +175,11 @@ function remoteArg(rest: string[]): string | undefined {
 
 /** git's boolean: true, yes, on, a non-zero number, or a key with no value. */
 const gitTrue = (v: string) => /^(true|yes|on|)$/i.test(v.trim()) || (/^-?\d+$/.test(v.trim()) && Number(v) !== 0);
-/** An argument git reads as `--<long>` (it takes any unique prefix of four or more characters). */
-const isOpt = (a: string, long: string) => a.length >= 4 && long.startsWith(a);
+/**
+ * An argument git may read as `--<long>`: git takes any unique prefix, down to one letter after the dashes (`fetch --m` is
+ * `--multiple`, w6638's review of PR #1534). An ambiguous prefix (`fetch --a`) is refused too; git fails it anyway.
+ */
+const isOpt = (a: string, long: string) => a.length >= 3 && long.startsWith(a);
 
 /**
  * Whether a call starts an upload or receive program, and whether the injected option reaches every one (w6570):

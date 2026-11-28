@@ -256,6 +256,10 @@ test('w6570: a repository-set upload or receive program goes to the transport as
     [['fetch', '-m', 'origin', 'b'], up],
     [['fetch', '-qm', 'origin', 'b'], up],
     [['fetch', '-vmq', 'origin', 'b'], up],
+    // git takes any unique prefix of a long option, down to one letter (w6638's review of PR #1534).
+    ...['--m', '--mu', '--mul', '--mult', '--multi', '--multip', '--multipl'].map((o) => [['fetch', o, 'origin', 'b'], up]),
+    [['fetch', '--al'], up],
+    [['pull', '--al'], up],
     [['fetch', '--prune', 'both'], group],
     [['fetch', '--prune', 'origin'], group],
     [['pull', 'origin', 'master'], group],
@@ -277,7 +281,7 @@ test('w6570: a repository-set upload or receive program goes to the transport as
   // Calls that start no upload program (measured by the review): never refused, they run with lazy fetch off.
   for (const a of [['remote', '-v'], ['remote', 'get-url', 'origin'], ['lfs', 'env'], ['clone', 'x', 'y'], ['archive', '--remote', 'origin', 'HEAD']])
     assert.equal(firstWinsRefusal(a, up), undefined, a.join(' '));
-  for (const a of [['remote', 'show', 'origin'], ['remote', 'prune', 'origin'], ['remote', 'set-head', 'origin', '--auto'], ['remote', 'add', '-f', 'x', 'u'], ['lfs', 'fetch']])
+  for (const a of [['remote', 'show', 'origin'], ['remote', 'prune', 'origin'], ['remote', 'set-head', 'origin', '--auto'], ['remote', 'set-head', 'origin', '--a'], ['remote', 'add', '-f', 'x', 'u'], ['remote', 'add', '--f', 'x', 'u'], ['lfs', 'fetch']])
     assert.match(firstWinsRefusal(a, up) ?? '', /refused by FF Factory \(w6570\)/, a.join(' '));
   assert.deepEqual(scannedOverrides(group), [], 'a remote group is read, never overridden');
   assert.deepEqual(scannedOverrides(parseScan('local\0fetch.all\ntrue\0')), [], 'fetch.all is read, never overridden');
