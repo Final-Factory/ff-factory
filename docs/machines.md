@@ -3103,12 +3103,16 @@ LothDesktop and Beast, not just when BEAST is full").
     `w6687 warn-only, nothing dropped: enforcing would drop <machine> from <its pair avoid | its pin | its queue needs>:
     ...`, once per change (a cleared crash hold it was kept for says so), and the same line in the portal journal as
     `[w6687 exclusions]`. Nothing is dropped or re-queued. A line is not written again after a restart (the request's
-    log already holds it) or when a computer drops off and comes back (w6754).
+    log already holds it, or its `exclusionsLogged` marks do, however long the log has grown: w6758) or when a computer
+    drops off and comes back (w6754).
   - **Stage 2, config `placement.exclusions`** (w6754): `warn` (the default, stage 1's lines), `enforce` or `off` (no
     audit). Under `enforce` the audit drops an avoid with no live reason (`w6754 enforced: dropped <machine> from its
     pair avoid: ...`) or widens a Queued request's needs with the computer, and the room flag in the same minute starts
     it; request_pair applies no avoid without a reason and its answer says which and why; decide_work queue refuses
-    needs that leave out a computer no reason names. A pin is only ever logged, even under enforce. Every fence, the Mac
+    needs that leave out a computer no reason names (never a pair run's: its Steam and cross-OS needs are not facts the
+    audit has, w6758). A pin is only ever logged, even under enforce (`w6754 enforce, pins are only logged, ...`); widened
+    needs say `added <machine> to its queue needs`. A pair-run retry filed before w6754 has no `failedOn`: the server's own
+    cite `an earlier leg of <the run it retries> failed there (w2041)` stands for it (w6758). Every fence, the Mac
     multiplayer-client guard and Ben's m5 hold on game players stay as they are: none of them is an exclusion here.
     Turning `enforce` on is lothsahn's switch.
   - request_pair's `avoid_why` is kept beside each avoided machine (`WorkPair.avoidWhy`) and shown in the line; it is

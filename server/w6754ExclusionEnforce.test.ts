@@ -9,6 +9,7 @@ import type { Requester, WorkItem } from '../shared/types.ts';
 import { unfitWhy } from '../shared/capacity.ts';
 import { normalizeSetting } from './appConfig.ts';
 import { setup } from './orchestratorsTestKit.ts';
+import { citeAvoid } from './orchestrators.ts';
 
 const LOTH: Requester = { userId: 'lothsahn', displayName: 'Lothsahn' };
 const T = '2026-11-26T18:39:00.000Z';
@@ -144,7 +145,7 @@ test('w6754 (a, b): a pin is kept when the work is about that machine or its wor
   store.putWork(copied);
   assert.deepEqual(o.auditExclusions(), ['w6684']);
   assert.deepEqual(store.work.get('w6684')!.machinePin?.ids, ['lothdesktop']);
-  assert.match(JSON.stringify(store.work.get('w6684')!.log.at(-1)), /w6687 warn-only, nothing dropped: enforcing would drop lothdesktop from its pin/);
+  assert.match(JSON.stringify(store.work.get('w6684')!.log.at(-1)), /w6754 enforce, pins are only logged, nothing dropped: lothdesktop from its pin: /);
 });
 
 test('w6754 (c): needs that only repeat the pin are not judged once per computer they leave out', () => {
@@ -178,6 +179,7 @@ test('w6754 enforce: needs with no reason are widened by the audit, and decide_w
   store.putWork(work('w6684', { title: 'Station-follow clip', queuedFor: { at: T, needs: ['lothdesktop'] } }));
   assert.deepEqual(o.auditExclusions(), ['w6684']);
   assert.deepEqual(store.work.get('w6684')!.queuedFor?.needs, ['lothdesktop', 'beast'], 'BEAST added; LothLaptop stays out by its config rule');
+  assert.match(JSON.stringify(store.work.get('w6684')!.log.at(-1)), /w6754 enforced: added beast to its queue needs: left out of its needs/, 'w6758: added, not dropped');
   store.putWork(work('w6685', { title: 'Another clip', status: 'new', queuedFor: undefined }));
   assert.throws(() => o.decide({ id: 'w6685', action: 'queue', note: 'wait for room', needs: ['lothdesktop'] }), /needs lothdesktop leave out beast, and nothing live keeps w6685 off it \(w6754, config placement\.exclusions is enforce\)/);
   assert.equal(needsUnreasoned(work('w6685'), ['lothdesktop', 'beast'], facts([], prefs, COMPUTERS, rule)).length, 0);
@@ -191,4 +193,57 @@ test('w6754: config placement.exclusions takes warn, enforce or off, and nothing
   assert.equal(normalizeSetting('placement.exclusions', ' OFF '), 'off');
   assert.equal(normalizeSetting('placement.exclusions', 'warn'), undefined, 'warn is the default, so it is not stored');
   assert.throws(() => normalizeSetting('placement.exclusions', 'strict'), /placement\.exclusions is one of warn, enforce, off/);
+});
+
+test('w6758 (review 1): decide_work queue does not refuse a pair run\'s needs under enforce (its Steam and cross-OS needs are facts the audit cannot see)', (t) => {
+  const { o, store } = kit(t, () => facts([...store.work.values()], ENFORCE));
+  store.putWork(work('w6710', { title: 'Pair run for w6673: Steam lobby join', status: 'new', queuedFor: undefined, pair: { legs: 2, for: 'w6673', steam: 'a Steam lobby join' } }));
+  assert.doesNotThrow(() => o.decide({ id: 'w6710', action: 'queue', note: 'two Steam accounts', needs: ['lothdesktop', 'lothlaptop'] }));
+  assert.equal(store.work.get('w6710')!.queuedFor?.needs, undefined, 'an unstarted pair run takes no needs (its legs are placed by pairRoom)');
+  assert.deepEqual(o.auditExclusions(), [], 'and the audit judges its avoid only, never its needs');
+});
+
+test('w6758 (review 3): a retry filed before w6754 keeps off where the server cited a failed leg; one filed since goes by failedOn alone', () => {
+  const cite = 'an earlier leg of w6690 failed there (w2041)';
+  const legacy = work('w6704', { pair: { legs: 2, for: 'w6673', retryOf: 'w6690', avoid: ['lothlaptop'], avoidWhy: { lothlaptop: cite } } });
+  assert.deepEqual(auditExclusions(legacy, facts([])).map((v) => [v.keep, v.kind]), [[true, 'failed-leg']]);
+  const since = work('w6705', { pair: { legs: 2, for: 'w6673', retryOf: 'w6690', failedOn: [], avoid: ['lothlaptop'], avoidWhy: { lothlaptop: cite } } });
+  assert.equal(auditExclusions(since, facts([]))[0].keep, false, 'failedOn says no leg failed there: the asker copied the cite');
+  const otherRun = work('w6706', { pair: { legs: 2, for: 'w6673', retryOf: 'w6691', avoid: ['lothlaptop'], avoidWhy: { lothlaptop: cite } } });
+  assert.equal(auditExclusions(otherRun, facts([]))[0].keep, false, 'a cite naming another run than the one it retries is not the server\'s');
+});
+
+test('w6758 (review 5): a restart logs nothing again however long the log has grown, and a mark no longer carried is pruned', (t) => {
+  const { o, store } = kit(t, () => facts([...store.work.values()]));
+  store.putWork(work('w6690', { title: 'Bench', queuedFor: { at: T, needs: ['lothlaptop'] } }));
+  assert.deepEqual(o.auditExclusions(), ['w6690']);
+  const w = store.work.get('w6690')!;
+  assert.deepEqual(w.exclusionsLogged, ['queuedFor.needs|beast', 'queuedFor.needs|lothdesktop']);
+  // 40 later lines push the warnings out of the log; then a restart.
+  w.log = Array.from({ length: 40 }, (_, i) => `2026-11-28T10:${String(i).padStart(2, '0')}:00Z: something else`);
+  store.putWork(w);
+  const mem = o as unknown as { exclusionSeen: Map<string, unknown>; exclusionWarned: Set<string> };
+  mem.exclusionSeen.clear();
+  mem.exclusionWarned.clear();
+  assert.deepEqual(o.auditExclusions(), []);
+  // Queued with no needs: the marks go.
+  store.putWork({ ...store.work.get('w6690')!, queuedFor: { at: T } });
+  assert.deepEqual(o.auditExclusions(), []);
+  assert.equal(store.work.get('w6690')!.exclusionsLogged, undefined);
+});
+
+test('w6758 (the w6760 review): an asker\'s copy of the server\'s w2041 cite is marked as theirs; a line logged before w6758 gets its mark', (t) => {
+  const p = work('w6707', { pair: { legs: 2, for: 'w6673', retryOf: 'w6690', avoid: ['lothlaptop'] } });
+  citeAvoid(p, ['lothlaptop'], 'an earlier leg of w6690 failed there (w2041)');
+  assert.equal(p.pair!.avoidWhy!.lothlaptop, 'the asker wrote: an earlier leg of w6690 failed there (w2041)');
+  assert.equal(auditExclusions(p, facts([]))[0].keep, false, 'not the server\'s cite');
+  citeAvoid(p, ['lothlaptop'], 'an earlier leg of w6690 failed there (w2041)', true);
+  assert.equal(auditExclusions(p, facts([]))[0].kind, 'failed-leg');
+  // (b) A warning from before w6758 lives only in the log: the first audit after the restart keeps its mark.
+  const { o, store } = kit(t, () => facts([...store.work.values()]));
+  const w = work('w6691', { title: 'Bench', queuedFor: { at: T, needs: ['lothlaptop', 'lothdesktop'] } });
+  w.log = ['2026-11-28T08:00:00Z: w6687 warn-only, nothing dropped: enforcing would drop beast from its queue needs: left out'];
+  store.putWork(w);
+  assert.deepEqual(o.auditExclusions(), []);
+  assert.deepEqual(store.work.get('w6691')!.exclusionsLogged, ['queuedFor.needs|beast']);
 });
