@@ -4866,7 +4866,7 @@ export class Daemon {
         const d = await deleteGenericCreds(m.deleteFrom, exec);
         tell(`Credential Manager: ${d.deleted.length ? `deleted ${d.deleted.join(', ')}` : 'no gh entry left'}${d.failed.length ? `; could NOT delete ${d.failed.join(', ')}, which a Low worker can still read` : ''}`);
       }
-      const ok = await labelNoReadUp(plan.label, exec, say, { systemDrive: () => false, grant: false, what: "No-Read-Up on the owner's gh folder and ~\\.ssh, w5749" });
+      const ok = await labelNoReadUp(plan.label, exec, say, { systemDrive: () => false, grant: false, what: `No-Read-Up on ${plan.label.map((t) => t.path).join(' and ')}, w5749/w6569` });
       const st = await realGhRun(['auth', 'status', '--hostname', 'github.com']);
       log(sayOwnerLabels('on', plan, ghLoginStorage(`${st.stdout}\n${st.stderr}`)) + (ok ? '' : ' (not every label could be set: the lines above say which)'));
       return;
