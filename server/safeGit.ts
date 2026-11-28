@@ -148,6 +148,20 @@ const isReadOnly = (key: string) => /^remotes\..+$/.test(key) || key === 'fetch.
 /** fetch and pull options that take their value as the next argument (so it is not read as the remote). */
 const FETCH_VALUE_OPTS = new Set(['-j', '--jobs', '--depth', '--deepen', '--shallow-since', '--shallow-exclude', '-o', '--server-option', '--upload-pack', '--refmap', '--negotiation-tip', '--filter', '--recurse-submodules-default', '--submodule-prefix', '-s', '--strategy', '-X', '--strategy-option', '--cleanup']);
 
+/**
+ * Whether a fetch argument is a cluster of short options holding `-m` (`--multiple`, w6633: `fetch -m origin b` and
+ * `fetch -qm origin b` ran a planted uploadpack, measured by w6629). The letters after one that takes a value (`-j`, `-o`)
+ * are that value. pull has no `-m` (`git pull -h`).
+ */
+function shortMultiple(a: string): boolean {
+  if (!/^-[^-]/.test(a)) return false;
+  for (const c of a.slice(1)) {
+    if (c === 'm') return true;
+    if (c === 'j' || c === 'o') return false;
+  }
+  return false;
+}
+
 /** The remote (or group) a fetch or pull names, or undefined when it names none. */
 function remoteArg(rest: string[]): string | undefined {
   for (let i = 0; i < rest.length; i++) {
@@ -181,7 +195,7 @@ export function uploadReach(args: string[], rows: { key: string; value: string }
   const rest = args.slice(sub + 1);
   if (name === 'ls-remote') return 'covered';
   if (name === 'fetch' || name === 'pull') {
-    if (rest.some((a) => isOpt(a, '--all') || isOpt(a, '--multiple'))) return 'uncovered';
+    if (rest.some((a) => isOpt(a, '--all') || isOpt(a, '--multiple') || (name === 'fetch' && shortMultiple(a)))) return 'uncovered';
     const remote = remoteArg(rest);
     if (remote === undefined) {
       const all = rows.filter((r) => r.key === 'fetch.all').at(-1);
@@ -378,9 +392,28 @@ function unscanned(args: string[], env: Env): { args: string[]; env: Env } {
 
 const scanArgs = (location: string[]) => [...location, 'config', '--show-scope', '--includes', '-z', '--get-regexp', SCANNED_KEYS];
 
-function fenced(args: string[], env: Env, scanOut: string): { args: string[]; env: Env } {
+/**
+ * Why a scan's rows cannot be trusted, or undefined (w6632): only a scan that ended by itself with exit 0, or with exit 1 (no
+ * such key) or 128 (not a repository: git then fails the call itself) and printed nothing, read the whole config. A scan cut
+ * short (its output over SCAN_MAX_BUFFER, ENOBUFS; its timeout; a signal; any other exit) holds only the rows before the cut,
+ * and a key planted after 5 MiB of padding ran through the fence (measured by w6629). A missing program or folder (ENOENT)
+ * passes: the call fails the same way by itself.
+ */
+export function scanCut(exit: number | null, why: string, out: string): string | undefined {
+  if (exit === 0) return undefined;
+  if ((exit === 1 || exit === 128) && out === '') return undefined;
+  if (why === 'ENOENT') return undefined;
+  return why || `exit ${exit}`;
+}
+
+/** The scan's output limit: a scan that prints more is cut short and refused (w6632). */
+export const SCAN_MAX_BUFFER = 4 * 1024 * 1024;
+
+function fenced(args: string[], env: Env, scanOut: string, cut?: string): { args: string[]; env: Env } {
   const rows = parseScan(scanOut);
-  const no = refusal(args, rows);
+  const no = cut
+    ? `refused by FF Factory (w6632): the fence's scan of this repository's config was cut short (${cut}), so a key after the cut would run unchecked; look at \`git config --show-scope --includes --get-regexp .\` in that repository for an oversized or hanging entry and remove it`
+    : refusal(args, rows);
   // A refused call still runs git, with an option it rejects (exit 129, the reason in its stderr), so every caller fails the
   // way it already handles a failed git.
   if (no)
@@ -422,11 +455,13 @@ export function gitFenceSync(args: string[], opts: { cwd?: string; env?: Env } =
       timeout: 15_000,
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
-      maxBuffer: 4 * 1024 * 1024,
+      maxBuffer: SCAN_MAX_BUFFER,
     });
   } catch (e) {
-    // Exit 1 is "no such key"; anything else (not a repository) leaves the call to fail by itself.
-    out = String((e as { stdout?: string }).stdout ?? '');
+    const x = e as { stdout?: string; status?: number | null; signal?: string | null; code?: string };
+    out = String(x.stdout ?? '');
+    const exit = typeof x.status === 'number' && !x.signal && typeof x.code !== 'string' ? x.status : null;
+    return fenced(args, env, out, scanCut(exit, x.code ?? x.signal ?? '', out));
   }
   return fenced(args, env, out);
 }
@@ -446,9 +481,15 @@ export function gitFence(args: string[], opts: { cwd?: string; env?: Env } = {})
         encoding: 'utf8',
         timeout: 15_000,
         windowsHide: true,
-        maxBuffer: 4 * 1024 * 1024,
+        maxBuffer: SCAN_MAX_BUFFER,
       },
-      (_e, out) => resolve(fenced(args, env, String(out ?? ''))),
+      (e, raw) => {
+        const out = String(raw ?? '');
+        if (!e) return resolve(fenced(args, env, out));
+        const exit = typeof e.code === 'number' && e.code >= 0 && !e.signal ? e.code : null;
+        const why = typeof e.code === 'string' ? e.code : e.signal || (e.killed ? 'timed out' : e.message);
+        resolve(fenced(args, env, out, scanCut(exit, why, out)));
+      },
     );
   });
 }
@@ -463,8 +504,10 @@ export async function gitOffThread(args: string[], opts: { cwd?: string; env?: E
   let f: { args: string[]; env: Env };
   if (!needsScan(args)) f = unscanned(args, env);
   else {
-    const scan = await runOffThread('git', scanArgs(splitGlobal(args).location), 15_000, { cwd: opts.cwd, env: scanEnv(env), maxBuffer: 4 * 1024 * 1024 });
-    f = fenced(args, env, scan.stdout);
+    const scan = await runOffThread('git', scanArgs(splitGlobal(args).location), 15_000, { cwd: opts.cwd, env: scanEnv(env), maxBuffer: SCAN_MAX_BUFFER });
+    // The probe thread answers -1 for anything but an exit (its stderr then holds execFile's message: maxBuffer, ENOENT, ...).
+    const why = scan.code >= 0 ? '' : scan.timedOut ? 'timed out' : /ENOENT/.test(scan.stderr) ? 'ENOENT' : scan.stderr.split('\n')[0] || 'no exit';
+    f = fenced(args, env, scan.stdout, scanCut(scan.code >= 0 ? scan.code : null, why, scan.stdout));
   }
   return runOffThread(opts.bin ?? 'git', [...(opts.pre ?? []), ...f.args], opts.timeoutMs ?? 15_000, { cwd: opts.cwd, env: f.env });
 }
