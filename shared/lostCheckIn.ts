@@ -11,7 +11,8 @@
  *   w2544 move only reads Blocked and Queued requests and held messages, never a stopped worker's pending check-in.
  *
  * The Waker now says so (Waker.onLost), the request carries it (WorkItem.lostCheckIn), and its live state is Stalled with
- * the reason until a worker on it starts a turn again.
+ * the reason until a worker on it starts a turn again. Another worker on the request that comes back by itself (its own
+ * check-in, a job between turns) wins: the request is not Stalled then, and the dispatcher is not told (review w6771, B1).
  */
 import type { SessionInfo, WorkItem } from './types.ts';
 
@@ -29,6 +30,11 @@ export interface LostCheckIn {
   seen: string;
   /** The turns each worker on the request had then: a later turn by any of them (or a new worker) ends it. */
   turns: Record<string, number>;
+  /**
+   * The request's sessionIds then: a worker added since ends it for good, also once it leaves again (review w6771, M1; turns
+   * only grow, so a turn taken since ends it for good too).
+   */
+  ids?: string[];
 }
 
 /** "its check-in at 09:45Z is due, and worker e41a69e8 is gone": the request's Stalled line and its log. */
@@ -40,8 +46,9 @@ export function lostLine(l: Pick<LostCheckIn, 'worker' | 'due' | 'why'>): string
  * Whether `w`'s lost check-in still stands: no worker on it is mid-turn, none has taken a turn since, and no new worker came.
  * `workers` are the request's workers that still exist (onRequest).
  */
-export function lostStands(w: Pick<WorkItem, 'lostCheckIn'>, workers: readonly Pick<SessionInfo, 'id' | 'turns' | 'status'>[]): w is { lostCheckIn: LostCheckIn } {
+export function lostStands(w: Pick<WorkItem, 'lostCheckIn'> & Partial<Pick<WorkItem, 'sessionIds'>>, workers: readonly Pick<SessionInfo, 'id' | 'turns' | 'status'>[]): w is { lostCheckIn: LostCheckIn } {
   const l = w.lostCheckIn;
   if (!l) return false;
+  if (l.ids && (w.sessionIds ?? []).some((id) => !l.ids!.includes(id))) return false;
   return workers.every((s) => s.id in l.turns && s.turns <= l.turns[s.id] && s.status !== 'running' && s.status !== 'starting' && s.status !== 'waiting_permission');
 }

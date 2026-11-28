@@ -1252,8 +1252,8 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
 
   // w6768: its worker's own check-in came due and nothing could deliver it (the worker gone, or its computer away past the
   // grace): Stalled with that reason, not Sleeping, "stopped until its check-in" or "Merged, follow-up pending", until a
-  // worker on it takes a turn again.
-  if (lostStands(w, workers)) return withMachines({ state: 'stalled', why: `${lostLine(w.lostCheckIn)}: nothing resumes it (w6768)` }, workers);
+  // worker on it takes a turn again. Another worker on it that comes back by itself (its own check-in, a job) wins (w6771 B1).
+  if (lostStands(w, workers) && !(coming && coming.s.id !== w.lostCheckIn.worker)) return withMachines({ state: 'stalled', why: `${lostLine(w.lostCheckIn)}: nothing resumes it (w6768)` }, workers);
 
   // w1863: a leg waiting for its computer is Queued, also while the request's own worker is between turns elsewhere.
   if (leg) return leg;

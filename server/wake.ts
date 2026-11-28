@@ -167,13 +167,12 @@ export class Waker {
     try {
       this.sessions.send(sessionId, `[wake_me] ${head}. Your note: ${t.note || '(none)'}`, 'system', undefined, { ops: 'wake', ...(t.resumeOf ? { resumeOf: { work: t.resumeOf, note: t.note } } : {}) });
     } catch (e) {
-      // w6768: its computer away past the grace: no retry a minute apart brings it back; said now (the retries go on).
-      const away = this.awayOf?.(sessionId);
-      if (away) this.tellLost(sessionId, t, away);
       // At the agent limit, the host guard says wait, or its machine is offline: try again in a minute, a few times.
       if (tries < RETRIES) return this.arm(sessionId, { at: t.at, note: t.note, ...(t.early ? { early: t.early } : {}), ...(t.resumeOf ? { resumeOf: t.resumeOf } : {}) }, tries + 1, 60_000);
       this.store.append(sessionId, { kind: 'system', text: `wake_me could not wake this session: ${(e as Error).message}` });
-      this.tellLost(sessionId, t, `could not be woken (${(e as Error).message.slice(0, 160)})`);
+      // w6768: said after the last retry, never while one may still deliver it (review w6771, S2): its computer away past the
+      // grace named as the reason when it is.
+      this.tellLost(sessionId, t, this.awayOf?.(sessionId) ?? `could not be woken (${(e as Error).message.slice(0, 160)})`);
     }
     this.save();
   }

@@ -81,7 +81,7 @@ test('w6768: after a restart, a saved check-in whose worker is gone is kept and 
   assert.deepEqual(lost, ['w1 is gone']);
 });
 
-test('w6768: a wake refused while its computer is away past the grace is reported once; the retries go on and the last drop says nothing more', (t) => {
+test('w6768: a wake refused while its computer is away past the grace is reported after its last retry, with the computer named', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let tries = 0;
   const { w, lost, advance } = wakerSetup(t, () => {
@@ -93,10 +93,25 @@ test('w6768: a wake refused while its computer is away past the grace is reporte
   advance(10 * MIN);
   t.mock.timers.tick(10 * MIN);
   assert.equal(tries, 1);
-  assert.deepEqual(lost.map((l) => l.why), ['is on beast (offline 147 min)']);
+  assert.equal(lost.length, 0, 'not while a retry may still deliver it (review w6771, S2)');
   for (let i = 0; i < 15; i++) t.mock.timers.tick(MIN);
   assert.ok(tries > 5, `retried (${tries})`);
-  assert.equal(lost.length, 1, 'said once per wake');
+  assert.deepEqual(lost.map((l) => l.why), ['is on beast (offline 147 min)'], 'said once, after the last retry');
+});
+
+test('w6768: a wake refused twice and then delivered is never reported lost (review w6771, P4)', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let refuse = 2;
+  const { w, sent, lost, advance } = wakerSetup(t, () => {
+    if (refuse > 0 && refuse--) throw new Error('beast is offline');
+  });
+  w.awayOf = () => 'is on beast (offline 147 min)';
+  w.schedule('w1', 10, 'x');
+  advance(10 * MIN);
+  t.mock.timers.tick(10 * MIN);
+  for (let i = 0; i < 5; i++) t.mock.timers.tick(MIN);
+  assert.equal(sent.length, 1);
+  assert.equal(lost.length, 0);
 });
 
 test('w6768: a wake refused with its computer not away reports only after its last retry', (t) => {
@@ -147,6 +162,25 @@ test('w6768: a turn by its worker, or a new worker on the request, ends the lost
   assert.equal(lostStands({ lostCheckIn: l }, [worker('69908625'), worker('new1', { turns: 1 })]), false, 'a new worker came');
   assert.equal(lostStands({ lostCheckIn: lostOf() }, []), true, 'gone, and nobody else');
   assert.equal(lostLine(l), 'its check-in at 09:45Z is due, and worker 69908625 is gone');
+});
+
+test("w6768: a removed worker's lost check-in does not read Stalled over another worker's own check-in or job (review w6771, B1)", () => {
+  const now = Date.parse('2026-11-28T10:00:00Z');
+  const lc = lostOf({ worker: 'gone1', turns: { b: 4 }, ids: ['gone1', 'b'] });
+  const w = item({ sessionIds: ['gone1', 'b'], lostCheckIn: lc });
+  const live = (b: SessionInfo) => workLive(w, { items: [w], session: (id) => (id === 'b' ? b : undefined), now });
+  const sleeper = live(worker('b', { wakeAt: '2026-11-28T10:30:00.000Z' }));
+  assert.equal(sleeper?.state, 'sleeping', JSON.stringify(sleeper));
+  assert.match(sleeper!.why, /b's check-in/);
+  const job = live(worker('b', { status: 'idle', backgroundTasks: 1 }));
+  assert.notEqual(job?.state, 'stalled', JSON.stringify(job));
+  assert.equal(live(worker('b'))?.state, 'stalled', 'b stopped with nothing coming: the lost check-in stands');
+});
+
+test('w6768: a new worker ends a lost check-in for good, also after it leaves the request again (review w6771, M1)', () => {
+  const lc = lostOf({ worker: 'gone1', turns: {}, ids: ['gone1'] });
+  assert.equal(lostStands({ lostCheckIn: lc, sessionIds: ['gone1'] }, []), true);
+  assert.equal(lostStands({ lostCheckIn: lc, sessionIds: ['gone1', 'n'] }, []), false, 'n came and went: its id stays on the request');
 });
 
 // ---------------------------------------------------------------- the server
@@ -239,6 +273,17 @@ test('w6768: a worker on a computer offline past the grace: its wake reads as aw
   // Its next turn ends it.
   store.putSession({ ...store.sessions.get('69908625')!, turns: 5 });
   assert.notEqual(workLive(w, { items: [w], session: (id) => store.sessions.get(id), now: Date.now() })?.why?.includes('w6768'), true);
+});
+
+test('w6768: another worker on the request with its own check-in carries it: nothing recorded and the dispatcher not told (review w6771, B1); nor on a request its worker reported done (M2)', async (t) => {
+  const { store, agents, told, request } = await agentsSetup(t);
+  store.putSession(worker('bbbb2222', { wakeAt: new Date(Date.now() + 30 * MIN).toISOString() }));
+  request({ sessionIds: ['e41a69e8', 'bbbb2222'] });
+  request({ id: 'w6001', sessionIds: ['e41a69e8'], done: { e41a69e8: { at: T, report: 'DONE: w6001' } } });
+  assert.deepEqual(agents.lostCheckIn('e41a69e8', { at: Date.now() - MIN, note: 'x' }, 'is gone'), []);
+  assert.equal(store.work.get('w6370')!.lostCheckIn, undefined);
+  assert.equal(store.work.get('w6001')!.lostCheckIn, undefined);
+  assert.equal(told.length, 0);
 });
 
 test('w6768: deleting a sandbox keeps the workers that released it before (e41a69e8 was removed with slot5)', () => {
