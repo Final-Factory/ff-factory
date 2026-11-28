@@ -204,7 +204,7 @@ test('w5870: the plugin refresh runs git fenced: fixed keys first, a planted pro
   const unset = seen.find((a) => a.includes('--unset-all'))!;
   assert.deepEqual(unset.slice(unset.indexOf('-C')), ['-C', mp, 'config', '--local', '--unset-all', 'url.https://evil/.insteadof']);
   assert.ok(unset.includes(`core.hooksPath=${HOOKS}`), 'the unset is fenced too');
-  assert.match(said.at(-1)!, /^WARNING: the marketplace checkout .* rewrote remote URLs \(url\.https:\/\/evil\/\.insteadof\).* removed/);
+  assert.match(said.at(-1)!, /^WARNING: the marketplace checkout .* set url\.https:\/\/evil\/\.insteadof in its own config.* removed/);
   // One that cannot be removed stops only this folder's refresh.
   const stuck = { exec: async (_c: string, a: string[]) => (a.includes('--unset-all') ? { code: 4, stdout: '', stderr: 'error: could not lock config file' } : scan), say: d.say };
   assert.equal(await fencedRegisterEnv(stuck, claudeDir, {}), undefined);

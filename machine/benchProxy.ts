@@ -71,11 +71,30 @@ export class BenchProxy {
     }
   }
 
+  /** w6595: read() off the loop, for bench/state and register (bench/state is asked every few seconds per ticket). */
+  private async readAsync(h: string): Promise<BenchHandleRecord | undefined> {
+    try {
+      return JSON.parse(await fs.promises.readFile(this.rec(h), 'utf8')) as BenchHandleRecord;
+    } catch {
+      return undefined;
+    }
+  }
+
   /** The caller's own handle, or a refusal. */
   private own(c: Caller, b: Record<string, unknown>): BenchHandleRecord {
     const h = str(b.handle, 40);
     if (!HANDLE.test(h)) throw new RpcRefused(`not a bench handle: "${h}"`);
-    const r = this.read(h);
+    return this.ownOf(c, h, this.read(h));
+  }
+
+  /** own() with the record read off the loop (w6595). */
+  private async ownAsync(c: Caller, b: Record<string, unknown>): Promise<BenchHandleRecord> {
+    const h = str(b.handle, 40);
+    if (!HANDLE.test(h)) throw new RpcRefused(`not a bench handle: "${h}"`);
+    return this.ownOf(c, h, await this.readAsync(h));
+  }
+
+  private ownOf(c: Caller, h: string, r: BenchHandleRecord | undefined): BenchHandleRecord {
     if (!r) throw new RpcRefused(`no bench handle ${h} here (released, or from before a cleanup)`, 404);
     if (r.session !== c.session) throw new RpcRefused(`bench handle ${h} is another session's`, 403);
     return r;
@@ -141,21 +160,21 @@ export class BenchProxy {
   }
 
   /** What the helper says now (the lines BenchTicket.state reads), and its warning line. */
-  state(c: Caller, b: Record<string, unknown>): ProxyState {
-    return this.stateOf(this.own(c, b));
+  async state(c: Caller, b: Record<string, unknown>): Promise<ProxyState> {
+    return this.stateOf(await this.ownAsync(c, b));
   }
 
-  private stateOf(r: BenchHandleRecord): ProxyState {
-    const read = (f: string) => {
+  /** w6595: its three small files read off the loop (on a busy disk these reads held the daemon's loop up to 8.5 s). */
+  private async stateOf(r: BenchHandleRecord): Promise<ProxyState> {
+    const read = async (f: string) => {
       try {
-        return fs.readFileSync(f, 'utf8').trim();
+        return (await fs.promises.readFile(f, 'utf8')).trim();
       } catch {
         return undefined;
       }
     };
-    const line = (read(this.status(r.handle)) ?? '').split(/\r?\n/)[0] ?? '';
-    const warn = read(`${this.status(r.handle)}.warn`);
-    const exitText = read(`${this.status(r.handle)}.exit`);
+    const [statusText, warn, exitText] = await Promise.all([read(this.status(r.handle)), read(`${this.status(r.handle)}.warn`), read(`${this.status(r.handle)}.exit`)]);
+    const line = (statusText ?? '').split(/\r?\n/)[0] ?? '';
     const exit = exitText !== undefined && /^-?\d+$/.test(exitText) ? Number(exitText) : undefined;
     const extra = { ...(warn ? { warn } : {}), ...(exit !== undefined ? { exit } : {}) };
     const g = /^granted (t\d{8})/.exec(line);
@@ -178,7 +197,7 @@ export class BenchProxy {
   }
 
   /** Note a process started inside the ticket (bench_queue.py register_pid: a game player), so a revoked turn stops it too. */
-  register(c: Caller, b: Record<string, unknown>): { ticket?: string } {
+  async register(c: Caller, b: Record<string, unknown>): Promise<{ ticket?: string }> {
     const pid = Number(b.pid);
     if (!Number.isInteger(pid) || pid <= 0) throw new RpcRefused('pid: a positive integer');
     const lock = this.d.lock();
@@ -187,7 +206,7 @@ export class BenchProxy {
     // ticket must be granted, live and taken for the caller's own session (its info.json says whose, as its helper wrote it).
     let ticket: string | undefined;
     if (b.handle !== undefined) {
-      const s = this.stateOf(this.own(c, b));
+      const s = await this.stateOf(await this.ownAsync(c, b));
       if (s.kind !== 'granted' || !s.ticket) throw new RpcRefused(`bench handle ${String(b.handle)} holds no ticket (${s.line})`);
       ticket = s.ticket;
     } else {
