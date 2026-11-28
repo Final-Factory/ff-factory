@@ -127,6 +127,7 @@ import { configureAgentAccount } from './agentAccount.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './dataGuard.ts';
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
+import { CpuSampler, probePool, timeNextDeflate } from './connectTiming.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
 import { costMark, costSince } from './placeCost.ts';
 import { pageAllStats } from './ffuSlotsView.ts';
@@ -2768,7 +2769,11 @@ const server = http.createServer(async (req, res) => {
 
 // Big messages (the full state a page gets when it connects, megabytes at thousands of sessions) go compressed;
 // the stream of small events does not pay for zlib. No context takeover: no zlib memory kept per page between messages.
-const wss = new WebSocketServer({ noServer: true, maxPayload: PAGE_MAX_PAYLOAD, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
+/** Page messages under this go out uncompressed (ws's perMessageDeflate threshold). */
+const PAGE_DEFLATE_THRESHOLD = 16 * 1024;
+/** w6762: samples the VM's CPU at each page connect's open and hand-off (connectTiming.ts). */
+const cpuSampler = new CpuSampler();
+const wss = new WebSocketServer({ noServer: true, maxPayload: PAGE_MAX_PAYLOAD, perMessageDeflate: { threshold: PAGE_DEFLATE_THRESHOLD, serverNoContextTakeover: true, clientNoContextTakeover: true } });
 /** Every page's socket, with the login it signed in as (notices meant for one person go to their pages only). */
 const clients = new Map<WebSocket, string>();
 /**
@@ -2855,6 +2860,8 @@ server.on('upgrade', (req, socket, head) => {
     return socket.destroy();
   }
   const user = auth.user(req)!;
+  // w6762: the server's clock when the page's upgrade arrived, set beside the page's own on its ready line.
+  const arrivedAt = Date.now();
   wss.handleUpgrade(req, socket, head, (ws) => {
     clients.set(ws, user);
     alive.add(ws);
@@ -2873,6 +2880,9 @@ server.on('upgrade', (req, socket, head) => {
       if (!isBinary) pageSockets.ready(ws, data.toString());
     });
     const t0 = performance.now();
+    // w6762: the CPU and the thread pool over this connect's handoff (connectTiming.ts), for the sent and ready lines.
+    const cpuAtOpen = cpuSampler.sample();
+    probePool((lag) => pageSockets.pool(ws, lag));
     const q = new URL(req.url ?? '/', 'http://x').searchParams;
     // w6336: a reconnecting page's parts it holds unchanged are left out (shared/pageParts.ts).
     const phases: [string, number][] = [];
@@ -2891,8 +2901,13 @@ server.on('upgrade', (req, socket, head) => {
     firstStateUntil.set(ws, Date.now() + FIRST_STATE_GRACE_MS);
     // w5861: the log says how long the first state took to build and to hand to the network (on a slow path the last
     // of it waits for the page to take what came before), so a slow open shows where its seconds went.
-    ws.send(first, () => pageSockets.sent(ws, performance.now() - t0));
-    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta, buildMs: t1 - t0, jsonMs: built - (t1 - t0), kept: state.partsKept, checked: pageSessionsCache.checked, work: state.workDelta ? { sent: state.work?.length ?? 0, of: state.workDelta.ids.length } : undefined, phases, place });
+    const deflate = first.length >= PAGE_DEFLATE_THRESHOLD ? timeNextDeflate(ws) : {};
+    ws.send(first, () => {
+      const sentPerf = performance.now();
+      pageSockets.cpu(ws, cpuSampler.between(cpuAtOpen, cpuSampler.sample()));
+      pageSockets.sent(ws, sentPerf - t0, sentPerf);
+    });
+    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta, buildMs: t1 - t0, jsonMs: built - (t1 - t0), kept: state.partsKept, checked: pageSessionsCache.checked, work: state.workDelta ? { sent: state.work?.length ?? 0, of: state.workDelta.ids.length } : undefined, phases, place }, { arrivedAt, deflate });
     if (Date.now() - lastSizesAt >= 3_600_000) {
       lastSizesAt = Date.now();
       setImmediate(() => console.log(`page state sizes: ${stateSizes(state)}`));
