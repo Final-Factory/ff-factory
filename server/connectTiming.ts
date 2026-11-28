@@ -2,13 +2,25 @@
 // 3-9 s for its socket to open and 3-10 s more for the first state, with the event loop never blocked for a second
 // (2026-11-28 05:00:26-34Z: three sockets, one second's finish). These measure the shared things that could hold them:
 // libuv's thread pool (ws deflates on it, and so do fs and zlib), ws's own deflate of the first state (queued behind its
-// limiter, then run on that pool in 16 KB output chunks, each a pool job and a loop turn), the kernel write after it, and
+// limiter, then run on that pool, one pool job and one loop turn per output buffer: 16 KB until PAGE_DEFLATE set 256 KB), the kernel write after it, and
 // the VM's CPU (the portal's node, tailscaled carrying Funnel and tailnet traffic, and the hypervisor's steal).
 // docs/portal-logs.md, "Page socket timing".
 import fs from 'node:fs';
 import os from 'node:os';
 
 const now = () => performance.now();
+
+/**
+ * The page socket's permessage-deflate options (w6762). zlib on a stream runs one libuv thread-pool job per output buffer
+ * it fills, and each job's result comes back on its own loop turn: at zlib's default 16 KB buffer a 4.7 MB first state
+ * (1.2 MB deflated) was 77 jobs and 77 turns, and with the pool and the loop busy after a restart each one waited, so the
+ * deflate ran 21.0 s of a 22.1 s handoff (ben, 2026-11-28 10:41Z; 638 KB ran 8.2 s in 15 chunks). A 256 KB buffer makes
+ * that 5 jobs (a reconnect's state, under 256 KB deflated, is one). Measured with the pool's 4 threads kept busy and the
+ * loop blocked 300 ms a second: 4.7 MB went out in 298 ms, not 1827 ms; 673 KB in 96 ms, not 349 ms. Level 1 did not
+ * help: more output, more jobs (58 s for 4.7 MB at 16 KB). Each page's stream keeps one such buffer (no context takeover
+ * keeps no zlib history between messages, ws still reuses the stream).
+ */
+export const PAGE_DEFLATE = { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true, zlibDeflateOptions: { chunkSize: 256 * 1024 } } as const;
 
 /** How long a no-op job waited for libuv's thread pool (`poolMs`) and for one turn of the event loop (`loopMs`). */
 export interface PoolLag { poolMs: number; loopMs: number }
