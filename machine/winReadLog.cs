@@ -847,6 +847,44 @@ static class FfReadLog
         OnStop(321, T + 896, tick());
         OnStop(313, T + 895, tick());
         check(!said("holderchild.txt") && !Tracked.ContainsKey(321), "a pending child of a later holder of its parent's pid is dropped with its open");
+        // review w6750 R7a: a person's LIVE child under a later holder of a gone worker's pid: its open is held while it is
+        // pending (not run because it is live), and the holder's stop drops the child and the open
+        run(330, 100, T + 910);
+        OnStart(330, 100, T + 910, "C:\\ffw\\tools\\node.exe", tick());
+        exit(330);
+        run(330, 4, T + 915);
+        run(331, 330, T + 916);
+        OnStart(331, 330, T + 916, "C:\\apps\\app.exe", tick());
+        OnOpen(331, "C:\\Users\\me\\r7a.txt", tick());
+        check(!said("r7a.txt"), "R7a: a pending child's open is held even while the child is live");
+        exit(330);
+        OnStop(330, T + 915, tick());
+        check(!said("r7a.txt") && !Tracked.ContainsKey(331), "R7a: a later holder's stop drops its live pending child and the open");
+        exit(331);
+        // review w6750 R7b: a worker's pending child (341) exits, its stop lost; a person's app takes pid 341 and opens a file
+        // before the parent's own stop confirms the child: Confirm judges the open again, and it never runs
+        run(340, 100, T + 920);
+        OnStart(340, 100, T + 920, "C:\\ffw\\tools\\node.exe", tick());
+        run(341, 340, T + 921);
+        long start341 = tick();
+        exit(341);
+        exit(340);
+        OnStart(341, 340, T + 921, "C:\\Windows\\System32\\cmd.exe", start341);
+        run(341, 4, T + 925);
+        low.Add(341);
+        OnOpen(341, "C:\\Users\\me\\r7b.txt", tick());
+        OnStop(340, T + 920, tick());
+        check(Tracked.ContainsKey(341) && !Tracked[341].Pending && !said("r7b.txt"), "R7b: a confirmed child's held open, made by its pid's later holder, is not reported");
+        exit(341);
+        Tracked.Remove(341);
+        // review w6750 M12: a start handled late does not replace a later holder of the child's pid already followed
+        run(350, 100, T + 950);
+        long early350 = tick();
+        OnStart(350, 100, T + 950, "C:\\ffw\\tools\\git.exe", tick());
+        OnStart(350, 100, T + 940, "C:\\ffw\\tools\\old.exe", early350);
+        check(Tracked.ContainsKey(350) && Tracked[350].Start == T + 950, "M12: a late start of an older process does not replace the pid's later holder");
+        exit(350);
+        Tracked.Remove(350);
 
         // w6734 B4: a start event without a creation time is not followed, even when a process now holds the child's pid
         run(301, 100, T + 900);
