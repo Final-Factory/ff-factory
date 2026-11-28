@@ -1,6 +1,7 @@
 // w6768: a worker's own check-in that nothing can deliver (its worker gone, its computer away past the grace) is said:
 // the Waker reports it (onLost), the request carries it (lostCheckIn), its live state is Stalled with the reason, and the
-// dispatcher is told once how to start or move it. Warn-only: nothing moves by itself yet.
+// dispatcher is told once. With config lostCheckIns "on" (unset) its work resumes elsewhere with the check-in's note (moved off
+// the away computer, or a fresh worker for one that is gone); "warn" is the recovery switch that only shows and tells.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -15,6 +16,7 @@ import { Identity } from './identity.ts';
 import { workLive } from '../shared/workState.ts';
 import { lostLine, lostStands, type LostCheckIn } from '../shared/lostCheckIn.ts';
 import type { Config } from './config.ts';
+import type { Computer } from './placement.ts';
 import type { Machine, Requester, SessionInfo, UserInfo, WorkItem } from '../shared/types.ts';
 
 const MIN = 60_000;
@@ -226,11 +228,12 @@ async function agentsSetup(t: { after: (fn: () => void | Promise<void>) => void 
     store.putWork(w);
     return w;
   };
-  return { store, agents, told, machine, request };
+  return { store, agents, told, machine, request, cfg };
 }
 
 test('w6768: a gone worker\'s due check-in is recorded on its open request, logged with the would-be move, and the dispatcher told once', async (t) => {
-  const { store, agents, told, request } = await agentsSetup(t);
+  const { store, agents, told, request, cfg } = await agentsSetup(t);
+  cfg.lostCheckIns = 'warn';
   request({ prs: [{ repo: 'Final-Factory/ff-factory', number: 1500, state: 'merged' }] });
   request({ id: 'w6000', status: 'done', sessionIds: ['e41a69e8'] }); // closed: left alone
   const at = Date.parse('2026-11-28T09:45:00Z');
@@ -241,7 +244,7 @@ test('w6768: a gone worker\'s due check-in is recorded on its open request, logg
   assert.equal(w.lostCheckIn?.due, '2026-11-28T09:45:00.000Z');
   assert.equal(w.lostCheckIn?.note, 'check the follow-up PR');
   assert.equal(store.work.get('w6000')!.lostCheckIn, undefined);
-  assert.ok(w.log.some((l) => l.includes("its check-in at 09:45Z is due, and worker e41a69e8 is gone: nothing resumes it (w6768); warn-only, so nothing moves yet: the automatic move would start a fresh worker for it where it fits, with the check-in's note")), w.log.join(' | '));
+  assert.ok(w.log.some((l) => l.includes("its check-in at 09:45Z is due, and worker e41a69e8 is gone: nothing resumes it (w6768); lostCheckIns is \"warn\", so nothing moves: \"on\" would start a fresh worker for it where it fits, with the check-in's note")), w.log.join(' | '));
   assert.equal(told.length, 1);
   assert.match(told[0], /^\[ledger\] LOST CHECK-IN \(w6768\): w6370 /);
   assert.match(told[0], /Start a worker for it with start_agent/);
@@ -265,8 +268,9 @@ test('w6768: a worker on a computer offline past the grace: its wake reads as aw
   assert.deepEqual(agents.lostCheckIn('69908625', { at: Date.now() - MIN, note: 'is the build done?' }, why), ['w6484']);
   const w = store.work.get('w6484')!;
   assert.deepEqual(w.lostCheckIn?.turns, { '69908625': 4 });
-  assert.ok(w.log.some((l) => /worker 69908625 is on beast \(offline .*\): nothing resumes it \(w6768\); warn-only, so nothing moves yet: the automatic move would move it to a computer with room/.test(l)), w.log.join(' | '));
-  assert.match(told[0], /Stop_agent its worker 69908625 with move_to a computer with room/);
+  assert.ok(w.log.some((l) => /worker 69908625 is on beast \(offline .*\) \(w6768\): FF Factory will move it to a computer with room/.test(l)), w.log.join(' | '));
+  assert.match(told[0], /FF Factory moves it off that computer by itself, with the check-in's note/);
+  assert.match(told[0], /Only if it still reads Stalled for this in 15 min, stop_agent its worker 69908625 with move_to a computer with room/);
   const l = workLive(w, { items: [w], session: (id) => store.sessions.get(id), now: Date.now() });
   assert.equal(l?.state, 'stalled');
   assert.match(l!.why, /^its check-in at \d\d:\d\dZ is due, and worker 69908625 is on beast/);
@@ -291,4 +295,127 @@ test('w6768: deleting a sandbox keeps the workers that released it before (e41a6
   assert.equal(releasedFrom({ machineSandbox: 'slot2' }, 'slot5'), true, 'placed elsewhere since');
   assert.equal(releasedFrom({ machineSandbox: 'slot5' }, 'slot5'), false, 'still in it');
   assert.equal(releasedFrom(undefined, 'slot5'), false);
+});
+
+// ---------------------------------------------------------------- the move (lostCheckIns "on")
+
+type MoveInternals = {
+  startMoved: (info: SessionInfo, w: WorkItem, to: string, why: string, hold: string, branch: string | undefined, lead: string | undefined, hb: { why: string; message?: string; machine: string }) => Promise<string>;
+  places: () => Computer[];
+  lostStarting: Set<string>;
+};
+const pcx = (id: string, o: Partial<Computer> = {}): Computer => ({ id, online: true, live: 0, midTurn: 0, maxAgents: 6, sandboxes: 3, maxSandboxes: 3, freeSandboxes: 3, platform: 'win32', ...o });
+
+async function moveSetup(t: { after: (fn: () => void | Promise<void>) => void }) {
+  const s = await agentsSetup(t);
+  const { store, agents } = s;
+  const x = agents as unknown as MoveInternals;
+  x.places = () => [pcx('beast', { online: false }), pcx('lothdesktop')];
+  s.machine('lothdesktop', { online: true });
+  const starts: { from: string; to: string; lead?: string; why: string; message?: string; machine: string }[] = [];
+  x.startMoved = async (info, w, to, _why, _hold, _branch, lead, hb) => {
+    const id = `new${starts.length + 1}`;
+    starts.push({ from: info.id, to, ...(lead ? { lead } : {}), why: hb.why, ...(hb.message ? { message: hb.message } : {}), machine: hb.machine });
+    agents.orchestrators.movedForRoom(w, info, hb as never);
+    const n = worker(id, { machineId: to, machineSandbox: 'slot2', turns: 1, status: 'running', lastActivityAt: new Date().toISOString() });
+    store.putSession(n);
+    agents.orchestrators.linkWorker(w.id, n, `started worker ${id} in ${to}/slot2: moved from worker ${info.id}`, { moved: true });
+    return `${to}/slot2 as worker ${id}`;
+  };
+  const settled = async (id: string) => {
+    for (let n = 0; n < 200 && (agents.isMoving(id) || x.lostStarting.size); n++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(agents.isMoving(id) || x.lostStarting.size > 0, false, 'the move finished');
+  };
+  const live = (id: string) => {
+    const w = store.work.get(id)!;
+    return workLive(w, { items: [w], session: (sid) => store.sessions.get(sid), now: Date.now() });
+  };
+  return { ...s, x, starts, settled, live };
+}
+
+test('w6768 (on): a worker on a computer offline past the grace with a due check-in moves to a computer with room; the check-in\'s note goes with it and Stalled ends', async (t) => {
+  const { store, agents, machine, request, starts, settled, live } = await moveSetup(t);
+  const git = { branch: 'sandbox/agent1-w6484', upstream: 'origin/sandbox/agent1-w6484', ahead: 0, dirty: 0, untracked: 0, at: new Date(Date.now() - 150 * MIN).toISOString() };
+  machine('beast', { lastSeen: new Date(Date.now() - 147 * MIN).toISOString(), sandboxes: [{ id: 'agent1', git } as never] });
+  store.putSession(worker('69908625', { machineId: 'beast', machineSandbox: 'agent1', title: 'w6484: x' }));
+  request({ id: 'w6484', title: 'Beast work', sessionIds: ['69908625'] });
+  assert.deepEqual(agents.lostCheckIn('69908625', { at: Date.now() - MIN, note: 'is the build done?' }, agents.waker.awayOf!('69908625')!), ['w6484']);
+  assert.equal(live('w6484')?.state, 'stalled', 'Stalled until it moves');
+  const did = agents.moveAwayWork(Date.now());
+  assert.equal(did.length, 1, JSON.stringify(did));
+  assert.match(did[0]![1], /^moved off beast \(offline 14\d min\) \(w2544\)$/);
+  await settled('69908625');
+  assert.deepEqual(starts.map((m) => [m.from, m.to]), [['69908625', 'lothdesktop']]);
+  assert.match(starts[0]!.message ?? '', /^\[wake_me, w6768\] Your worker's check-in at \d\d:\d\dZ came due while its computer was beast \(offline 14\d min\), so FF Factory moved the work here\. Its note: is the build done\?/);
+  const w = store.work.get('w6484')!;
+  assert.deepEqual(w.sessionIds, ['new1'], w.log.join(' | '));
+  assert.notEqual(live('w6484')?.state, 'stalled', `the work resumed elsewhere: ${live('w6484')?.why}`);
+  agents.moveAwayWork(Date.now());
+  assert.equal(store.work.get('w6484')!.lostCheckIn, undefined, 'the lost check-in is cleared once a new worker holds the request');
+  assert.equal(starts.length, 1, 'nothing moves twice');
+});
+
+test('w6768 (on): a gone worker\'s due check-in starts a fresh worker where the work fits, its prompt leading with the note; Stalled ends', async (t) => {
+  const { store, agents, request, starts, settled, live } = await moveSetup(t);
+  request({ prs: [{ repo: 'Final-Factory/ff-factory', number: 1500, state: 'merged' }] });
+  agents.waker.onLost!('e41a69e8', { at: Date.parse('2026-11-28T09:45:00Z'), note: 'check the follow-up PR' }, 'is gone');
+  assert.equal(live('w6370')?.state, 'stalled');
+  const did = agents.moveAwayWork(Date.now());
+  assert.deepEqual(did, [['w6370', 'a fresh worker starts on lothdesktop for its lost check-in (w6768)']]);
+  assert.deepEqual(agents.moveAwayWork(Date.now()), [], 'one start at a time');
+  await settled('e41a69e8');
+  assert.deepEqual(starts.map((m) => [m.from, m.to, m.machine]), [['e41a69e8', 'lothdesktop', '(removed)']]);
+  assert.match(starts[0]!.lead ?? '', /^\[lost check-in, w6768\] FF Factory started you for w6370: its check-in at 09:45Z is due, and worker e41a69e8 is gone, so nothing could deliver it\. Its note: "check the follow-up PR"\./);
+  const w = store.work.get('w6370')!;
+  assert.ok(w.sessionIds.includes('new1'), w.sessionIds.join(','));
+  assert.notEqual(live('w6370')?.state, 'stalled', `the work resumed elsewhere: ${live('w6370')?.why}`);
+  agents.moveAwayWork(Date.now());
+  assert.equal(store.work.get('w6370')!.lostCheckIn, undefined);
+  assert.equal(starts.length, 1);
+});
+
+test('w6768: with lostCheckIns "warn" (the recovery switch) nothing moves or starts; it stays Stalled', async (t) => {
+  const { store, agents, request, starts, live, cfg, machine } = await moveSetup(t);
+  cfg.lostCheckIns = 'warn';
+  request();
+  agents.lostCheckIn('e41a69e8', { at: Date.now() - MIN, note: 'x' }, 'is gone');
+  machine('beast', { lastSeen: new Date(Date.now() - 147 * MIN).toISOString() });
+  store.putSession(worker('69908625', { machineId: 'beast', machineSandbox: 'agent1' }));
+  request({ id: 'w6484', sessionIds: ['69908625'] });
+  agents.lostCheckIn('69908625', { at: Date.now() - MIN, note: 'y' }, agents.waker.awayOf!('69908625')!);
+  assert.deepEqual(agents.moveAwayWork(Date.now()), []);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(starts.length, 0);
+  assert.equal(live('w6370')?.state, 'stalled');
+  assert.equal(live('w6484')?.state, 'stalled');
+});
+
+test('w6768 (on): a worker that took up its own check-in since carries the request: nothing starts; a new worker clears the lost check-in', async (t) => {
+  const { store, agents, request, starts } = await moveSetup(t);
+  store.putSession(worker('bbbb2222'));
+  request({ sessionIds: ['e41a69e8', 'bbbb2222'] });
+  assert.deepEqual(agents.lostCheckIn('e41a69e8', { at: Date.now() - MIN, note: 'x' }, 'is gone'), ['w6370'], 'recorded: its other worker had nothing pending then');
+  store.putSession({ ...store.sessions.get('bbbb2222')!, wakeAt: new Date(Date.now() + 30 * MIN).toISOString() });
+  assert.deepEqual(agents.moveAwayWork(Date.now()), [], 'its other worker\'s own check-in carries it');
+  assert.equal(starts.length, 0);
+  // A worker joining the request since ends it for good.
+  store.putSession(worker('cccc3333'));
+  store.putWork({ ...store.work.get('w6370')!, sessionIds: ['e41a69e8', 'bbbb2222', 'cccc3333'] });
+  agents.moveAwayWork(Date.now());
+  assert.equal(store.work.get('w6370')!.lostCheckIn, undefined);
+  assert.equal(starts.length, 0);
+});
+
+test('w6768 (on): with no computer free for its work a fresh worker waits and is tried again after 10 min', async (t) => {
+  const { agents, request, starts, x } = await moveSetup(t);
+  x.places = () => [pcx('lothdesktop', { online: false })];
+  request();
+  agents.lostCheckIn('e41a69e8', { at: Date.now() - MIN, note: 'x' }, 'is gone');
+  const now = Date.now();
+  assert.deepEqual(agents.moveAwayWork(now), []);
+  x.places = () => [pcx('lothdesktop')];
+  assert.deepEqual(agents.moveAwayWork(now + 5 * MIN), [], 'not before 10 min');
+  assert.equal(agents.moveAwayWork(now + 11 * MIN).length, 1);
+  assert.equal(starts.length, 1);
+  await new Promise((r) => setTimeout(r, 30));
 });

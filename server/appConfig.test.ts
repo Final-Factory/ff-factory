@@ -613,3 +613,14 @@ test('w5575: the recovery switch: set_app_config machineLinkTailnet "off" lets a
   assert.equal(gate(), true, 'null puts back the default, enforce');
   assert.ok(OWNER_ONLY_KEYS.has('machineLinkTailnet'));
 });
+
+test('app config (w6768): lostCheckIns is "on" or "warn", owner-only, live; null puts back the default', (t) => {
+  const { file, cfg } = setup(t);
+  assert.ok(SETTABLE_KEYS.includes('lostCheckIns'));
+  assert.ok(OWNER_ONLY_KEYS.has('lostCheckIns'));
+  assert.throws(() => normalizeSetting('lostCheckIns', 'off'), /"warn"/);
+  setAppConfig(file, cfg, 'lostCheckIns', 'warn');
+  assert.equal(cfg.lostCheckIns, 'warn');
+  setAppConfig(file, cfg, 'lostCheckIns', null);
+  assert.equal(cfg.lostCheckIns, undefined);
+});

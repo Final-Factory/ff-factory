@@ -963,8 +963,18 @@ Capacity block's "Next ..." lines.
   there and nowhere else, and while every computer it is pinned to is unavailable its state is **Blocked**, "needs
   lothlaptop, which is paused: it is pinned there (...) and starts by itself when one is back" (`pinnedAway`,
   `shared/workState.ts`). That wait is never a question to a person; `decide_work pin none` lifts the pin.
+- **A check-in nothing can deliver is said, then resumed (w6768).** A worker's own `wake_me` that comes due while its
+  worker is gone (removed with a deleted sandbox) or its computer is away past the grace is reported by the Waker
+  (`onLost`, after its last retry) and recorded on the request (`WorkItem.lostCheckIn`): it reads **Stalled**, "its
+  check-in at 09:45Z is due, and worker e41a69e8 is gone", and the dispatcher is told once. Unless another worker on
+  the request carries it (mid-turn, its own check-in, a CI wait or a job), `moveAwayWork` then resumes it each minute it
+  can (`resumeLost`): a stopped worker on an away computer is moved as above with the check-in's note as its message, and
+  a gone worker is replaced by a fresh worker where the work fits (its pin kept), its prompt leading with the note; a
+  start that fails or finds no room is tried again after 10 min. Its next turn or a new worker on the request ends it.
+  `lostCheckIns` (set_app_config, owner-only, read live) is `"on"` (unset) or `"warn"`, the recovery switch that only
+  shows Stalled and tells the dispatcher. Since w6768, deleting a sandbox no longer removes the workers that released it.
 
-Tests: `server/w4870AwayMachines.test.ts`, `server/w2544AwayMachines.test.ts`.
+Tests: `server/w4870AwayMachines.test.ts`, `server/w2544AwayMachines.test.ts`, `server/w6768LostCheckIn.test.ts`.
 
 ## Work that draws a window
 
