@@ -99,6 +99,14 @@ export interface FfuRescue {
   at: string;
   /** Set once the holder was told (its next take or where). */
   told?: boolean;
+  /**
+   * w6803: the branch on origin that carries it, when that is not `branch`: GitHub refused the rescue commit's author email
+   * (GH007), so the rescue commit alone was made again as RESCUE_GIT_IDENTITY on `<branch>-noreply`; `branch` keeps the original.
+   */
+  pushedAs?: string;
+  /** w6803: when its push was last tried, and why it failed (a later sweep tries again, RESCUE_RETRY_MS apart). */
+  triedAt?: string;
+  pushError?: string;
 }
 
 export interface FfuSlotState {
@@ -125,6 +133,8 @@ export interface FfuSlotDeps {
   hooks?: string;
   /** Read cleanup-facts.json again (`take --wait` polls with it); absent: the facts stay as given. */
   readFacts?: () => CleanupFacts | undefined;
+  /** w6803: who a rescue commit is made as (rescueIdentity); absent: RESCUE_GIT_IDENTITY. */
+  identity?: { name: string; email: string };
   now: () => number;
   git: (args: string[], cwd?: string) => Ran;
   freeGB: (dir: string) => number | undefined;
@@ -474,7 +484,14 @@ export function slotsReport(d: FfuSlotDeps): FfuSlotsReport {
       why: j.why,
     };
   });
-  return { at: new Date(d.now()).toISOString(), max: d.max, slots };
+  // w6803: rescues not on origin yet, so the daemon's sweep runs to try them again even with no stale slot.
+  const unpushed = (readSlotState(d.root).rescues ?? []).filter((r) => !r.pushed);
+  return {
+    at: new Date(d.now()).toISOString(),
+    max: d.max,
+    slots,
+    ...(unpushed.length ? { unpushedRescues: unpushed.map((r) => ({ branch: r.branch, holder: r.holder, slot: r.slot, at: r.at, due: rescueDue(d, r), ...(r.pushError ? { error: r.pushError } : {}) })) } : {}),
+  };
 }
 
 /**
@@ -491,7 +508,7 @@ export function rescueWork(d: FfuSlotDeps, s: FfuSlot): FfuRescue {
   const from = d.git(['symbolic-ref', '--quiet', '--short', 'HEAD'], wt).out.trim() || undefined;
   if (d.git(['status', '--porcelain', '--untracked-files=normal'], wt).out.trim()) {
     must(d.git(['add', '-A'], wt), 'git add');
-    must(d.git(['commit', '--quiet', '-m', `ffu-slot rescue: what ${holder} left uncommitted in ${s.id}${from ? ` on ${from}` : ''} (w5885)`], wt), 'git commit');
+    must(d.git([...asRescuer(d), 'commit', '--quiet', '-m', `ffu-slot rescue: what ${holder} left uncommitted in ${s.id}${from ? ` on ${from}` : ''} (w5885)`], wt), 'git commit');
   }
   const sha = must(d.git(['rev-parse', 'HEAD'], wt), 'git rev-parse').trim();
   const branch = `rescue/ffu-slot/${s.id}-${holder.slice(0, 8)}-${sha.slice(0, 8)}`;
@@ -503,15 +520,121 @@ export function rescueWork(d: FfuSlotDeps, s: FfuSlot): FfuRescue {
     const onOrigin = d.git(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${from}`], repo).code === 0;
     must(d.git(onOrigin ? ['branch', '-f', from, `refs/remotes/origin/${from}`] : ['branch', '-D', from], repo), 'git branch');
   }
+  const r: FfuRescue = { holder, slot: s.id, branch, sha, ...(from ? { from } : {}), pushed: false, at: new Date(d.now()).toISOString() };
+  pushRescue(d, r);
+  d.say(`ffu-slot: saved ${holder}'s work in ${s.id} (${sha.slice(0, 8)}) on branch ${branch}${r.pushed ? `, pushed to origin${r.pushedAs ? ` as ${r.pushedAs}` : ''}` : ` in ${fwd(repo)} (push failed: ${r.pushError})`}\n`);
+  if (!r.pushed) sayPushFailed(d, r);
+  return r;
+}
+
+/**
+ * w6803: the identity a rescue commit is made as when the run has none of its own that GitHub takes. The daemon's sweep runs
+ * with the machine's own git identity, and on m5 that is a person's private address: GitHub refused the rescue push with
+ * GH007 ("Your push would publish a private email address", 2026-11-28 03:08Z) and the work stayed in the shared clone only.
+ * GitHub's email-privacy rule refuses only the pusher's own private addresses, so an address in users.noreply.github.com is
+ * taken whoever pushes, on every machine.
+ */
+export const RESCUE_GIT_IDENTITY = { name: 'FF Factory ffu-slot rescue', email: 'ffu-slot-rescue@users.noreply.github.com' } as const;
+
+/** A later sweep tries an unpushed rescue again this long after the last try (w6803). */
+export const RESCUE_RETRY_MS = 30 * 60_000;
+
+const isNoreply = (email: string | undefined) => !!email && /@users\.noreply\.github\.com$/i.test(email.trim());
+
+/**
+ * w6803: who a rescue commit is made as: the run's own command-scope identity when it is a GitHub noreply address (a worker's
+ * take runs with the public identity FF Factory gives every worker, server/publicGit.ts gitIdentityEnv), else
+ * RESCUE_GIT_IDENTITY. Never the machine's gitconfig, which nobody changes for this.
+ */
+export function rescueIdentity(env: NodeJS.ProcessEnv): { name: string; email: string } {
+  const n = Number(env.GIT_CONFIG_COUNT ?? 0) || 0;
+  let name: string | undefined;
+  let email: string | undefined;
+  for (let i = 0; i < n; i++) {
+    const k = env[`GIT_CONFIG_KEY_${i}`]?.toLowerCase();
+    if (k === 'user.name') name = env[`GIT_CONFIG_VALUE_${i}`];
+    if (k === 'user.email') email = env[`GIT_CONFIG_VALUE_${i}`];
+  }
+  return name?.trim() && isNoreply(email) ? { name: name.trim(), email: email!.trim() } : { ...RESCUE_GIT_IDENTITY };
+}
+
+/** `-c user.name=… -c user.email=…` for a git call that makes a rescue commit (author and committer both). */
+function asRescuer(d: FfuSlotDeps): string[] {
+  const id = d.identity && isNoreply(d.identity.email) ? d.identity : RESCUE_GIT_IDENTITY;
+  return ['-c', `user.name=${id.name}`, '-c', `user.email=${id.email}`];
+}
+
+/**
+ * w6803: push a rescue branch to origin, and record how it went on `r` (pushed, pushedAs, triedAt, pushError). Already on
+ * origin (by an earlier push, or as `<branch>-noreply`): pushed, nothing sent. Refused for an email address (GH007, a rescue
+ * commit made before w6803 as the machine's own identity): its rescue commit alone is made again as the rescuer, same tree and
+ * parent, on `<branch>-noreply`, and that is pushed; `branch` keeps the original. The local branches always stay.
+ */
+export function pushRescue(d: FfuSlotDeps, r: FfuRescue): boolean {
+  const repo = repoDir(d.root);
+  r.triedAt = new Date(d.now()).toISOString();
+  const fail = (why: string) => {
+    r.pushError = why.trim().replace(/\s+/g, ' ').slice(0, 300) || 'git push failed';
+    return false;
+  };
   // w6099: workers write the shared clone's config, origin's URL included.
   const no = guardRemoteSync((a) => {
     const g = d.git(a, repo);
     return g.code === 0 ? g.out : undefined;
   }, `the rescue push in ${fwd(repo)}`);
-  const push = no ? { code: 1, out: '', err: no } : d.git(['push', '--quiet', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], repo);
-  const r: FfuRescue = { holder, slot: s.id, branch, sha, ...(from ? { from } : {}), pushed: push.code === 0, at: new Date(d.now()).toISOString() };
-  d.say(`ffu-slot: saved ${holder}'s work in ${s.id} (${sha.slice(0, 8)}) on branch ${branch}${r.pushed ? ', pushed to origin' : ` in ${fwd(repo)} (push failed: ${(push.err || push.out).trim().slice(0, 160)})`}\n`);
-  return r;
+  if (no) return fail(no);
+  const sibling = `${r.branch}-noreply`;
+  const done = (as?: string) => {
+    r.pushed = true;
+    if (as) r.pushedAs = as;
+    delete r.pushError;
+    return true;
+  };
+  const remote = d.git(['ls-remote', '--heads', 'origin', `refs/heads/${r.branch}`, `refs/heads/${sibling}`], repo);
+  if (remote.code === 0) {
+    const heads = remote.out.split('\n').map((l) => l.split('\t')[1]?.trim());
+    if (heads.includes(`refs/heads/${r.branch}`)) return done();
+    if (heads.includes(`refs/heads/${sibling}`)) return done(sibling);
+  }
+  if (d.git(['rev-parse', '--verify', '--quiet', `refs/heads/${r.branch}`], repo).code !== 0) return fail(`branch ${r.branch} is gone from ${fwd(repo)}`);
+  const push = (b: string) => d.git(['push', '--quiet', 'origin', `refs/heads/${b}:refs/heads/${b}`], repo);
+  const first = push(r.branch);
+  if (first.code === 0) return done();
+  const err = first.err || first.out;
+  if (!/GH007|private email|email privacy/i.test(err)) return fail(err);
+  // Only a rescue commit FF Factory made is made again; anyone's own commits are never rewritten.
+  const tip = d.git(['log', '-1', '--format=%ae%n%ce%n%s', `refs/heads/${r.branch}`], repo).out.split('\n');
+  if (!tip[2]?.startsWith('ffu-slot rescue:') || (isNoreply(tip[0]) && isNoreply(tip[1]))) return fail(err);
+  const old = must(d.git(['rev-parse', `refs/heads/${r.branch}`], repo), 'git rev-parse').trim();
+  const body = must(d.git(['log', '-1', '--format=%B', old], repo), 'git log').trimEnd();
+  const parents = must(d.git(['rev-list', '--parents', '-n', '1', old], repo), 'git rev-list').trim().split(/\s+/).slice(1);
+  const made = d.git([...asRescuer(d), 'commit-tree', `${old}^{tree}`, ...parents.flatMap((p) => ['-p', p]), '-m', `${body}\n\n(made again from ${old} as a GitHub noreply address: GitHub refused its author email, w6803)`], repo);
+  if (made.code !== 0) return fail(`${err.trim()}; and making it again failed: ${made.err || made.out}`);
+  if (d.git(['branch', '-f', sibling, made.out.trim()], repo).code !== 0) return fail(`${err.trim()}; and branch ${sibling} could not be made`);
+  const second = push(sibling);
+  return second.code === 0 ? done(sibling) : fail(`${err.trim()}; and ${sibling}: ${second.err || second.out}`);
+}
+
+/** The line a failed rescue push prints, which the daemon's auto sweep logs as a failure (ffuSlotAutoSweep.ts). */
+function sayPushFailed(d: FfuSlotDeps, r: FfuRescue): void {
+  d.say(`ffu-slot: rescue push failed: ${r.branch} (${r.holder}'s work from ${r.slot}, ${r.sha.slice(0, 8)}) is in ${fwd(repoDir(d.root))} only, tried again on a later sweep: ${r.pushError}\n`);
+}
+
+/** Whether a later sweep should try this rescue's push again now (w6803). */
+export function rescueDue(d: Pick<FfuSlotDeps, 'now'>, r: FfuRescue): boolean {
+  return !r.pushed && (!r.triedAt || d.now() - Date.parse(r.triedAt) >= RESCUE_RETRY_MS);
+}
+
+/** w6803: try again every unpushed rescue that is due, until each is on origin; true when any changed. */
+export function retryRescuePushes(d: FfuSlotDeps, st: FfuSlotState): boolean {
+  let changed = false;
+  for (const r of st.rescues ?? []) {
+    if (!rescueDue(d, r)) continue;
+    changed = true;
+    if (pushRescue(d, r)) d.say(`ffu-slot: rescue pushed: ${r.holder}'s work from ${r.slot} (${r.sha.slice(0, 8)}) is on origin as ${r.pushedAs ?? r.branch}\n`);
+    else sayPushFailed(d, r);
+  }
+  return changed;
 }
 
 /** Tell this worker, once, of work of its own that a freed slot saved (w5885); true when it told one. */
@@ -519,7 +642,7 @@ function tellRescues(d: FfuSlotDeps, st: FfuSlotState): boolean {
   let told = false;
   for (const r of st.rescues ?? []) {
     if (r.holder !== d.session || r.told) continue;
-    d.say(`ffu-slot: your slot ${r.slot} went to another worker after you left it unused; your work there (${r.sha.slice(0, 8)}${r.from ? `, on ${r.from}` : ''}) is on branch ${r.branch}${r.pushed ? ' (pushed to origin)' : ' in the shared clone'}: take a slot and merge or check it out\n`);
+    d.say(`ffu-slot: your slot ${r.slot} went to another worker after you left it unused; your work there (${r.sha.slice(0, 8)}${r.from ? `, on ${r.from}` : ''}) is on branch ${r.branch}${r.pushed ? ` (pushed to origin${r.pushedAs ? ` as ${r.pushedAs}` : ''})` : ' in the shared clone'}: take a slot and merge or check it out\n`);
     r.told = told = true;
   }
   return told;
@@ -717,8 +840,8 @@ export function takeSlot(d: FfuSlotDeps, o: TakeOptions = {}): string {
     pick.holder = d.session;
     delete pick.freedFrom;
     pick.usedAt = at;
-    // A rescue is listed a fortnight; its branch stays until someone deletes it.
-    if (st.rescues) st.rescues = st.rescues.filter((r) => d.now() - Date.parse(r.at) < 14 * 24 * 3_600_000);
+    // A rescue is listed a fortnight; its branch stays until someone deletes it. One not on origin yet stays listed (w6803).
+    if (st.rescues) st.rescues = st.rescues.filter((r) => !r.pushed || d.now() - Date.parse(r.at) < 14 * 24 * 3_600_000);
     writeSlotState(d.root, st);
     return pick.id;
   });
@@ -756,6 +879,8 @@ export function sweepSlots(d: FfuSlotDeps): string[] {
   return withLock(d, () => {
     const st = readSlotState(d.root);
     const out: string[] = [];
+    // w6803: rescues GitHub refused before, first, so their branches reach origin on a later sweep.
+    retryRescuePushes(d, st);
     for (const s of st.slots) {
       if (!s.holder || s.holder === d.session) continue;
       if (!d.session && holderRuns(d, s.holder)) continue;
@@ -880,7 +1005,7 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
         const used = slotLastUsed(d, s);
         d.write(`${s.id}\t${s.branch ?? '(origin/main)'}\t${used ? new Date(used).toISOString() : '-'}\t${slotFree(d, s).why}\n`);
       }
-      for (const r of st.rescues ?? []) d.write(`rescue\t${r.branch}\t${r.at}\t${r.holder}'s work from ${r.slot}${r.pushed ? ', pushed to origin' : ', in the shared clone only'}\n`);
+      for (const r of st.rescues ?? []) d.write(`rescue\t${r.branch}\t${r.at}\t${r.holder}'s work from ${r.slot}${r.pushed ? `, pushed to origin${r.pushedAs ? ` as ${r.pushedAs}` : ''}` : `, in the shared clone only${r.pushError ? ` (push failed: ${r.pushError})` : ''}`}\n`);
       return 0;
     }
     if (cmd === 'sweep') {
@@ -929,6 +1054,7 @@ export function realFfuSlotDeps(env: NodeJS.ProcessEnv = process.env): FfuSlotDe
     max: Number.isInteger(max) && max >= 0 ? max : FFU_SLOTS_DEFAULT_MAX,
     facts,
     ...(env[MEDIUM_AGENT_VAR] ? { medium: env[MEDIUM_AGENT_VAR] } : {}),
+    identity: rescueIdentity(env),
     readFacts,
     now: () => Date.now(),
     git: (args, cwd) => {

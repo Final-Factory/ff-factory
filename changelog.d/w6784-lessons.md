@@ -1,0 +1,1 @@
+- CONTRIBUTING.md: three test and script lessons from the Windows supervisor work (w6784).

@@ -167,8 +167,20 @@ The portal sets it, so turning it back off needs nobody at the machine. `ffu-slo
 **Its holder's work is saved first, never dropped** (`rescueWork`). Before a taken slot's checkout is reset, its
 uncommitted changes are committed and its tip is kept as branch `rescue/ffu-slot/<slot>-<holder>-<sha8>` in the shared
 clone (a local branch, which `fetch --prune` never drops), then pushed to origin (ffu's CI runs on pushes to `main` and
-tags only, so the push starts nothing). If the commit fails, the take fails and the checkout stays as it was. A failed
-push leaves the branch in the shared clone. `slots.json` lists each rescue for a fortnight (`ffu-slot list`), and the
+tags only, so the push starts nothing). If the commit fails, the take fails and the checkout stays as it was.
+
+The rescue commit is made as a GitHub noreply address (w6803, `rescueIdentity`): the run's own command-scope identity
+when it is one (a worker's take carries FF Factory's public identity), else `FF Factory ffu-slot rescue
+<ffu-slot-rescue@users.noreply.github.com>`, passed as `-c user.name/user.email` on that commit only, never by changing a
+machine's gitconfig. Before w6803 the daemon's sweep committed as the machine's own identity, and on m5 that is a private
+address: GitHub refused the push with GH007 (2026-11-28 03:08Z) and the work stayed in the shared clone only. A failed
+push leaves the branch in the shared clone, prints `ffu-slot: rescue push failed: ...` (the daemon logs it as `ffu slots:
+auto sweep failed: rescue push of ...`), and is tried again by every sweep `RESCUE_RETRY_MS` (30 min) apart until it is on
+origin: the slot report's `unpushedRescues` makes the daemon run a sweep for it even when no slot is stale. A push GitHub
+refuses for an email (GH007) on a rescue commit of FF Factory's own (subject `ffu-slot rescue:`) makes that one commit again
+as the noreply identity, same tree and parent, on `<branch>-noreply`, and pushes that; the original branch stays local and
+anyone's own commits are never rewritten. An unpushed rescue stays listed past the fortnight. `slots.json` lists each
+rescue for a fortnight (`ffu-slot list`), and the
 holder is told once, on its next `take`: `your slot slot1 went to another worker ...; your work there is on branch ...`.
 A worker that may lose its slot runs `eval "$(ffu-slot take --branch <b>)"` again at the start of each command rather
 than `cd` into a slot path it remembers: `take` keeps the slot it holds, or gives it another.

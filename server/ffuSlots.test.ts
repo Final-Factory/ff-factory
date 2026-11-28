@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { FFU_SERVER_GROUP, FFU_SLOTS_DEFAULT_MAX, ffuServerExes, ffuSlotMain, readSlotState, slotCargoHome, realFfuSlotDeps, slotBin, slotGitEnv, slotCheckout, slotTarget, takeSlot, releaseSlot, sweepSlots, slotsReport, runFfuSlotSweep, FFU_SLOT_WAIT_GRACE_MS, FFU_SLOT_IDLE_MS, FFU_SLOTS_PER_WORKER, type FfuSlotDeps } from '../machine/ffuSlots.ts';
+import { FFU_SERVER_GROUP, FFU_SLOTS_DEFAULT_MAX, ffuServerExes, ffuSlotMain, readSlotState, slotCargoHome, realFfuSlotDeps, slotBin, slotGitEnv, slotCheckout, slotTarget, takeSlot, releaseSlot, sweepSlots, slotsReport, runFfuSlotSweep, FFU_SLOT_WAIT_GRACE_MS, FFU_SLOT_IDLE_MS, FFU_SLOTS_PER_WORKER, RESCUE_GIT_IDENTITY, RESCUE_RETRY_MS, rescueIdentity, type FfuSlotDeps } from '../machine/ffuSlots.ts';
 import type { CleanupGuard } from './cleanup.ts';
 import { installLeftoverSettings, planInstallLeftovers, type ProcLite } from './installLeftovers.ts';
 import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
@@ -931,4 +931,104 @@ test('w6484: a holder that resumes after a sweep freed its slot keeps the work i
   assert.ok(files.includes('committed.rs') && files.includes('uncommitted.rs'), files.join(' '));
   assert.ok(!fs.existsSync(path.join(wt, 'uncommitted.rs')), 'the checkout is reset for its new holder');
   assert.equal(readSlotState(root).slots[0].freedFrom, undefined);
+});
+
+/** w6803: a GitHub stand-in for a test's pushes: refused while `down` says why, and GH007 for a pushed tip whose author or committer email is not a noreply one. */
+function github<D extends FfuSlotDeps>(d: D, o: { down?: string; gh007?: boolean }): D {
+  const real = d.git;
+  d.git = (args, cwd) => {
+    const i = args.indexOf('push');
+    if (i < 0) return real(args, cwd);
+    if (o.down) return { code: 1, out: '', err: o.down };
+    if (o.gh007) {
+      const src = args[args.length - 1].split(':')[0];
+      const who = real(['log', '-1', '--format=%ae %ce', src], cwd).out.trim().split(' ');
+      if (who.some((e) => !/@users\.noreply\.github\.com$/.test(e))) return { code: 1, out: '', err: 'remote: error: GH007: Your push would publish a private email address.\nTo github.com:x/ffu.git\n ! [remote rejected] (push declined due to email privacy restrictions)' };
+    }
+    return real(args, cwd);
+  };
+  return d;
+}
+
+test("w6803: the rescue commit is made as a noreply identity, not the machine's own; a push GitHub refuses is reported and tried again by a later sweep until it is on origin", (t) => {
+  const { root, remote } = world(t);
+  takeSlot(at(root, 'aaaa1111', NOW), { branch: 'feat', remote });
+  // m5's case: the machine's own identity is a private address (here the shared clone's config, which its checkouts read).
+  git(['config', 'user.email', 'someone@private.example'], path.join(root, 'ffu-sandboxes', 'repo'));
+  git(['config', 'user.name', 'Some One'], path.join(root, 'ffu-sandboxes', 'repo'));
+  fs.writeFileSync(path.join(slotCheckout(root, 'slot1'), 'wip.rs'), '// not committed\n');
+  const gh = { down: 'remote: Internal Server Error' };
+  const b = github(at(root, 'bbbb2222', NOW + 60_000, { live: ['aaaa1111', 'bbbb2222'], owners: { bbbb2222: own('active') } }), gh);
+  assert.equal(takeSlot(b, { branch: 'feat', remote }), 'slot1');
+  const r = readSlotState(root).rescues?.[0];
+  assert.ok(r && !r.pushed && /Internal Server Error/.test(r.pushError ?? ''), JSON.stringify(r));
+  const repo = path.join(root, 'ffu-sandboxes', 'repo');
+  assert.equal(git(['log', '-1', '--format=%an <%ae>|%cn <%ce>', r.branch], repo), `${RESCUE_GIT_IDENTITY.name} <${RESCUE_GIT_IDENTITY.email}>|${RESCUE_GIT_IDENTITY.name} <${RESCUE_GIT_IDENTITY.email}>`, 'author and committer are the noreply identity');
+  assert.match(b.said.join(''), /ffu-slot: rescue push failed: rescue\/ffu-slot\/slot1-aaaa1111-[0-9a-f]{8} \(aaaa1111's work from slot1, [0-9a-f]{8}\) is in .* only, tried again on a later sweep: remote: Internal Server Error/);
+  assert.deepEqual(slotsReport(b).unpushedRescues?.map((x) => [x.branch, x.due]), [[r.branch, false]], 'the report names it; not due right after the try');
+
+  gh.down = '';
+  const early = github(at(root, 'cccc3333', NOW + 60_000 + RESCUE_RETRY_MS - 1, { live: ['bbbb2222', 'cccc3333'] }), gh);
+  sweepSlots(early);
+  assert.equal(readSlotState(root).rescues?.[0].pushed, false, 'not tried again before RESCUE_RETRY_MS');
+  assert.equal(slotsReport(at(root, 'cccc3333', NOW + 60_000 + RESCUE_RETRY_MS)).unpushedRescues?.[0].due, true, 'due once RESCUE_RETRY_MS passed');
+  const late = github(at(root, 'cccc3333', NOW + 60_000 + RESCUE_RETRY_MS, { live: ['bbbb2222', 'cccc3333'] }), gh);
+  sweepSlots(late);
+  const after = readSlotState(root).rescues?.[0];
+  assert.ok(after?.pushed && !after.pushError && !after.pushedAs, JSON.stringify(after));
+  assert.equal(git(['show', `${r.branch}:wip.rs`], remote), '// not committed', 'the work is on origin');
+  assert.match(late.said.join(''), /rescue pushed: aaaa1111's work from slot1 .* is on origin as rescue\/ffu-slot\/slot1-aaaa1111-/);
+  assert.equal(slotsReport(late).unpushedRescues, undefined);
+  assert.ok(git(['rev-parse', '--verify', `refs/heads/${r.branch}`], repo), 'the local branch stays');
+});
+
+test("w6803: a rescue made before the fix as a private address (m5's slot2-5a78ddd2-7e2a4052) is made again as the noreply identity on <branch>-noreply and pushed; the original stays local", (t) => {
+  const { root, remote } = world(t);
+  takeSlot(at(root, 'aaaa1111', NOW), { branch: 'feat', remote });
+  const wt = slotCheckout(root, 'slot1');
+  const repo = path.join(root, 'ffu-sandboxes', 'repo');
+  fs.writeFileSync(path.join(wt, 'wip.rs'), '// not committed\n');
+  git(['add', '-A'], wt);
+  git(['-c', 'user.name=Some One', '-c', 'user.email=someone@private.example', 'commit', '-qm', 'ffu-slot rescue: what aaaa1111 left uncommitted in slot1 on feat (w5885)'], wt);
+  const sha = git(['rev-parse', 'HEAD'], wt);
+  const branch = `rescue/ffu-slot/slot1-aaaa1111-${sha.slice(0, 8)}`;
+  git(['branch', '-f', branch, sha], repo);
+  git(['checkout', '-q', '--detach'], wt);
+  const file = path.join(root, 'ffu-sandboxes', 'slots.json');
+  const st = JSON.parse(fs.readFileSync(file, 'utf8'));
+  st.slots[0].freedFrom = st.slots[0].holder;
+  delete st.slots[0].holder;
+  st.rescues = [{ holder: 'aaaa1111', slot: 'slot1', branch, sha, from: 'feat', pushed: false, at: new Date(NOW).toISOString(), told: true }];
+  fs.writeFileSync(file, JSON.stringify(st));
+  const d = github(at(root, 'cccc3333', NOW + 60_000, { live: ['cccc3333'] }), { gh007: true });
+  sweepSlots(d);
+  const r = readSlotState(root).rescues?.[0];
+  assert.ok(r?.pushed && r.pushedAs === `${branch}-noreply`, JSON.stringify(r));
+  assert.equal(git(['rev-parse', `${branch}-noreply^{tree}`], remote), git(['rev-parse', `${sha}^{tree}`], repo), 'the same work');
+  assert.equal(git(['rev-parse', `${branch}-noreply^`], remote), git(['rev-parse', `${sha}^`], repo), 'on the same parent');
+  assert.equal(git(['log', '-1', '--format=%ae %ce', `${branch}-noreply`], remote), `${RESCUE_GIT_IDENTITY.email} ${RESCUE_GIT_IDENTITY.email}`);
+  assert.equal(git(['rev-parse', `refs/heads/${branch}`], repo), sha, 'the original stays local, unchanged');
+  assert.equal(spawnSync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: remote, env: GIT_ENV }).status, 1, 'the private address never reached origin');
+});
+
+test("w6803: a refused push of someone's own commit is never rewritten: it stays unpushed and reported", (t) => {
+  const { root, remote } = world(t);
+  takeSlot(at(root, 'aaaa1111', NOW), { branch: 'feat', remote });
+  const wt = slotCheckout(root, 'slot1');
+  fs.writeFileSync(path.join(wt, 'mine.rs'), '// a worker commit\n');
+  git(['add', '-A'], wt);
+  git(['-c', 'user.name=Some One', '-c', 'user.email=someone@private.example', 'commit', '-qm', 'my own work'], wt);
+  const b = github(at(root, 'bbbb2222', NOW + 60_000, { live: ['aaaa1111', 'bbbb2222'], owners: { bbbb2222: own('active') } }), { gh007: true });
+  takeSlot(b, { branch: 'feat', remote });
+  const r = readSlotState(root).rescues?.[0];
+  assert.ok(r && !r.pushed && !r.pushedAs && /GH007/.test(r.pushError ?? ''), JSON.stringify(r));
+  assert.match(b.said.join(''), /rescue push failed: .*GH007/);
+});
+
+test('w6803: rescueIdentity takes the run\'s own noreply identity (a worker\'s take), else the rescue bot\'s, never a private address', () => {
+  const env = (email: string) => ({ GIT_CONFIG_COUNT: '3', GIT_CONFIG_KEY_0: 'gc.auto', GIT_CONFIG_VALUE_0: '0', GIT_CONFIG_KEY_1: 'user.name', GIT_CONFIG_VALUE_1: 'Final Factory', GIT_CONFIG_KEY_2: 'user.email', GIT_CONFIG_VALUE_2: email });
+  assert.deepEqual(rescueIdentity(env('481770+bryding@users.noreply.github.com')), { name: 'Final Factory', email: '481770+bryding@users.noreply.github.com' });
+  assert.deepEqual(rescueIdentity(env('someone@private.example')), { ...RESCUE_GIT_IDENTITY });
+  assert.deepEqual(rescueIdentity({}), { ...RESCUE_GIT_IDENTITY }, "the daemon's sweep: no identity of its own");
+  assert.match(RESCUE_GIT_IDENTITY.email, /@users\.noreply\.github\.com$/);
 });

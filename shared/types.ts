@@ -755,6 +755,12 @@ export interface FfuSlotsReport {
   /** The slots a machine may make (FF_FFU_SLOTS_MAX). */
   max: number;
   slots: FfuSlotView[];
+  /**
+   * w6803: work a sweep saved on a rescue branch that is not on origin yet (machine/ffuSlots.ts pushRescue): kept in the
+   * shared clone, and tried again by a later sweep when `due` (RESCUE_RETRY_MS after the last try). `error` is why the last
+   * push failed.
+   */
+  unpushedRescues?: { branch: string; holder: string; slot: string; at: string; due: boolean; error?: string }[];
 }
 
 /**
