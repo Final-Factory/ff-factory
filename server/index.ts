@@ -1054,8 +1054,11 @@ const intake = new IntakeManager({
   // FFBox runs ffbox master, which takes maybe: no offer list gates it (docs/ffbox-connector-contract.md, "No negotiation").
   takesMaybe: () => true,
   // The nightly run's key (w864): minted at each fire under one name, so the night before's dies; redacted from now on.
-  mintNightlyKey: () => {
-    const key = auth.createApiKey('nightly-run', undefined, 'nightly');
+  // w6761: an extra key for the same night after a portal restart goes under a name of its own (nightly-run.<time>), so
+  // the night holding the first keeps it; each fire's plain mint revokes those too.
+  mintNightlyKey: (extra) => {
+    if (!extra) for (const k of auth.apiKeyInfos()) if (k.name.startsWith('nightly-run.')) auth.revokeApiKey(k.name);
+    const key = auth.createApiKey(extra ? `nightly-run.${Date.now().toString(36)}` : 'nightly-run', undefined, 'nightly');
     addSecretValues([key]);
     return key;
   },

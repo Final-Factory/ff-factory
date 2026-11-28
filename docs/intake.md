@@ -858,8 +858,10 @@ shouldn't assume silence means a successful (or failed) run." The Windows tasks 
   first. The night inherits them from the worker's start command in either mode (w1099). Like every `*_KEY` of a launch spec it is redacted from transcripts and logs (`secrets.ts` `SECRET_ENV`; the
   portal registers it too), and it never appears in a brief, a file on the machine or the Intake tab. The worker is found
   by its title (`w901: ...`) as well as by link, because its first process starts before the ledger links it. After a
-  portal restart a worker that already had the key gets none (the lab's running night keeps the valid one), and a night
-  whose worker never had it gets a fresh one. No person or ops worker handles the key, and no daemon update is needed:
+  portal restart (the key lives only in the portal's memory) a worker that already had the key gets an extra one,
+  `nightly-run.<time>`, beside it, so the night that holds the first keeps it valid; the next fire's key (`nightly-run`)
+  revokes every extra one. A night whose worker never had it gets a fresh one. (w6761: until 2026-11-28 such a worker got
+  none, so a worker FF Factory started again after a restart had no key and the night printed "NOT DELIVERED".) No person or ops worker handles the key, and no daemon update is needed:
   the daemons already pass a launch spec's environment on. A key in `~/.config/ffnightly/ffactory.json` on a lab still
   works for nights run by hand.
 - **Every night reports** (`POST /api/intake/nightly`): a green night too, with `status` passed, failed or broken, `counts`, a

@@ -155,9 +155,11 @@ export interface IntakeDeps {
   pushReportFixed?: (fix: ReportFix) => boolean;
   /**
    * Mint the nightly run's API key (w864): `--scope nightly`, under one name, so each mint revokes the night before's.
-   * server/index.ts: Auth.createApiKey("nightly-run", undefined, "nightly"). Unset, the run gets no key.
+   * server/index.ts: Auth.createApiKey("nightly-run", undefined, "nightly"). Unset, the run gets no key. `extra` (w6761):
+   * a second key for the same night after a portal restart lost the first from memory, under a name of its own, so the
+   * first stays valid for the night that holds it; the next night's plain mint revokes every extra one too.
    */
-  mintNightlyKey?: () => string;
+  mintNightlyKey?: (extra?: boolean) => string;
   /** Tell FFBox a player's report is obsolete, or no longer (server/providers.ts pushReportObsolete); false when it could not go. */
   pushReportObsolete?: (o: ReportObsolete & { withdrawn?: true }) => boolean;
   /**
@@ -1506,11 +1508,14 @@ export class IntakeManager {
     this.changed();
   }
 
-  /** A new key for the night, replacing the night before's (one name); false when there is no minter or it failed. */
-  private mintRunKey(date: string): boolean {
+  /**
+   * A new key for the night, replacing the night before's (one name); false when there is no minter or it failed. `extra`:
+   * one more for the same night, beside the key its worker was given before a portal restart (w6761).
+   */
+  private mintRunKey(date: string, extra = false): boolean {
     if (!this.d.mintNightlyKey) return false;
     try {
-      this.runKey = { date, key: this.d.mintNightlyKey() };
+      this.runKey = { date, key: this.d.mintNightlyKey(extra) };
       return true;
     } catch (e) {
       this.data.error = `nightly key: ${cleanLine((e as Error).message, 160)}`;
@@ -1523,14 +1528,16 @@ export class IntakeManager {
    * The environment of a worker on a nightly run request (w864; server/agents.ts machineSandboxSpec): FF Factory's URL as
    * that machine reaches it, and the night's nightly-scoped key, which the lab's `ffnightly.py deliver` reads
    * (FF_FACTORY_URL, FF_FACTORY_NIGHTLY_KEY) and passes on to nothing else, and when the night was fired (FF_NIGHTLY_FIRED_AT, w1099). Only for a night fired in the last day. After a
-   * portal restart the key is gone from memory: a night whose worker already got it keeps it in the lab's running
-   * process (the stored key is still valid), and one whose worker never did gets a fresh one now.
+   * portal restart the key is gone from memory: a night whose worker never got it gets a fresh one now, and one whose
+   * worker already did gets an extra key beside it, so the night that holds the first keeps it (w6761: on 2026-11-28 the
+   * portal restarted at 08:14 and 09:06 UTC, each worker that FF Factory started after that got no key, and the night's
+   * report and its resend said "NOT DELIVERED: no portal configured on this lab").
    */
   nightlyRunEnv(workIds: readonly string[], portalUrl: string): Record<string, string> | undefined {
     const now = this.now();
     const n = this.nights().find((x) => x.workId && workIds.includes(x.workId) && x.firedAt && now - Date.parse(x.firedAt) < 86_400_000);
     if (!n || !/^https?:\/\/[^\s]+$/.test(portalUrl)) return undefined;
-    if (this.runKey?.date !== n.date && (n.keyGivenAt || !this.mintRunKey(n.date))) return undefined;
+    if (this.runKey?.date !== n.date && !this.mintRunKey(n.date, !!n.keyGivenAt)) return undefined;
     if (!n.keyGivenAt) {
       n.keyGivenAt = iso(now);
       this.changed();
