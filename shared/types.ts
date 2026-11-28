@@ -6,6 +6,7 @@ import type { GithubPermissionId } from './githubRequirements.ts';
 import type { GhLogin } from './ghLogin.ts';
 import type { SteamClient } from './steam.ts';
 import type { DesktopSession } from './desktop.ts';
+import type { MachineBaseline } from './machineBaseline.ts';
 import type { Answered } from './replies.ts';
 import type { Ask } from './ask.ts';
 
@@ -1364,7 +1365,8 @@ export interface Machine {
   portalUrl: string;
   sessionIds: string[];
   /** Reported by the daemon. */
-  info?: { hostname: string; os: string; node: string; claude?: string; daemon: string; platform?: MachinePlatform };
+  /** baseline (w6603, shared/machineBaseline.ts): its tools' versions and feature keys, for the per-OS drift check. */
+  info?: { hostname: string; os: string; node: string; claude?: string; daemon: string; platform?: MachinePlatform; baseline?: MachineBaseline };
   /** Its own gh login as its daemon last read it (w1463, shared/ghLogin.ts): the account and scope names, never the token. */
   gh?: GhLogin;
   /** Its Steam client as its daemon last read it (w2459, shared/steam.ts): installed, running, the signed-in account id and name. */
