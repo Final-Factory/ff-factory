@@ -1,0 +1,1 @@
+- The nightly merge review keeps the newest REVIEWED-THROUGH line from any of the request's reports or its outcome, not only the last one, and the intake rules tell the worker to repeat it in every final report (w6767).
