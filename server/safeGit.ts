@@ -148,6 +148,51 @@ const isReadOnly = (key: string) => /^remotes\..+$/.test(key) || key === 'fetch.
 /** fetch and pull options that take their value as the next argument (so it is not read as the remote). */
 const FETCH_VALUE_OPTS = new Set(['-j', '--jobs', '--depth', '--deepen', '--shallow-since', '--shallow-exclude', '-o', '--server-option', '--upload-pack', '--refmap', '--negotiation-tip', '--filter', '--recurse-submodules-default', '--submodule-prefix', '-s', '--strategy', '-X', '--strategy-option', '--cleanup']);
 
+/**
+ * Whether a fetch argument is a cluster of short options holding `-m` (`--multiple`, w6633: `fetch -m origin b` and
+ * `fetch -qm origin b` ran a planted uploadpack, measured by w6629). The letters after one that takes a value (`-j`, `-o`)
+ * are that value. pull has no `-m` (`git pull -h`).
+ */
+function shortMultiple(a: string): boolean {
+  if (!/^-[^-]/.test(a)) return false;
+  for (const c of a.slice(1)) {
+    if (c === 'm') return true;
+    if (c === 'j' || c === 'o') return false;
+  }
+  return false;
+}
+
+/**
+ * Whether `remote <rest>` is `remote add` with its fetch (w6650): `-f`, any prefix of `--fetch` from `--f`, or `f` in a cluster
+ * of short options (`-ftmaster`). In a cluster, the letters after `-t` or `-m` are that option's value (`-tf` tracks a branch
+ * named f). git's options may come after the name and URL, so every argument before `--` counts.
+ */
+function remoteAddFetches(rest: string[]): boolean {
+  if (rest[0] !== 'add') return false;
+  for (const a of rest.slice(1)) {
+    if (a === '--') return false;
+    if (a.startsWith('--')) {
+      if (isOpt(a, '--fetch')) return true;
+    } else if (/^-./.test(a)) {
+      for (const c of a.slice(1)) {
+        if (c === 'f') return true;
+        if (c === 't' || c === 'm') break;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * The arguments from a subcommand's own verb on (`remote -v add -f c u` gives `add -f c u`): `remote` takes `-v`/`--verbose`
+ * ahead of its verb (w6652's review of PR #1534: `remote -v add -f`, `remote -v update` and `remote -v show` went past both
+ * checks). Every leading argument that starts with `-` is skipped, `--` included; `remote -v` alone gives none.
+ */
+const fromVerb = (rest: string[]) => {
+  const i = rest.findIndex((a) => !a.startsWith('-'));
+  return i < 0 ? [] : rest.slice(i);
+};
+
 /** The remote (or group) a fetch or pull names, or undefined when it names none. */
 function remoteArg(rest: string[]): string | undefined {
   for (let i = 0; i < rest.length; i++) {
@@ -161,8 +206,11 @@ function remoteArg(rest: string[]): string | undefined {
 
 /** git's boolean: true, yes, on, a non-zero number, or a key with no value. */
 const gitTrue = (v: string) => /^(true|yes|on|)$/i.test(v.trim()) || (/^-?\d+$/.test(v.trim()) && Number(v) !== 0);
-/** An argument git reads as `--<long>` (it takes any unique prefix of four or more characters). */
-const isOpt = (a: string, long: string) => a.length >= 4 && long.startsWith(a);
+/**
+ * An argument git may read as `--<long>`: git takes any unique prefix, down to one letter after the dashes (`fetch --m` is
+ * `--multiple`, w6638's review of PR #1534). An ambiguous prefix (`fetch --a`) is refused too; git fails it anyway.
+ */
+const isOpt = (a: string, long: string) => a.length >= 3 && long.startsWith(a);
 
 /**
  * Whether a call starts an upload or receive program, and whether the injected option reaches every one (w6570):
@@ -181,7 +229,7 @@ export function uploadReach(args: string[], rows: { key: string; value: string }
   const rest = args.slice(sub + 1);
   if (name === 'ls-remote') return 'covered';
   if (name === 'fetch' || name === 'pull') {
-    if (rest.some((a) => isOpt(a, '--all') || isOpt(a, '--multiple'))) return 'uncovered';
+    if (rest.some((a) => isOpt(a, '--all') || isOpt(a, '--multiple') || (name === 'fetch' && shortMultiple(a)))) return 'uncovered';
     const remote = remoteArg(rest);
     if (remote === undefined) {
       const all = rows.filter((r) => r.key === 'fetch.all').at(-1);
@@ -190,11 +238,12 @@ export function uploadReach(args: string[], rows: { key: string; value: string }
     return rows.some((r) => r.key === `remotes.${remote.toLowerCase()}`) ? 'uncovered' : 'covered';
   }
   if (name === 'push' || name === 'submodule') return 'uncovered';
-  const verb = rest[0] ?? '';
+  const own = fromVerb(rest);
+  const verb = own[0] ?? '';
   if (name === 'remote') {
     if (/^(show|prune|update)$/.test(verb)) return 'uncovered';
-    if (verb === 'set-head' && rest.some((a) => a === '-a' || isOpt(a, '--auto'))) return 'uncovered';
-    if (verb === 'add' && rest.some((a) => a === '-f' || isOpt(a, '--fetch'))) return 'uncovered';
+    if (verb === 'set-head' && own.some((a) => a === '-a' || isOpt(a, '--auto'))) return 'uncovered';
+    if (remoteAddFetches(own)) return 'uncovered';
   }
   if (name === 'lfs' && /^(fetch|pull|push|pre-push|prune)$/.test(verb)) return 'uncovered';
   return 'none';
@@ -244,6 +293,13 @@ const NETWORK = new Set(['fetch', 'pull', 'push', 'clone', 'ls-remote', 'remote'
  * through one is not made at all.
  */
 export function refusal(args: string[], rows: { scope: string; key: string; value: string }[]): string | undefined {
+  const { sub } = splitGlobal(args);
+  // w6650: `remote add --fetch` writes the URL, then fetches; config that switches on only once that URL is there
+  // (`includeIf "hasconfig:remote.*.url:..."` holding an uploadpack or an insteadOf) is not in the scan made before the call,
+  // and the child fetch ran a planted uploadpack (measured by w6649's review on git 2.56.1). Refused in every checkout: no
+  // FF Factory caller passes it, and adding the remote, then fetching it, is the same work with each step scanned.
+  if (args[sub] === 'remote' && remoteAddFetches(fromVerb(args.slice(sub + 1))))
+    return "refused by FF Factory (w6650): `git remote add` with --fetch fetches the new remote after writing its URL, past the fence's scan of the config (an includeIf on that URL switches on only then); run `git remote add` without -f, then `git fetch <name>`";
   const bad = rows.find((r) => !TRUSTED_SCOPES.has(r.scope) && isUrlRewrite(r.key));
   if (!bad || !NETWORK.has(args[splitGlobal(args).sub] ?? '')) return firstWinsRefusal(args, rows);
   return `refused by FF Factory (w5573): the repository's own config sets ${bad.key}, which could send this call to another remote; ${unsetHint(bad)}`;
@@ -380,9 +436,28 @@ function unscanned(args: string[], env: Env): { args: string[]; env: Env } {
 
 const scanArgs = (location: string[]) => [...location, 'config', '--show-scope', '--includes', '-z', '--get-regexp', SCANNED_KEYS];
 
-function fenced(args: string[], env: Env, scanOut: string): { args: string[]; env: Env } {
+/**
+ * Why a scan's rows cannot be trusted, or undefined (w6632): only a scan that ended by itself with exit 0, or with exit 1 (no
+ * such key) or 128 (not a repository: git then fails the call itself) and printed nothing, read the whole config. A scan cut
+ * short (its output over SCAN_MAX_BUFFER, ENOBUFS; its timeout; a signal; any other exit) holds only the rows before the cut,
+ * and a key planted after 5 MiB of padding ran through the fence (measured by w6629). A missing program or folder (ENOENT)
+ * passes: the call fails the same way by itself.
+ */
+export function scanCut(exit: number | null, why: string, out: string): string | undefined {
+  if (exit === 0) return undefined;
+  if ((exit === 1 || exit === 128) && out === '') return undefined;
+  if (why === 'ENOENT') return undefined;
+  return why || `exit ${exit}`;
+}
+
+/** The scan's output limit: a scan that prints more is cut short and refused (w6632). */
+export const SCAN_MAX_BUFFER = 4 * 1024 * 1024;
+
+function fenced(args: string[], env: Env, scanOut: string, cut?: string): { args: string[]; env: Env } {
   const rows = parseScan(scanOut);
-  const no = refusal(args, rows);
+  const no = cut
+    ? `refused by FF Factory (w6632): the fence's scan of this repository's config was cut short (${cut}), so a key after the cut would run unchecked; look at \`git config --show-scope --includes --get-regexp .\` in that repository for an oversized or hanging entry and remove it`
+    : refusal(args, rows);
   // A refused call still runs git, with an option it rejects (exit 129, the reason in its stderr), so every caller fails the
   // way it already handles a failed git.
   if (no)
@@ -424,11 +499,13 @@ export function gitFenceSync(args: string[], opts: { cwd?: string; env?: Env } =
       timeout: 15_000,
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
-      maxBuffer: 4 * 1024 * 1024,
+      maxBuffer: SCAN_MAX_BUFFER,
     });
   } catch (e) {
-    // Exit 1 is "no such key"; anything else (not a repository) leaves the call to fail by itself.
-    out = String((e as { stdout?: string }).stdout ?? '');
+    const x = e as { stdout?: string; status?: number | null; signal?: string | null; code?: string };
+    out = String(x.stdout ?? '');
+    const exit = typeof x.status === 'number' && !x.signal && typeof x.code !== 'string' ? x.status : null;
+    return fenced(args, env, out, scanCut(exit, x.code ?? x.signal ?? '', out));
   }
   return fenced(args, env, out);
 }
@@ -448,9 +525,15 @@ export function gitFence(args: string[], opts: { cwd?: string; env?: Env } = {})
         encoding: 'utf8',
         timeout: 15_000,
         windowsHide: true,
-        maxBuffer: 4 * 1024 * 1024,
+        maxBuffer: SCAN_MAX_BUFFER,
       },
-      (_e, out) => resolve(fenced(args, env, String(out ?? ''))),
+      (e, raw) => {
+        const out = String(raw ?? '');
+        if (!e) return resolve(fenced(args, env, out));
+        const exit = typeof e.code === 'number' && e.code >= 0 && !e.signal ? e.code : null;
+        const why = typeof e.code === 'string' ? e.code : e.signal || (e.killed ? 'timed out' : e.message);
+        resolve(fenced(args, env, out, scanCut(exit, why, out)));
+      },
     );
   });
 }
@@ -465,8 +548,10 @@ export async function gitOffThread(args: string[], opts: { cwd?: string; env?: E
   let f: { args: string[]; env: Env };
   if (!needsScan(args)) f = unscanned(args, env);
   else {
-    const scan = await runOffThread('git', scanArgs(splitGlobal(args).location), 15_000, { cwd: opts.cwd, env: scanEnv(env), maxBuffer: 4 * 1024 * 1024 });
-    f = fenced(args, env, scan.stdout);
+    const scan = await runOffThread('git', scanArgs(splitGlobal(args).location), 15_000, { cwd: opts.cwd, env: scanEnv(env), maxBuffer: SCAN_MAX_BUFFER });
+    // The probe thread answers -1 for anything but an exit (its stderr then holds execFile's message: maxBuffer, ENOENT, ...).
+    const why = scan.code >= 0 ? '' : scan.timedOut ? 'timed out' : /ENOENT/.test(scan.stderr) ? 'ENOENT' : scan.stderr.split('\n')[0] || 'no exit';
+    f = fenced(args, env, scan.stdout, scanCut(scan.code >= 0 ? scan.code : null, why, scan.stdout));
   }
   return runOffThread(opts.bin ?? 'git', [...(opts.pre ?? []), ...f.args], opts.timeoutMs ?? 15_000, { cwd: opts.cwd, env: f.env });
 }
