@@ -300,3 +300,40 @@ test('w2610: a timed leg whose wait for an away computer was dropped times where
   // The parent stays Blocked on its leg's report all along: nothing above was its result.
   assert.equal(store.work.get('w2541')!.status, 'blocked');
 });
+
+test('w6432: a move off an away computer waits while higher-priority work is queued for a game sandbox there, and goes once it is not', async (t) => {
+  const { store, agents, laptop, worker, gated, starts, settled } = await setup(t);
+  laptop({ lastSeen: ago(6 * MIN) });
+  worker('e6d3dfe1');
+  gated(6 * MIN);
+  // w6431 (frantic, the 0.50.0.118 release) just failed to start on lothdesktop: its sandbox is held for it, as on 2026-11-27
+  // at 15:04Z, when a move off offline m5 took lothdesktop/slot1 for w6235 (normal) six seconds after w6431's start failed.
+  store.putWork({ id: 'w6431', title: 'Release 0.50.0.118', brief: 'Release.', priority: 'frantic', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status: 'active', createdAt: OLD, updatedAt: OLD, sessionIds: [], overlaps: [], asks: 0, log: [] });
+  const failed = (agents as unknown as { failedStarts: Map<string, { machine: string; at: number }> }).failedStarts;
+  failed.set('w6431', { machine: 'lothdesktop', at: Date.now() });
+  const warned: string[] = [];
+  t.mock.method(console, 'warn', (l: string) => void warned.push(l));
+  agents.moveAwayWork(NOW);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(starts.length, 0, 'high w2542 does not take the sandbox frantic w6431 is held for');
+  assert.ok(warned.some((l) => /^move: worker e6d3dfe1 on lothlaptop\/slot1 \(w2542, high\) takes no game sandbox on lothdesktop: higher-priority w6431 \(frantic\) is queued for a game sandbox on lothdesktop, so it goes first \(w6432\)/.test(l)), warned.join('\n'));
+  assert.equal(store.work.get('w2542')!.status, 'blocked');
+  failed.delete('w6431'); // w6431 started (or its hold ran out)
+  agents.moveAwayWork(NOW);
+  await settled();
+  assert.deepEqual(starts.map((s) => s.to), ['lothdesktop']);
+});
+
+test('w6432: a move off an away computer passes over the computer held for higher work and goes to another with room', async (t) => {
+  const { store, agents, x, laptop, worker, gated, starts, settled } = await setup(t);
+  x.places = () => [pcx('lothlaptop', { online: false, sandboxes: 1, maxSandboxes: 1, freeSandboxes: 0 }), pcx('lothdesktop'), pcx('beast')];
+  laptop({ lastSeen: ago(6 * MIN) });
+  worker('e6d3dfe1');
+  gated(6 * MIN);
+  store.putWork({ id: 'w6431', title: 'Release 0.50.0.118', brief: 'Release.', priority: 'frantic', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status: 'active', createdAt: OLD, updatedAt: OLD, sessionIds: [], overlaps: [], asks: 0, log: [] });
+  (agents as unknown as { failedStarts: Map<string, { machine: string; at: number }> }).failedStarts.set('w6431', { machine: 'lothdesktop', at: Date.now() });
+  t.mock.method(console, 'warn', () => undefined);
+  agents.moveAwayWork(NOW);
+  await settled();
+  assert.deepEqual(starts.map((s) => s.to), ['beast']);
+});

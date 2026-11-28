@@ -96,20 +96,30 @@ const slot = (id: string, branch: string): MachineSandbox => ({
   git: { branch, dirty: 0, untracked: 0, at: iso(NOW - MIN) },
 });
 
-test('w6432 (warn-only): a released normal worker resuming where frantic work waits for a sandbox and a seat says so, once', (t) => {
-  // fa2c6212's case at about 15:28Z: released from slot2 for w6431, its queued message delivered once a seat freed.
+test('w6432: a released normal worker yields where frantic work waits for a sandbox and a seat, and claims no sandbox there', () => {
+  // fa2c6212's case at about 15:28Z: released from slot2 for w6431, its queued message delivered once a seat freed, it went
+  // back into slot2 while w6431 still waited (slot2 was being cleaned and start_agent was refused twice meanwhile).
   const fa = worker('fa2c6212', 'slot2', { placeReleased: { at: iso(NOW - 6 * MIN), sandbox: 'slot2', branch: 'w6430-flake', why: 'pre-empted for frantic queued work w6431 (w3507)' }, queuedSend: 'go on' });
-  const p = rig([fa], [slot('slot2', 'w6430-flake')], { fa2c6212: 'normal' }, () => [pressure('w6431', 'frantic', { preemptOn: ['lothdesktop'] })]);
-  const warned: string[] = [];
-  t.mock.method(console, 'warn', (l: string) => void warned.push(l));
+  let pr = [pressure('w6431', 'frantic', { preemptOn: ['lothdesktop'] })];
+  const p = rig([fa], [slot('slot2', 'w6430-flake')], { fa2c6212: 'normal' }, () => pr);
   p.tick(); // the pass reads the pressure
-  // Warn-only: today's answer stands (it goes back into its own sandbox), and the line says what enforcing will change.
+  assert.match(p.answer(fa) ?? '', /higher-priority queued work w6431 \(frantic\) takes the next free sandbox on lothdesktop first/);
+  assert.ok(fa.placeReleased, 'still released: it did not take slot2 back');
+  assert.equal(p.claimedBy('lothdesktop', 'slot2'), undefined, 'slot2 is not spoken for by fa2c6212, so it stays free for w6431');
+  // Queued work of equal priority holds nothing: normal fa2c6212 goes back in.
+  pr = [pressure('w6431', 'normal', { preemptOn: ['lothdesktop'] })];
+  p.tick();
   assert.equal(p.answer(fa), undefined);
-  assert.equal(warned.filter((l) => /w6432, warn-only/.test(l)).length, 1, warned.join('\n'));
-  assert.match(warned.find((l) => /w6432/.test(l)) ?? '', /fa2c6212 \(normal\) resumes on lothdesktop while w6431 \(frantic\) is queued for a game sandbox there; once enforced it yields to it/);
-  fa.placeReleased = { at: iso(NOW - 6 * MIN), sandbox: 'slot2', branch: 'w6430-flake', why: 'x' };
-  p.answer(fa);
-  assert.equal(warned.filter((l) => /w6432/.test(l)).length, 1, 'once in 10 minutes, not every pass');
+  assert.equal(fa.placeReleased, undefined, 'back in its own sandbox');
+});
+
+test('w6432: a start that failed holds the computer against a resume before any pass reads the queue', () => {
+  const fa = worker('fa2c6212', 'slot1', { placeReleased: { at: iso(NOW - 6 * MIN), sandbox: 'slot1', branch: 'w6235-x', why: 'x' }, queuedSend: 'go on' });
+  let failed = [failedStartPressure('w6431', 't', 'frantic', 'lothdesktop')];
+  const p = rig([fa], [slot('slot1', 'w6235-x')], { fa2c6212: 'normal' }, () => [], () => failed);
+  assert.match(p.answer(fa) ?? '', /w6431 \(frantic\)/);
+  failed = [];
+  assert.equal(p.answer(fa), undefined, 'the hold ends with the failed start');
 });
 
 test('w6432: outranking reads the pass\'s queued work and the failed starts together', () => {

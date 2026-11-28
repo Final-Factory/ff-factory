@@ -761,8 +761,14 @@ export class PlaceAgain {
    * higher priority that a free sandbox there would make room for. Its resume claims no sandbox there meanwhile.
    */
   private yieldsTo(s: SessionInfo, machineId: string): Pressure | PairWant | undefined {
-    if ((!this.pressureNow.length && !this.pairsNow.length) || !this.d.priorityOf) return undefined;
+    if (!this.d.priorityOf) return undefined;
     const mine = rankOf(this.d.priorityOf(s));
+    // w6432: urgent and frantic work that lacks a seat there too (preemptOn), and a start that just failed there, count as
+    // well: w3507 read only the computers where a free sandbox is all the queued work lacks, and fa2c6212 (w6430, normal)
+    // resumed into lothdesktop/slot2 at about 15:28Z on 2026-11-27, the sandbox it had given up for w6431 (frantic).
+    const outranked = this.outranking(mine, machineId);
+    if (outranked) return outranked;
+    if (!this.pressureNow.length && !this.pairsNow.length) return undefined;
     // w3588: a pair run the sandbox would start goes first from its own priority up, as its hold does against single work
     // (w1945). Live on 2026-11-08: beast/slot1 was released at 05:34:53Z with w3562 (high) holding biscuit for one leg and
     // fitting beast for the other, and at 05:35:15Z d3f81fb1 held it again for its check-in; pairs were never in pressure.
@@ -1303,14 +1309,6 @@ export class PlaceAgain {
     const ahead = this.yieldsTo(info, m.id);
     if (ahead && !('room' in ahead)) return `Queued pair run ${ahead.work} (${ahead.priority ?? 'normal'}) starts with the next free sandbox on ${m.id}, so it takes it first (w3588); it is placed again after`;
     if (ahead) return `higher-priority queued work ${ahead.work} (${ahead.priority}) takes the next free sandbox on ${m.id} first (w3507); it is placed again after`;
-    // w6432 (warn-only): w3507's yield reads only the computers where a free sandbox is all the queued work lacks; urgent
-    // and frantic work that lacks a seat there too (preemptOn) is passed over. fa2c6212 (w6430, normal) resumed into
-    // lothdesktop/slot2 at about 15:28Z on 2026-11-27, the sandbox it had given up for w6431 (frantic) at 15:22Z.
-    if (this.d.priorityOf) {
-      const mine = this.d.priorityOf(info);
-      const would = this.outranking(rankOf(mine), m.id);
-      if (would) this.warnOnce(`resume:${info.id}:${m.id}:${would.work}`, `place again (w6432, warn-only): ${info.id} (${mine ?? 'no open request'}) resumes on ${m.id} while ${would.work} (${would.priority}) is queued for a game sandbox there; once enforced it yields to it`);
-    }
     const f = this.facts(m.id);
     const taken = this.claims(m.id);
     const p = placeFor(info, m, f, taken, this.failedIn(info.id));
