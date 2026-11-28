@@ -152,6 +152,47 @@ for ($i = 0; $i -lt 60 -and -not (Test-Path $j); $i++) { Start-Sleep -Seconds 2 
   const svcSddl = () => ps(`"$(sc.exe sdshow refsdedupsvc)".Trim()`).stdout.trim();
   if (hasSvc) check(svcSddl().includes(`(A;;LCRPWP;;;${repo.sid})`), 'refsdedupsvc grants the task SID query, start and stop (LCRPWP) only', svcSddl());
   else console.log('note: this Windows has no refsdedupsvc; the service right is not checked');
+  if (hasSvc) {
+    // The repair path itself (w6597 forced test). A fault after the stop still starts the service again: run the script
+    // elevated with -FailAfterStop, with the service running first so the stop really happens.
+    const helpersPs = path.join(HERE, '..', '..', 'install-privileged-helpers.ps1');
+    const repairPs = path.join(HERE, '..', '..', 'privileged', 'refs-dedup-repair.ps1');
+    const faultDir = path.join(scratch, 'dedup-repair-fault');
+    const fault = ps(`sc.exe start refsdedupsvc | Out-Null; for ($i = 0; $i -lt 30 -and (Get-Service refsdedupsvc).Status -ne 'Running'; $i++) { Start-Sleep 1 }
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '${repairPs}' -Letter ${letter} -ResultDir '${faultDir}' -Mode force -FailAfterStop | Out-Null
+@{ svc = "$((Get-Service refsdedupsvc).Status)"; result = Get-Content -Raw (Join-Path '${faultDir}' 'dedup-repair.json') | ConvertFrom-Json } | ConvertTo-Json -Depth 4 -Compress`).stdout.trim();
+    let fj: { svc?: string; result?: { ok?: boolean; state?: string; detail?: string; did?: string[] } } = {};
+    try { fj = JSON.parse(fault); } catch { /* checked below */ }
+    const fdid = (fj.result?.did ?? []).join(' | ');
+    check(fj.result?.state === 'check failed' && /test fault/.test(fj.result?.detail ?? '') && /sc stop refsdedupsvc/.test(fdid) && /sc start refsdedupsvc/.test(fdid) && fj.svc === 'Running',
+      'a fault right after the service stop still starts refsdedupsvc again', fault);
+    // Force mode as the task (LOCAL SERVICE): stop, the volume task read after the stop (gone or not), start.
+    const force = ps(`& '${helpersPs}' -Vhdx '${vhdx}' -Letter ${letter} -Actions deduprepair -DedupRepairMode force | Out-Null
+sc.exe start refsdedupsvc | Out-Null; for ($i = 0; $i -lt 30 -and (Get-Service refsdedupsvc).Status -ne 'Running'; $i++) { Start-Sleep 1 }
+$j = Join-Path $env:ProgramData 'ffsb-helpers\\results\\dedup-repair\\dedup-repair.json'; Remove-Item $j -ErrorAction SilentlyContinue
+$t0 = Get-Date; schtasks /run /tn ffsb-helper-deduprepair | Out-Null
+# A trace of the service and the task while it runs (CI 2026-11-28: no result after 300 s and the service Stopped).
+$trace = @(); $last = ''
+for ($i = 0; $i -lt 450 -and -not (Test-Path $j); $i++) {
+  $now = "svc $((Get-Service refsdedupsvc).Status), task $((Get-ScheduledTask -TaskName ffsb-helper-deduprepair).State)"
+  if ($now -ne $last) { $trace += "+$([int]((Get-Date) - $t0).TotalSeconds)s $now"; $last = $now }
+  Start-Sleep -Seconds 2
+}
+$info = Get-ScheduledTaskInfo -TaskName ffsb-helper-deduprepair
+$log = Join-Path $env:ProgramData 'ffsb-helpers\\results\\dedup-repair\\dedup-repair.log'
+@{ svc = "$((Get-Service refsdedupsvc).Status)"; result = $(if (Test-Path $j) { Get-Content -Raw $j | ConvertFrom-Json } else { $null }); trace = $trace; lastResult = $info.LastTaskResult; args = (Get-ScheduledTask -TaskName ffsb-helper-deduprepair).Actions[0].Arguments; logTail = $(if (Test-Path $log) { @(Get-Content $log -Tail 3) } else { @() }) } | ConvertTo-Json -Depth 4 -Compress`).stdout.trim();
+    let fo: { svc?: string; result?: { mode?: string; ok?: boolean; state?: string; did?: string[]; whoami?: string } } = {};
+    try { fo = JSON.parse(force); } catch { /* checked below */ }
+    const odid = (fo.result?.did ?? []).join(' | ');
+    check(fo.result?.mode === 'force' && /sc stop refsdedupsvc \(exit 0\)/.test(odid) && /sc start refsdedupsvc \(exit 0\)/.test(odid) && /service RUNNING/.test(odid) && fo.result?.state !== 'check failed',
+      'the repair task (LOCAL SERVICE) stops and starts refsdedupsvc in force mode and the service is RUNNING right after its start', force);
+    // "repaired" needs the volume task back (w6791 N1). This runner watches no volume, so it stays missing and the run must fail.
+    check(fo.result?.ok ? /volume task back/.test(fo.result?.state ?? '') : /not back|not seen/.test(fo.result?.state ?? ''),
+      'the repair only says repaired with the volume task (the nightly trigger) back', fo.result?.state ?? '');
+    console.log(`note: force-mode repair on this runner: ${fo.result?.state}; the service now ${fo.svc} (it may stop by itself when it watches nothing); trace ${JSON.stringify((fo as { trace?: string[] }).trace ?? [])}`);
+    const back = ps(`& '${helpersPs}' -Vhdx '${vhdx}' -Letter ${letter} -Actions deduprepair | Out-Null; (Get-ScheduledTask -TaskName ffsb-helper-deduprepair).Actions[0].Arguments`).stdout.trim();
+    check(/-Mode repair$/.test(back), 'reinstalling puts the repair task back in repair mode', back);
+  }
   const boot = ps(`(Get-ScheduledTask -TaskName ffsb-helper-mount).Triggers | ForEach-Object { $_.CimClass.CimClassName }`).stdout.trim();
   check(/BootTrigger/.test(boot), 'the mount task also runs at boot', boot);
 
