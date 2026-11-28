@@ -11,7 +11,7 @@ import { cardQuestions } from '../shared/questionCard.ts';
 import { asksWithCopies, needsYouRecord, needsYouText } from './needsYou.ts';
 import { publishedCopy } from './reviewMedia.ts';
 import { FRAME_ASK, LOTH, STRIP_ASK, orchestratorQuestions, waitingCases } from './fixtures/waitingCards.ts';
-import type { SessionInfo, WorkItem } from '../shared/types.ts';
+import type { OpenAsk, SessionInfo, WorkItem } from '../shared/types.ts';
 
 /**
  * w1868 (lothsahn, 2026-10-23: "The existing cards are impossible to know what I need to answer"; then "I meant the 'waiting
@@ -177,9 +177,58 @@ test('w1868: the orchestrator’s open questions are cards: three requests and t
   // The question the w1821 card already asks (its Station strip question, relayed) is that card, not a second one.
   orch.openAsks = [...orch.openAsks!, { seq: 106, at: new Date(NOW).toISOString(), request: 'w1821', ask: STRIP_ASK }];
   assert.equal(orchestratorAsks([orch], work, { userId: 'lothsahn' }).length, 5);
-  // A closed request's question goes.
+  // w6813: a closed request's question still shows until it is answered or closed, marked so.
   const closed = work.map((w) => (w.id === 'w1829' ? { ...w, status: 'done' as const } : w));
-  assert.equal(orchestratorAsks([orch], closed, { userId: 'lothsahn' }).length, 4);
+  const shown = orchestratorAsks([orch], closed, { userId: 'lothsahn' });
+  assert.equal(shown.length, 5);
+  assert.deepEqual(shown.filter((i) => i.closedRequest).map((i) => i.a.seq), [101]);
+});
+
+/**
+ * w6813 (lothsahn, 2026-11-28: "I don't have cards for those six. Please investigate and figure out why those cards were
+ * missing in the dispatch window"): six questions the store held open had no card. Every open question shows, whatever
+ * became of its request; one hides behind its request's card only when that card is on the tab.
+ */
+test('w6813: every open question the store holds is a card: stalled and closed requests, and a [needs you] whose card is not on the tab', () => {
+  const cases = waitingCases(NOW);
+  const base = cases.find((c) => c.w.id === 'w1821')!.w;
+  const req = (id: string, status: WorkItem['status'], needsYou?: WorkItem['needsYou']) => ({ ...base, id, status, needsYou }) as WorkItem;
+  const two = (question: string, a: string, b: string) => ({ question, options: [{ label: a, description: 'One way.', recommended: true }, { label: b, description: 'The other.' }] });
+  const gpu = two('Adding ffu’s new GPU runner label needs an admin login on the ffu repo. How should it be added?', 'Let the ops worker use LothDesktop’s own GitHub login', 'Hold the label for now');
+  const nyGpu = { ...base.needsYou!, answered: undefined, answeredAsks: undefined, question: 'Add the ffu-gpu label to ffu’s runners with an admin account.', asks: [gpu] };
+  const work = [
+    req('w5710', 'stalled'),
+    req('w5691', 'stalled'),
+    req('w6754', 'done'),
+    req('w6781', 'blocked', nyGpu),
+    req('w6780', 'done'),
+    req('w6704', 'done'),
+  ];
+  const ask = (seq: number, request: string | undefined, a: ReturnType<typeof two>): OpenAsk => ({ seq, at: new Date(NOW - (200000 - seq) * 1000).toISOString(), ...(request ? { request } : {}), ask: a });
+  const orch = {
+    id: 'orch-l',
+    kind: 'orchestrator',
+    orchestratorRole: 'personal',
+    requestedBy: LOTH,
+    openAsks: [
+      ask(150503, 'w5710', two('The ledger cleanup stalled w5710 as superseded. Close it, or keep the m5 rollout?', 'Close it as superseded', 'Keep it open')),
+      ask(150648, 'w6754', two('Machine exclusions logged no false warnings for an hour. Should placement.exclusions switch from warn to enforce?', 'Keep it at warn until BEAST is back', 'Enforce now')),
+      ask(151065, 'w5691', two('w5691 has stalled on m3 being offline. Close it with three machines checked, or wait?', 'Close it with three checked', 'Wait for m3')),
+      ask(151470, 'w6781', gpu),
+      ask(152079, 'w6780', two('Should I file w6780’s follow-up to move one big flying station’s buildings in parallel?', 'File it', 'Drop it')),
+      ask(152123, 'w6704', two('w6704’s worker already merged FFU PR #1287 without check. Keep it or revert?', 'Keep it', 'Revert it')),
+    ],
+  } as unknown as SessionInfo;
+  const me = { userId: 'lothsahn' };
+  // The tab shows none of these requests' own cards (w6781 is blocked on a pull request, not Waiting on input).
+  const items = orchestratorAsks([orch], work, me, new Set());
+  assert.deepEqual(items.map((i) => i.a.seq), [150503, 150648, 151065, 151470, 152079, 152123], 'all six open questions are cards');
+  assert.deepEqual(items.filter((i) => i.closedRequest).map((i) => i.w!.id), ['w5710', 'w6754', 'w5691', 'w6780', 'w6704'], 'marked: their request is stalled or closed');
+  // When w6781's own card is on the tab, it asks the GPU question: one question, one card.
+  assert.deepEqual(orchestratorAsks([orch], work, me, new Set(['w6781'])).map((i) => i.a.seq), [150503, 150648, 151065, 152079, 152123]);
+  // Answered, its [needs you] no longer hides the card, on the tab or not.
+  const answered = work.map((w) => (w.id === 'w6781' ? { ...w, needsYou: { ...nyGpu, answered: { by: 'lothsahn', at: new Date(NOW).toISOString() } } } : w)) as WorkItem[];
+  assert.equal(orchestratorAsks([orch], answered, me, new Set(['w6781'])).length, 6);
 });
 
 test('w1868: the live cards after the deploy: a reporter’s wait shown whole, a quoted brief not cut mid-quote, "still open" not visual', () => {

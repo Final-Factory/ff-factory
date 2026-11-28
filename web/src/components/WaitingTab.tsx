@@ -463,6 +463,7 @@ function AskWaitCard({ app, item, now, holds }: { app: AppState; item: AskItem; 
     meta: (
       <span className={waitAge(a.at, now) === 'fresh' ? '' : `tone-${AGE_TONE[waitAge(a.at, now)]}`}>
         {me} must act · waiting {waitedFor(a.at, now)} · asked by your orchestrator{a.request ? ` about ${a.request}` : ''}
+        {item.closedRequest && w ? ` (${w.status === 'stalled' ? 'stalled' : 'closed'} since; the question still waits)` : ''}
       </span>
     ),
     after: a.after ?? 'Your orchestrator carries on with your answer, as if you had clicked it in your chat.',
