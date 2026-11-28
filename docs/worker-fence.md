@@ -117,7 +117,11 @@ anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macO
   backport waited for a Medium computer none had. The mark goes only when every named commit's `GameDataPaths.cs` reads
   the variable (at most 8 commits); one that lacks it, cannot be read, or answers for another commit keeps it, and so does
   any `0.50.x.y` build or Steam/installed player, except a version written in parentheses right after a sha that was read,
-  "dc4643b4c2 (0.50.0.120)", which is that commit's own version (`versionOfChecked`).
+  "dc4643b4c2 (0.50.0.120)", which is that commit's own version (`versionOfChecked`). Only that bare shape (w6686, from
+  w6682's review of PR #1543): the bracket closes right after the version ("dc4643b4c2 (0.50.0.47 installed)" keeps the
+  mark), the sha sits at most three spaces before the "(", no published, installed, downloaded, Steam, release,
+  shipped, live, retail or public word sits up to two words before the sha ("the published
+  dc4643b4c2 (0.50.0.47)" keeps it), and "v0.50.0.47" is a version too.
   A build named without a number counts as another player too (w6458, from w6454's review of PR #1484): "the Steam
   pre-1.0 build", "installed from Steam", "the published 0.50 player", "the pre-1.0 release" (`INSTALLED_BUILD`). Its
   words are read only after the pre-1.0 or 0.50 words marked the run, and "a Steam lobby" or "the release branch" are no
