@@ -677,6 +677,14 @@ static class FfReadLog
         // ...and one stamped after it is the pid's next holder's
         OnOpen(210, "C:\\Users\\me\\next.txt", tick());
         check(!said("next.txt"), "B3: an open stamped after the followed process's stop is not reported");
+        // w6736 G4: a person's open, stamped before a worker's tool took its pid, is handled after the tool's start (another
+        // CPU's buffer): not the tool's
+        long personOpen = tick();
+        run(230, 100, T + 665);
+        OnStart(230, 100, T + 665, "C:\\Windows\\System32\\cmd.exe", tick());
+        OnOpen(230, "C:\\Users\\me\\person.txt", personOpen);
+        check(Tracked.ContainsKey(230) && !said("person.txt"), "G4: an open stamped before the followed process's start is not reported");
+        exit(230);
         // a tool (220) whose stop is late: the pid's next holder opens a file before the tool's own stop is handled
         run(220, 100, T + 660);
         OnStart(220, 100, T + 660, "C:\\Windows\\System32\\cmd.exe", tick());
