@@ -336,9 +336,11 @@ export function personGames(procs: Proc[], cands: { p: Proc }[], env: Map<number
   const folders = [...o.places, ...(o.tempRoot ? [o.tempRoot] : [])].filter(Boolean).map((f) => names(key(f, o.platform)));
   return gamePlayers(procs, o.platform)
     .filter((p) => p.pid > 0 && !taken.has(p.pid) && !o.self.has(p.pid) && !env.get(p.pid)?.session)
-    // w6737: a game a lease on this host names by its own pid (the players broker's and player_slots.py launch's leases do),
-    // and one an earlier look already knew as a worker's, are never a person's, whatever its command line reads now.
-    .filter((p) => !o.leasePids?.has(p.pid) && !o.known?.has(p.pid))
+    // w6737: a game listed with no readable path (an exiting one on Windows) that a lease on this host names by its own pid
+    // (the players broker's and player_slots.py launch's leases do), or that an earlier look knew as a worker's, is never a
+    // person's. Only then: a game whose path reads is judged by it, so a lease left behind by a dead player, or a remembered
+    // pid that Windows gave to a person's game, never hides that game (w6745's review).
+    .filter((p) => !pathlessGame(p, o.platform) || (!o.leasePids?.has(p.pid) && !o.known?.has(p.pid)))
     .filter((p) => {
       const c = o.platform === 'win32' ? posix(p.cmd).toLowerCase() : p.cmd;
       return !folders.some((re) => re.test(c));
@@ -573,7 +575,12 @@ export class LeftoverReaper {
     const live = new Set(games.map((p) => p.pid));
     for (const pid of [...this.agentGames]) if (!live.has(pid)) this.agentGames.delete(pid);
     const taken = new Set(cands.map((c) => c.p.pid));
-    for (const p of games) if (taken.has(p.pid) || env.get(p.pid)?.session || leasePids.has(p.pid) || slotOf(p.cmd, roots, d.platform)) this.agentGames.add(p.pid);
+    // A game whose path reads is (re)judged on every look, so a pid reused by a person's game is dropped from the memory.
+    for (const p of games) {
+      if (pathlessGame(p, d.platform)) continue;
+      if (taken.has(p.pid) || env.get(p.pid)?.session || slotOf(p.cmd, roots, d.platform)) this.agentGames.add(p.pid);
+      else this.agentGames.delete(p.pid);
+    }
     const o = { platform: d.platform, self, places: d.places().map((x) => x.path), tempRoot: d.tempRoot(), slotRoots: roots, leasePids, known: this.agentGames };
     const raw = await this.rawPersons(procs, cands, env, o);
     const pathless = new Set(games.filter((p) => pathlessGame(p, d.platform)).map((p) => p.pid));

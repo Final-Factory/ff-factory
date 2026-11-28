@@ -639,9 +639,11 @@ as lothsahn playing and held the machine 10+ min each: w6684's (`V:\ffw\players\
 53744) at 05:57:51Z, while `ff-leftovers end` was ending it and just after a daemon restart, and the players broker's
 (`V:\ffw\players\slot3-0\player\finalfactory.exe`, pid 100716) at 06:10:00Z, which was gone by 06:10:52Z. Windows'
 Win32_Process lists an exiting process by its name with no command line, so the slot path, and the lease (matched by slot),
-were both lost. So three more rules: a game a lease on this host names by its own pid (the broker's and `player_slots.py
-launch`'s leases do) is never a person's; one an earlier look knew as a worker's stays a worker's while its pid runs; and a
-game counts as a person's only once two looks in a row (`LEFTOVER.PERSON_LOOKS`, a minute apart) found it so, three for
+were both lost. So three more rules: a game listed with no command line that a lease on this host names by its own pid
+(the broker's and `player_slots.py launch`'s leases do) is never a person's; nor is one with no command line that an earlier
+look knew as a worker's (`agentGames`). A game whose path reads is judged by its path on every look and is never hidden by
+those two: a lease left behind by a dead player (BEAST kept such leases 6-9 h) or a remembered pid Windows gave to a
+person's game would otherwise hide that game for as long as it ran (w6745's review). And a game counts as a person's only once two looks in a row (`LEFTOVER.PERSON_LOOKS`, a minute apart) found it so, three for
 one listed with no command line (`PERSON_PATHLESS_LOOKS`). The first look after a daemon start holds nothing new; a person's
 game is found a minute later, and a hold kept from before the restart stays (it goes into its grace on that look and back
 to playing on the next).

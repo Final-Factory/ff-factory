@@ -863,6 +863,25 @@ test("w6737: the daemon's look never holds the machine for an agent's exiting sl
   assert.ok(person.alive(5100) && person.alive(5300), "a person's game is never ended");
 });
 
+test("w6737 (w6745's review): a lease left behind, or a remembered pid Windows gives to a person's game, never hides that game", async () => {
+  const opts = { platform: 'win32' as const, personPlay: true, slotRoots: [String.raw`V:\ffw\players`], tempRoot: 'V:/ffw/tmp', sessions: { af39aa7c: { live: true } } };
+  // A dead player's lease still names pid 5100 (BEAST kept such leases for 6-9 h); a person's Steam game now runs as 5100.
+  const stale: PlayerLease[] = [{ slot: 'slot1-0', pid: 5100, host: 'biscuit', session: 'af39aa7c', sandbox: 'V:/ffw/sandboxes/slot1' }];
+  assert.deepEqual(personGames([W6737.daemon, W6737.steamGame], [], new Map(), w6737O({ leasePids: new Set([5100]), known: new Set([5100]) })), [5100], 'a path that reads is judged by its path');
+  const lease = machine([SYSTEMD, W6737.daemon, { ...W6737.steamGame }], { ...opts, leases: stale });
+  await lease.look(0);
+  await lease.look(1);
+  assert.deepEqual(lease.reaper.report().persons, [5100], 'found on its second look despite the stale lease');
+  // The agent's game 53744 is remembered, exits, and a person's game gets pid 53744 before the next look.
+  const reuse = machine([SYSTEMD, W6737.daemon, { ...W6737.w6684 }], opts);
+  await reuse.look(0);
+  reuse.st.procs = [SYSTEMD, W6737.daemon, { ...W6737.steamGame, pid: 53744 }];
+  await reuse.look(1);
+  assert.deepEqual(reuse.reaper.report().persons, []);
+  await reuse.look(1);
+  assert.deepEqual(reuse.reaper.report().persons, [53744], 'the reused pid is judged by its path, found on its second look');
+});
+
 test('ff-leftovers on Windows (w3637): a native program a Git Bash script left running in the background is listed, though its starter shows no session', () => {
   // BEAST, 2026-11-08, as Win32_Process listed it: a worker's script started `python ... &` and exited; MSYS keeps the
   // script's bash.exe as the Windows parent of the native python while it runs, and that bash shows the reader no
