@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FIXED_GIT_CONFIG, HOOKS, SUBMODULE_GIT_CONFIG, submoduleRecursion, submoduleRefusal, gitlinkListArgs, gitlinkIn, gitlinkCovered, gitFence, fenceArgs, firstWinsArgs, firstWinsRefusal, gitExecFileSync, gitFenceSync, gitOffThread, gitSpawnSync, isGit, lazyFetchOff, needsScan, parseScan, refusal, scanCut, scannedOverrides, splitGlobal, withConfigFirst } from './safeGit.ts';
+import { FIXED_GIT_CONFIG, HOOKS, SUBMODULE_GIT_CONFIG, submoduleRecursion, submoduleRefusal, gitlinkListArgs, gitlinkIn, gitlinkCovered, gitFence, wholeIndexCall, fenceArgs, firstWinsArgs, firstWinsRefusal, gitExecFileSync, gitFenceSync, gitOffThread, gitSpawnSync, isGit, lazyFetchOff, needsScan, parseScan, refusal, scanCut, scannedOverrides, splitGlobal, withConfigFirst } from './safeGit.ts';
 import { readGitStatus } from './gitStatus.ts';
 import { run } from './proc.ts';
 
@@ -297,9 +297,20 @@ test('w6570: a repository-set upload or receive program goes to the transport as
 
 test('w5541: the subcommand is found past the global options; diff, log and show get no external diff or textconv', () => {
   assert.deepEqual(splitGlobal(['--no-optional-locks', '-C', 'd', '-c', 'a=b', '--git-dir=g', 'status', '-C']), { location: ['-C', 'd', '--git-dir=g'], sub: 6 });
-  assert.deepEqual(fenceArgs(['-C', 'd', 'diff', 'HEAD', '--numstat']), ['-C', 'd', 'diff', '--no-ext-diff', '--no-textconv', 'HEAD', '--numstat']);
+  assert.deepEqual(fenceArgs(['-C', 'd', 'diff', 'HEAD', '--numstat']), ['-C', 'd', 'diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=dirty', 'HEAD', '--numstat']);
   assert.deepEqual(fenceArgs(['log', '-1']), ['log', '--no-ext-diff', '--no-textconv', '-1']);
-  assert.deepEqual(fenceArgs(['-C', 'd', 'status']), ['-C', 'd', 'status']);
+  assert.deepEqual(fenceArgs(['-C', 'd', 'rev-list', 'HEAD']), ['-C', 'd', 'rev-list', 'HEAD']);
+  // w6691: a submodule's own `ignore` loses only to an option.
+  assert.deepEqual(fenceArgs(['-C', 'd', 'status', '--porcelain']), ['-C', 'd', 'status', '--ignore-submodules=dirty', '--porcelain']);
+  assert.deepEqual(fenceArgs(['diff', 'HEAD']), ['diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=dirty', 'HEAD']);
+  assert.deepEqual(fenceArgs(['diff-index', 'HEAD']), ['diff-index', '--ignore-submodules=dirty', 'HEAD']);
+  assert.deepEqual(fenceArgs(['diff-files']), ['diff-files', '--ignore-submodules=dirty']);
+  assert.deepEqual(fenceArgs(['checkout', '--no-quiet', 'main']), ['checkout', '--no-quiet', 'main', '--quiet']);
+  assert.deepEqual(fenceArgs(['checkout', 'main', '--', 'a.txt']), ['checkout', 'main', '--quiet', '--', 'a.txt']);
+  assert.deepEqual(fenceArgs(['switch', '-c', 'b']), ['switch', '-c', 'b', '--quiet']);
+  assert.deepEqual(fenceArgs(['stash', 'pop']), ['stash', 'pop', '--quiet']);
+  assert.deepEqual(fenceArgs(['stash', 'apply', 'stash@{1}']), ['stash', 'apply', 'stash@{1}', '--quiet']);
+  assert.deepEqual(fenceArgs(['stash', 'list']), ['stash', 'list']);
   assert.ok(isGit('git') && isGit('/usr/bin/git') && isGit('C:\\Program Files\\Git\\cmd\\git.exe') && !isGit('gh') && !isGit('git-lfs'));
 });
 
@@ -803,8 +814,28 @@ test('w6630: a call that recurses into submodules by its own option is refused; 
   assert.deepEqual(gitlinkListArgs(['add', '-u', '--pathspec-from-file=list']), [...ls, ':/']);
   assert.deepEqual(gitlinkListArgs(['-C', 'x', 'rm', '-r', '-q', '--cached', 'sub', 'b']), ['-C', 'x', ...ls, 'sub', 'b']);
   assert.deepEqual(gitlinkListArgs(['add', '--chmod', '+x', 'f', '--', '-odd', ':!sub']), [...ls, 'f', '-odd', ':!sub']);
-  assert.equal(gitlinkListArgs(['commit', '-a']), undefined);
   assert.equal(gitlinkListArgs(['status']), undefined);
+  // w6691: any prefix of --pathspec-from-file git takes; the call's pathspec options; a literal call's pathspec stays literal.
+  assert.deepEqual(gitlinkListArgs(['add', '--pathspec-fr', 'list.txt']), [...ls, ':/']);
+  assert.deepEqual(gitlinkListArgs(['rm', '--pathspec-from=l', 'x']), [...ls, ':/']);
+  assert.deepEqual(gitlinkListArgs(['add', '--chm', '+x', 'f']), [...ls, 'f']);
+  assert.deepEqual(gitlinkListArgs(['--icase-pathspecs', '-C', 'x', 'add', 'SUB']), ['-C', 'x', '--icase-pathspecs', ...ls, 'SUB']);
+  assert.deepEqual(gitlinkListArgs(['--literal-pathspecs', 'add', 'su*']), [...ls, ':(literal)su*']);
+  assert.deepEqual(gitlinkListArgs(['add', 'su*'], { GIT_LITERAL_PATHSPECS: '1' }), [...ls, ':(literal)su*']);
+  assert.deepEqual(gitlinkListArgs(['add', 'su*'], { GIT_LITERAL_PATHSPECS: '' }), [...ls, 'su*']);
+  assert.deepEqual(gitlinkListArgs(['--literal-pathspecs', 'add', '-A']), [...ls, ':/'], 'the listing runs with literal pathspecs off');
+  assert.deepEqual(gitlinkListArgs(['mv', '-k', 'sub', 'sub2']), [...ls, 'sub', 'sub2']);
+  // w6691: calls that look into every submodule whatever any option says list the whole index.
+  for (const a of [['commit', '-a'], ['commit', '-q', '-m', 'x', '--', 'f'], ['stash'], ['stash', '-q'], ['stash', 'push', '-q'], ['stash', 'save', 'x'], ['stash', 'create'], ['stash', 'branch', 'b'], ['describe', '--dirty'], ['describe', '--always', '--broken=-b'], ['describe', '--dir'], ['rebase', '--autostash', 'main'], ['merge', '--autos', 'x'], ['pull', '--autostash'], ['-c', 'rebase.autoStash=true', 'rebase', 'main'], ['-cmerge.autostash', 'merge', 'x'], ['--config-env=rebase.autostash=V', 'pull']]) {
+    assert.ok(wholeIndexCall(a), a.join(' '));
+    assert.deepEqual(gitlinkListArgs(a), [...ls, ':/'], a.join(' '));
+  }
+  for (const a of [['stash', 'list'], ['stash', 'pop'], ['stash', 'show', '-p'], ['describe', '--tags'], ['describe', '--', '--dirty'], ['rebase', 'main'], ['rebase', '--no-autostash', 'main'], ['merge', '--ff-only', '@{u}'], ['-c', 'rebase.autoStash=false', 'rebase', 'main'], ['checkout', 'main'], ['status']]) {
+    assert.ok(!wholeIndexCall(a), a.join(' '));
+    assert.equal(gitlinkListArgs(a), undefined, a.join(' '));
+  }
+  assert.match(gitlinkCovered(['commit', '-m', 'x'], 0, '160000 bb 0\tlib/sub\0') ?? '', /^refused by FF Factory \(w6630\): `git commit` runs in a repository with the submodule lib\/sub.*`ignore` setting.*git -C lib\/sub/);
+  assert.equal(gitlinkCovered(['commit', '-m', 'x'], 0, '100644 aa 0\ta.txt\0'), undefined);
   assert.equal(gitlinkIn('100644 aa 0\ta.txt\x00160000 bb 0\tlib/sub\0'), 'lib/sub');
   assert.equal(gitlinkIn('100644 aa 0\ta.txt\0'), undefined);
   assert.match(gitlinkCovered(['rm', 'lib/sub'], 0, '160000 bb 0\tlib/sub\0') ?? '', /^refused by FF Factory \(w6630\): `git rm` covers the submodule lib\/sub.*':!lib\/sub'.*git -C lib\/sub/);
@@ -954,6 +985,41 @@ test('w6630: a submodule’s planted uploadpack and filter run on plain git, nev
       assert.equal(r.status, 0, `${a.join(' ')}: ${r.stderr}`);
       assert.equal(f.ran(), '', `fence: ${a.join(' ')}`);
     }
+    // w6691: the submodule's own `ignore = none` (in .gitmodules, which a branch can bring) beats the forced
+    // diff.ignoreSubmodules: with only the forced config, each route below runs the filter on plain git.
+    const forced = (...a: string[]) => plain(...SUBMODULE_GIT_CONFIG.flatMap(([k, v]) => ['-c', `${k}=${v}`]), ...a);
+    const who = ['-c', 'user.name=t', '-c', 'user.email=t@users.noreply.github.com'];
+    git(victim, 'config', '--file', '.gitmodules', 'submodule.sub.ignore', 'none');
+    git(victim, ...who, 'commit', '-qam', 'ignore none');
+    git(victim, 'branch', 'other');
+    for (const a of [['status', '--porcelain'], ['diff'], ['diff-files'], ['diff-index', 'HEAD'], ['checkout', 'other'], ['describe', '--dirty', '--always'], ['commit', '--dry-run']]) {
+      forced(...a);
+      assert.match(f.ran(), /clean/, `plain git with the forced config: ${a.join(' ')} runs the submodule’s filter`);
+    }
+    // Through the fence, the inserted --ignore-submodules=dirty and --quiet stop these.
+    for (const a of [['status', '--porcelain'], ['diff'], ['diff-files'], ['diff-index', 'HEAD'], ['checkout', 'master'], ['switch', 'other'], ['checkout', '--no-quiet', 'master']]) {
+      const r = fenced(...a);
+      assert.ok(r.status === 0 || (r.status === 1 && a[0]!.startsWith('diff-')), `${a.join(' ')}: ${r.stderr}`);
+      assert.equal(f.ran(), '', `fence: ${a.join(' ')}`);
+    }
+    fs.appendFileSync(path.join(victim, 'top.txt'), 'more\n');
+    plain(...who, 'stash', '-q');
+    for (const a of [['stash', 'apply'], ['stash', 'pop']]) {
+      const r = fenced(...a);
+      assert.equal(r.status, 0, `${a.join(' ')}: ${r.stderr}`);
+      assert.equal(f.ran(), '', `fence: ${a.join(' ')}`);
+      plain('checkout', '-q', '--', 'top.txt');
+    }
+    // The calls no option stops are refused in a repository with a submodule, and so are add, rm and mv by any spelling.
+    const list = path.join(f.root, 'list.txt');
+    fs.writeFileSync(list, 'sub\n');
+    for (const a of [['commit', '-q', '-m', 'x'], ['commit', '--dry-run'], ['stash'], ['stash', 'push', '-q'], ['stash', 'branch', 'xb'], ['describe', '--dirty', '--always'], ['rebase', '--autostash', 'other'], ['merge', '--autostash', 'other'], ['-c', 'rebase.autoStash=true', 'rebase', 'other'], ['--icase-pathspecs', 'add', 'SUB'], ['--literal-pathspecs', 'add', 'sub'], ['add', '--pathspec-fr', list], ['mv', '-n', 'sub', 'sub2']]) {
+      const r = fenced(...who, ...a);
+      assert.notEqual(r.status, 0, a.join(' '));
+      assert.match(r.stderr, /w6630/, a.join(' '));
+      assert.equal(f.ran(), '', `fence: ${a.join(' ')}`);
+    }
+    plain('checkout', '-q', '--', 'top.txt');
     // E: with the submodule keys gone from the superproject's config, the forced config still stops it.
     git(victim, 'config', '--remove-section', 'submodule.sub');
     spawnSync('git', ['config', '--unset', 'submodule.active'], { cwd: victim });

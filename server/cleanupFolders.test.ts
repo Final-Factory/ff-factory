@@ -288,6 +288,29 @@ test('w6630: localWorkWhy and unpushedWorkWhy name the work a submodule holds', 
   assert.equal(await unpushedWorkWhy(ahead), 'submodule git folder .git/modules/lib/sub: 1 commit on no remote, 1 stash');
   assert.match((await localWorkWhy(ahead))!, /submodule git folder \.git\/modules\/lib\/sub: 1 commit on no remote, 1 stash$/);
 
+  // w6691: a linked worktree keeps the submodules it checked out in its own git folder, which goes with the main clone.
+  const wt = path.join(base, 'clean', 'wt');
+  git(clean, 'worktree', 'add', '-q', '-b', 'wt', wt);
+  g(wt, 'submodule', 'update', '-q', '--init');
+  const ws = path.join(wt, 'lib', 'sub');
+  fs.writeFileSync(path.join(ws, 'w.txt'), 'w\n');
+  git(ws, 'add', '.');
+  git(ws, 'commit', '-q', '-m', 'w');
+  g(wt, 'submodule', 'deinit', '-q', '-f', 'lib/sub');
+  assert.equal(await unpushedWorkWhy(clean), 'submodule git folder .git/worktrees/wt/modules/lib/sub: 1 commit on no remote');
+  assert.match((await localWorkWhy(wt))!, /submodule git folder \.\.\/ff\/\.git\/worktrees\/wt\/modules\/lib\/sub: 1 commit on no remote/);
+
+  // w6691: what could not be read counts as work for localWorkWhy, and as none for unpushedWorkWhy.
+  const deep = superWith('deep');
+  fs.mkdirSync(path.join(deep, '.git', 'modules', 'x', '1', '2', '3', '4', '5', '6', '7', '8', '9'), { recursive: true });
+  git(deep, 'init', '-q', '--bare', path.join(deep, '.git', 'modules', 'unborn'));
+  const deepWhy = (await localWorkWhy(deep))!;
+  assert.match(deepWhy, /submodule git folders could not be read: \.git\/modules\/x\/1\/2\/3\/4\/5\/6\/7\/8 \(more than 8 folders down\)/);
+  assert.match(deepWhy, /submodule git folder \.git\/modules\/unborn: its git state could not be read/);
+  assert.equal(await unpushedWorkWhy(deep), undefined);
+  assert.equal(await localWorkWhy(clean, 15_000, 4), 'its submodules more than 4 levels down were not checked');
+  assert.equal(await unpushedWorkWhy(clean, 15_000, 4), undefined);
+
   // An untracked clone inside: unpushedWorkWhy counts no uncommitted change, so it reads that clone's own work.
   const nested = pushedClone(remotes, path.join(base, 'nested', 'ff'));
   const inner = path.join(nested, 'tools', 'inner');

@@ -166,7 +166,9 @@ const isReadOnly = (key: string) => /^remotes\..+$/.test(key) || key === 'fetch.
  * submodule whatever the config says (measured): an explicit `--recurse-submodules`, `--ignore-submodules=none|untracked` or
  * `--submodule=diff|log`, `git submodule` and `submodule--helper`, a caller's own `-c` of those keys, `git rm` of a
  * submodule (`--cached` too), and `git add -A`, `add .` or `add -u` whose pathspec covers one (`add -A -- . ':!sub'` ran
- * nothing). Those are refused (submoduleRecursion; gitlinkCovered for add and rm). No Final-Factory repository has
+ * nothing). Those are refused (submoduleRecursion; gitlinkCovered for add, rm and mv). A submodule's own `ignore` setting
+ * beats the forced diff.ignoreSubmodules (w6691), so the fence also passes options (IGNORE_SUBMODULES_OPT, QUIET_OPT) and
+ * refuses what no option stops in a repository with a submodule (wholeIndexCall). No Final-Factory repository has
  * submodules; the warn-only step (ff-factory #1538) shipped first, by lothsahn's lockout rule. Forcing it changes what `git
  * status` reports in a repository that has them (a submodule's uncommitted edits stop showing), so the clean-up checks each
  * submodule as its own repository (cleanup.ts submoduleWorkWhy).
@@ -179,7 +181,53 @@ export const SUBMODULE_GIT_CONFIG: [string, string][] = [
   ['status.submoduleSummary', 'false'],
   // `diff` or `log` reads the submodule's own objects and runs its diff programs between the two commits a gitlink moved.
   ['diff.submodule', 'short'],
+  // An autostash is a `stash push` (w6691: `rebase --autostash` and `merge --autostash` ran a submodule's clean filter).
+  ['rebase.autoStash', 'false'],
+  ['merge.autoStash', 'false'],
 ];
+
+/**
+ * A submodule's own `submodule.<name>.ignore` (in .gitmodules, which a branch brings, or the repository's config) beats
+ * diff.ignoreSubmodules (w6691's review of #1544: with `ignore = none` in .gitmodules, `status`, `diff`, `diff-files`,
+ * `diff-index`, `checkout <branch>`, `stash`, `commit` and `describe --dirty` ran the submodule's clean filter through the
+ * forced config, measured on git 2.56.1.windows.1). Only an `--ignore-submodules` option beats it, and only these take one, so
+ * the fence passes `--ignore-submodules=dirty` right after them (a caller's own `all` or `dirty`, later, still wins;
+ * `none` and `untracked` are refused).
+ */
+const IGNORE_SUBMODULES_OPT = new Set(['status', 'diff', 'diff-files', 'diff-index']);
+/**
+ * Calls whose only look into a submodule is the summary of local changes they print, which `--quiet` turns off (measured: a
+ * `checkout <branch>` or `switch` ran the filter, `checkout -q`, `switch -q`, `stash apply -q` and `stash pop -q` none, as did
+ * `checkout --no-quiet <branch> --quiet`). The fence passes `--quiet` last before any `--`, so it beats a caller's `--no-quiet`.
+ */
+const QUIET_OPT = new Set(['checkout', 'switch', 'stash apply', 'stash pop']);
+
+/**
+ * Calls that look into every submodule whatever any option says (measured with `ignore = none`, git 2.56.1.windows.1):
+ * `commit` (with nothing staged, and `--dry-run`), `stash` (push, save, bare, create, and `stash branch`, which takes no
+ * `--quiet`), `describe --dirty` and `--broken`, and an autostash (`rebase`, `merge` or `pull` with `--autostash`, or a
+ * caller's `-c rebase.autoStash` or `merge.autoStash`). The fence lists the whole index and refuses them in a repository
+ * with a submodule (gitlinkCovered).
+ */
+export function wholeIndexCall(args: string[]): boolean {
+  const { sub } = splitGlobal(args);
+  const name = args[sub] ?? '';
+  const rest = args.slice(sub + 1);
+  const opts = rest.slice(0, rest.includes('--') ? rest.indexOf('--') : rest.length).map((a) => a.split('=')[0]!);
+  if (name === 'commit') return true;
+  if (name === 'stash') return !rest[0] || rest[0].startsWith('-') || /^(push|save|create|branch)$/.test(rest[0]);
+  if (name === 'describe') return opts.some((o) => (o.startsWith('--di') && isOpt(o, '--dirty')) || (o.startsWith('--b') && isOpt(o, '--broken')));
+  if (!/^(rebase|merge|pull)$/.test(name)) return false;
+  if (opts.some((o) => o.startsWith('--au') && isOpt(o, '--autostash'))) return true;
+  for (let i = 0; i < sub; i++) {
+    const a = args[i]!;
+    const pair = a === '-c' || a === '--config-env' ? args[i + 1] ?? '' : a.startsWith('--config-env=') ? a.slice(13) : a.startsWith('-c') ? a.slice(2) : '';
+    const eq = pair.indexOf('=');
+    const key = (eq < 0 ? pair : pair.slice(0, eq)).toLowerCase();
+    if (/^(rebase|merge)\.autostash$/.test(key) && (a.startsWith('--config-env') || gitTrue(eq < 0 ? '' : pair.slice(eq + 1)))) return true;
+  }
+  return false;
+}
 
 /** Config keys that make git recurse into submodules, and the values that do (a caller's `-c` beats the forced value). */
 const SUBMODULE_KEYS: [RegExp, RegExp][] = [
@@ -227,20 +275,37 @@ export function submoduleRefusal(args: string[]): string | undefined {
   return `refused by FF Factory (w6630): \`git ${name}\` recurses into submodules (${how}), where git reads each submodule's own config, which the fence does not scan; run git in the submodule itself (\`git -C <submodule> ...\`), where the fence scans its config`;
 }
 
-/** Options of `git add` and `git rm` that take their value as the next argument. */
-const ADD_RM_VALUE_OPTS = new Set(['--chmod', '--pathspec-from-file']);
+/** Calls the fence lists the index entries of their pathspec for (gitlinkListArgs). */
+const PATHSPEC_CALLS = new Set(['add', 'rm', 'mv']);
+
+/** The global options that change how a pathspec matches; the listing takes the same ones as the call. */
+const PATHSPEC_GLOBALS = new Set(['--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs']);
+
+/** Whether git reads a pathspec literally: `--literal-pathspecs` or GIT_LITERAL_PATHSPECS (git's boolean; empty is false). */
+function literalPathspecs(args: string[], env: Env): boolean {
+  const v = env.GIT_LITERAL_PATHSPECS;
+  return args.slice(0, splitGlobal(args).sub).includes('--literal-pathspecs') || (v !== undefined && v.trim() !== '' && gitTrue(v));
+}
+
+/** The listing's environment: the scan's, with literal pathspecs off, so `:/` and `:(literal)` keep their meaning. */
+export const gitlinkListEnv = (env: Env): Env => ({ ...scanEnv(env), GIT_LITERAL_PATHSPECS: '0' });
 
 /**
- * The `git ls-files` arguments that list the index entries an add or rm call's pathspec covers, or undefined for any other
- * call (w6630): both start a child `git status` in each submodule they cover, whatever the config says (measured). With no
- * pathspec, or one read from a file, it lists the whole index (`:/`).
+ * The `git ls-files` arguments that list the index entries a call covers, or undefined for a call that needs no listing
+ * (w6630), run with gitlinkListEnv:
+ * - add, rm and mv start a child `git status` in each submodule their pathspec covers, whatever the config says (measured),
+ *   so the listing takes the same pathspec and pathspec options. With no pathspec, or one read from a file (any prefix of
+ *   `--pathspec-from-file` git takes, w6691: `--pathspec-fr` got past an exact match), it lists the whole index (`:/`). A
+ *   literal call's pathspec is passed as `:(literal)<spec>` (the environment turns literal off for `:/`).
+ * - a wholeIndexCall lists the whole index.
  */
-export function gitlinkListArgs(args: string[]): string[] | undefined {
+export function gitlinkListArgs(args: string[], env: Env = {}): string[] | undefined {
   const { location, sub } = splitGlobal(args);
   const name = args[sub] ?? '';
-  if (name !== 'add' && name !== 'rm') return undefined;
+  const whole = [...location, 'ls-files', '-s', '-z', '--', ':/'];
+  if (wholeIndexCall(args)) return whole;
+  if (!PATHSPEC_CALLS.has(name)) return undefined;
   const specs: string[] = [];
-  let fromFile = false;
   const rest = args.slice(sub + 1);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
@@ -248,14 +313,17 @@ export function gitlinkListArgs(args: string[]): string[] | undefined {
       specs.push(...rest.slice(i + 1));
       break;
     }
-    if (a.startsWith('--pathspec-from')) fromFile = true;
     if (a.startsWith('-')) {
-      if (ADD_RM_VALUE_OPTS.has(a)) i++;
+      const opt = a.split('=')[0]!;
+      if (opt.startsWith('--pa') && isOpt(opt, '--pathspec-from-file')) return whole;
+      if (opt === a && opt.startsWith('--ch') && isOpt(opt, '--chmod')) i++;
       continue;
     }
     specs.push(a);
   }
-  return [...location, 'ls-files', '-s', '-z', '--', ...(fromFile || specs.length === 0 ? [':/'] : specs)];
+  if (!specs.length) return whole;
+  const flags = args.slice(0, sub).filter((a) => PATHSPEC_GLOBALS.has(a));
+  return [...location, ...flags, 'ls-files', '-s', '-z', '--', ...(literalPathspecs(args, env) ? specs.map((s) => `:(literal)${s}`) : specs)];
 }
 
 /** The gitlink listing's output limit: it lists every index entry the pathspec covers (a game checkout's whole index is MBs). */
@@ -277,6 +345,8 @@ export function gitlinkCovered(args: string[], exit: number | null, out: string)
   if (exit !== 0) return `refused by FF Factory (w6630): the fence could not list the submodules \`git ${name}\` covers (${exit === null ? 'no exit' : `exit ${exit}`}); \`git ${name}\` starts a child git in each one, which reads its own config, unscanned`;
   const link = gitlinkIn(out);
   if (!link) return undefined;
+  if (!PATHSPEC_CALLS.has(name))
+    return `refused by FF Factory (w6630): \`git ${name}\` runs in a repository with the submodule ${link} and looks into it whatever the config says (a submodule's own \`ignore\` setting beats the fence's), starting a child git there that reads that submodule's own config, unscanned; run it in the submodule itself (\`git -C ${link} ...\`) or in a clone with no submodules`;
   return `refused by FF Factory (w6630): \`git ${name}\` covers the submodule ${link}, and starts a child git in it whatever the config says, which reads that submodule's own config, unscanned; leave the submodules out of the pathspec (\`':!${link}'\`) or run git in the submodule itself (\`git -C ${link} ...\`)`;
 }
 
@@ -527,11 +597,19 @@ export function splitGlobal(args: string[]): {
   return { location, sub: i };
 }
 
-/** `args` with `--no-ext-diff --no-textconv` after a diff-like subcommand. */
+/**
+ * `args` with `--no-ext-diff --no-textconv` after a diff-like subcommand, `--ignore-submodules=dirty` after one that takes it
+ * (IGNORE_SUBMODULES_OPT), and `--quiet` last before any `--` for one whose summary looks into submodules (QUIET_OPT).
+ */
 export function fenceArgs(args: string[]): string[] {
   const { sub } = splitGlobal(args);
-  if (!DIFF_LIKE.has(args[sub] ?? '')) return args;
-  return [...args.slice(0, sub + 1), '--no-ext-diff', '--no-textconv', ...args.slice(sub + 1)];
+  const name = args[sub] ?? '';
+  const after = [...(DIFF_LIKE.has(name) ? ['--no-ext-diff', '--no-textconv'] : []), ...(IGNORE_SUBMODULES_OPT.has(name) ? ['--ignore-submodules=dirty'] : [])];
+  const out = after.length ? [...args.slice(0, sub + 1), ...after, ...args.slice(sub + 1)] : args;
+  const verb = name === 'stash' ? `stash ${args[sub + 1] ?? ''}` : name;
+  if (!QUIET_OPT.has(verb)) return out;
+  const dash = out.indexOf('--', sub + 1);
+  return dash < 0 ? [...out, '--quiet'] : [...out.slice(0, dash), '--quiet', ...out.slice(dash)];
 }
 
 /**
@@ -649,12 +727,12 @@ export function gitFenceSync(args: string[], opts: { cwd?: string; env?: Env } =
     const cut = scanCut(exit, x.code ?? x.signal ?? '', out);
     if (cut) return fenced(args, env, out, true, cut);
   }
-  const list = gitlinkListArgs(args);
+  const list = gitlinkListArgs(args, env);
   if (!list) return fenced(args, env, out, true);
   let exit: number | null = 0;
   let links = '';
   try {
-    links = execFileSync('git', list, { cwd: opts.cwd, env: scanEnv(env), encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, maxBuffer: LIST_MAX_BUFFER });
+    links = execFileSync('git', list, { cwd: opts.cwd, env: gitlinkListEnv(env), encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, maxBuffer: LIST_MAX_BUFFER });
   } catch (e) {
     const x = e as { stdout?: string; status?: number | null; signal?: string | null; code?: string };
     links = String(x.stdout ?? '');
@@ -683,9 +761,9 @@ export function gitFence(args: string[], opts: { cwd?: string; env?: Env } = {})
       (e, raw) => {
         const out = String(raw ?? '');
         const cut = e ? scanCut(typeof e.code === 'number' && e.code >= 0 && !e.signal ? e.code : null, typeof e.code === 'string' ? e.code : e.signal || (e.killed ? 'timed out' : e.message), out) : undefined;
-        const list = gitlinkListArgs(args);
+        const list = gitlinkListArgs(args, env);
         if (cut || !list) return resolve(fenced(args, env, out, true, cut));
-        execFileOffThread('git', list, { cwd: opts.cwd, env: scanEnv(env), encoding: 'utf8', timeout: 60_000, windowsHide: true, maxBuffer: LIST_MAX_BUFFER }, (le, links) => {
+        execFileOffThread('git', list, { cwd: opts.cwd, env: gitlinkListEnv(env), encoding: 'utf8', timeout: 60_000, windowsHide: true, maxBuffer: LIST_MAX_BUFFER }, (le, links) => {
           const exit = !le ? 0 : typeof le.code === 'number' && le.code >= 0 && !le.signal ? le.code : null;
           resolve(fenced(args, env, out, true, undefined, gitlinkCovered(args, exit, String(links ?? ''))));
         });
@@ -708,10 +786,10 @@ export async function gitOffThread(args: string[], opts: { cwd?: string; env?: E
     // The probe thread answers -1 for anything but an exit (its stderr then holds execFile's message: maxBuffer, ENOENT, ...).
     const why = scan.code >= 0 ? '' : scan.timedOut ? 'timed out' : /ENOENT/.test(scan.stderr) ? 'ENOENT' : scan.stderr.split('\n')[0] || 'no exit';
     const cut = scanCut(scan.code >= 0 ? scan.code : null, why, scan.stdout);
-    const list = cut ? undefined : gitlinkListArgs(args);
+    const list = cut ? undefined : gitlinkListArgs(args, env);
     let linked: string | undefined;
     if (list) {
-      const ls = await runOffThread('git', list, 60_000, { cwd: opts.cwd, env: scanEnv(env), maxBuffer: LIST_MAX_BUFFER });
+      const ls = await runOffThread('git', list, 60_000, { cwd: opts.cwd, env: gitlinkListEnv(env), maxBuffer: LIST_MAX_BUFFER });
       linked = gitlinkCovered(args, ls.code >= 0 ? ls.code : null, ls.stdout);
     }
     f = fenced(args, env, scan.stdout, true, cut, linked);

@@ -476,19 +476,27 @@ const SUBMODULE_DEPTH = 4;
  * submodule is checked as its own repository, through the fence, which then scans that submodule's own config:
  * - each populated gitlink in the index (`ls-files -s`, mode 160000) with `which` (localWorkWhy or unpushedWorkWhy), whose
  *   own submodules are checked in turn;
- * - each git folder under the common git folder's `modules` that no populated gitlink uses (a deinit'ed submodule keeps its
- *   commits and stashes there, with no working tree), for commits on no remote and stashes;
+ * - each git folder under the common git folder's `modules`, this checkout's own git folder's, and (from a main clone) each
+ *   linked worktree's, that no populated gitlink uses (a deinit'ed submodule keeps its commits and stashes there, with no
+ *   working tree), for commits on no remote and stashes;
  * - with `untracked` (unpushedWorkWhy, which counts no uncommitted change), each untracked folder holding a clone, up to
  *   REPOS_IN_DEPTH levels down (localWorkWhy counts such a folder as an uncommitted change already).
  * Found without `git submodule`, which the fence refuses. A part that cannot be read counts as work for localWorkWhy and as
- * none for unpushedWorkWhy (`untracked`), as each counts its own clone; it never hides what the other parts found.
+ * none for unpushedWorkWhy (`untracked`), as each counts its own clone; it never hides what the other parts found. For
+ * localWorkWhy that takes in (w6691) a git folder whose HEAD git cannot count, a folder under `modules` that cannot be listed
+ * or lies more than 8 folders down, and submodules more than SUBMODULE_DEPTH levels down.
  */
 async function submoduleWorkWhy(dir: string, which: (d: string, timeoutMs: number, depth: number) => Promise<string | undefined>, timeoutMs: number, depth: number, untracked: boolean): Promise<string[]> {
-  if (depth >= SUBMODULE_DEPTH) return [];
   const run = (loc: string[], ...a: string[]) =>
     new Promise<string>((resolve, reject) =>
       gitExecFile(['--no-optional-locks', ...loc, ...a], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 256 * 1024 * 1024 }, (e, out) => (e ? reject(e) : resolve(String(out)))),
     );
+  if (depth >= SUBMODULE_DEPTH) {
+    if (untracked) return [];
+    // Not followed further: what a submodule this deep holds is unknown, which counts as work (w6691).
+    const links = await run(['-C', dir], 'ls-files', '-s', '-z').catch(() => '160000 ');
+    return links.split('\0').some((e) => e.startsWith('160000 ')) ? [`its submodules more than ${SUBMODULE_DEPTH} levels down were not checked`] : [];
+  }
   const same = (a: string, b: string) => (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
   const work: string[] = [];
   const part = async (what: string, f: () => Promise<void>) => {
@@ -512,16 +520,22 @@ async function submoduleWorkWhy(dir: string, which: (d: string, timeoutMs: numbe
     }
   });
   let common = '';
+  let gitDir = '';
   await part('its git folder', async () => {
-    common = (await run(['-C', dir], 'rev-parse', '--path-format=absolute', '--git-common-dir')).trim();
+    [gitDir = '', common = ''] = (await run(['-C', dir], 'rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir')).trim().split('\n');
   });
   const gitDirs: string[] = [];
+  const unread: string[] = [];
   const findGitDirs = (d: string, level: number) => {
-    if (level > 8) return;
+    if (level > 8) {
+      unread.push(`${path.relative(dir, d).replace(/\\/g, '/')} (more than 8 folders down)`);
+      return;
+    }
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(d, { withFileTypes: true });
-    } catch {
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') unread.push(`${path.relative(dir, d).replace(/\\/g, '/')} (${(e as NodeJS.ErrnoException).code ?? 'unreadable'})`);
       return;
     }
     for (const x of entries) {
@@ -536,12 +550,31 @@ async function submoduleWorkWhy(dir: string, which: (d: string, timeoutMs: numbe
       } else findGitDirs(p, level + 1);
     }
   };
-  if (common) findGitDirs(path.join(common, 'modules'), 0);
+  // A linked worktree keeps the submodules it checked out in its own git folder (`<common>/worktrees/<name>/modules`), which
+  // goes with the main clone (w6691: a deinit'ed submodule's commits there were missed).
+  const roots = new Set<string>();
+  if (common) roots.add(path.join(common, 'modules'));
+  if (gitDir) roots.add(path.join(gitDir, 'modules'));
+  if (common && gitDir && same(common, gitDir)) {
+    let wts: string[] = [];
+    try {
+      wts = fs.readdirSync(path.join(common, 'worktrees'));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') unread.push(`its worktrees' git folders (${(e as NodeJS.ErrnoException).code ?? 'unreadable'})`);
+    }
+    for (const w of wts) roots.add(path.join(common, 'worktrees', w, 'modules'));
+  }
+  for (const r of roots) findGitDirs(r, 0);
+  if (unread.length && !untracked) work.push(`submodule git folders could not be read: ${unread.join(', ')}`);
   for (const gd of gitDirs) {
     const name = `submodule git folder ${path.relative(dir, gd).replace(/\\/g, '/')}`;
     await part(name, async () => {
       const n: string[] = [];
-      const ahead = Number((await run(['--git-dir', gd], 'rev-list', '--count', 'HEAD', '--not', '--remotes').catch(() => '0')).trim());
+      const ahead = Number((await run(['--git-dir', gd], 'rev-list', '--count', 'HEAD', '--not', '--remotes').catch((e) => {
+        // A git folder whose HEAD has no commit yet fails here; unpushedWorkWhy counts that as none, localWorkWhy as unknown.
+        if (untracked) return '0';
+        throw e;
+      })).trim());
       if (ahead > 0) n.push(`${ahead} ${ahead === 1 ? 'commit' : 'commits'} on no remote`);
       // `stash list` would look for the submodule's working tree (core.worktree), which a deinit'ed one lacks; log does not.
       const stash = (await run(['--git-dir', gd], 'for-each-ref', '--format=%(refname)', 'refs/stash')).trim();
