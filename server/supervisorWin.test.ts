@@ -6,6 +6,7 @@ import { execFile, spawn } from 'node:child_process';
 import * as win from './machineDeployWin.ts';
 import { SUPERVISOR_HAS_DAEMON, winControlAnswer } from './machineDeploy.ts';
 import { DAEMON_ENDING_MARKER } from '../machine/freezeWatch.ts';
+import { DAEMON_ALIVE, SELF_REBOOT_STATE } from '../machine/selfReboot.ts';
 import { powershell } from './testPowershell.ts';
 import { tmpDir } from './testTmp.ts';
 
@@ -27,7 +28,11 @@ fs.appendFileSync(path.join(dir, 'pids.txt'), process.pid + ' ' + what + '\\n');
 console.log('run ' + n + ': ' + what);
 if (what === 'yield') process.exit(75);
 if (what === 'stuck') fs.writeFileSync(path.join(dir, 'logs', '${DAEMON_ENDING_MARKER}'), JSON.stringify({ pid: process.pid, at: new Date().toISOString(), why: 'test: stuck' }));
-setInterval(() => {}, 1000);
+// w6792: \`linked\` says it works as a real daemon does (machine/selfReboot.ts writeAlive); stop.txt ends any run with 75.
+if (what === 'linked') setInterval(() => fs.writeFileSync(path.join(dir, 'logs', '${DAEMON_ALIVE}'), JSON.stringify({ pid: process.pid, at: new Date().toISOString(), linked: true })), 100);
+setInterval(() => {
+  if (fs.existsSync(path.join(dir, 'stop.txt'))) process.exit(75);
+}, 100);
 `;
 
 interface Rig {
@@ -38,7 +43,12 @@ interface Rig {
   end: () => void;
 }
 
-function rig(t: { after: (fn: () => void) => void }, plan: string, opts: { delay?: number } = {}): Rig {
+// w6792: the self-reboot's readers made files the test writes: elig.ps1 answers the eligibility check (not eligible unless a
+// test writes another), idle.txt the console's idle seconds, console.txt why the console is not this session's (empty: it is).
+const NOT_ELIGIBLE_PS = "param($taskName) [pscustomobject]@{ eligible = $false; why = 'test: not eligible'; task = $null }";
+const ELIGIBLE_PS = "param($taskName) [pscustomobject]@{ eligible = $true; why = 'test: eligible'; task = $true }";
+
+function rig(t: { after: (fn: () => void) => void }, plan: string, opts: { delay?: number; rebootAfterS?: number } = {}): Rig {
   // The fake daemons end before the folder goes (after hooks run in the order they were added): Windows keeps a live
   // process's files, and the removal failed with EPERM on CI.
   let dir = '';
@@ -48,7 +58,20 @@ function rig(t: { after: (fn: () => void) => void }, plan: string, opts: { delay
   fs.writeFileSync(path.join(dir, 'app', 'machine', 'daemon.ts'), FAKE_DAEMON);
   fs.writeFileSync(path.join(dir, 'daemon.json'), '{}');
   fs.writeFileSync(path.join(dir, 'plan.txt'), plan);
+  fs.writeFileSync(path.join(dir, 'elig.ps1'), NOT_ELIGIBLE_PS);
+  fs.writeFileSync(path.join(dir, 'idle.txt'), '99999');
   let s = win.supervisorScript(process.execPath, false);
+  const swap = (from: string, to: string) => {
+    assert.ok(s.includes(from), `the supervisor has ${from}`);
+    s = s.replace(from, to);
+  };
+  swap(`$rebootAfterS = ${win.SUPERVISOR_REBOOT_AFTER_S}
+`, `$rebootAfterS = ${opts.rebootAfterS ?? win.SUPERVISOR_REBOOT_AFTER_S}
+`);
+  swap('.AddScript($eligCheck)', ".AddScript((Get-Content -LiteralPath (Join-Path $F 'elig.ps1') -Raw))");
+  s = s.replace(/^function Idle-S \{.*$/m, "function Idle-S { [double](Get-Content -LiteralPath (Join-Path $F 'idle.txt') -Raw) }");
+  s = s.replace(/^function Console-Why \{.*$/m, "function Console-Why { $c = Get-Content -LiteralPath (Join-Path $F 'console.txt') -Raw -ErrorAction SilentlyContinue; if ($c) { $c.Trim() } }");
+  assert.ok(s.includes("Join-Path $F 'idle.txt'") && s.includes("Join-Path $F 'console.txt'"), 'the console readers are stubbed');
   // Test speed: 1 s to call a marked daemon stuck, 200 ms steps, 1 s for a kill to take, no back-off.
   s = s.replace(`$stuckAfter = ${win.SUPERVISOR_STUCK_AFTER_S}\n`, '$stuckAfter = 1\n').replace('$waitStepMs = 5000\n', '$waitStepMs = 200\n').replace('$p.WaitForExit(15000)', '$p.WaitForExit(1000)').replace(/\$delay = 10\b/g, `$delay = ${opts.delay ?? 0}`).replace('$leftWaitS = 10\n', '$leftWaitS = 0\n');
   if (process.platform !== 'win32') s = s.replace(/-WindowStyle Hidden /g, '').replace("'machine\\daemon.ts'", "'machine/daemon.ts'");
@@ -239,4 +262,179 @@ test('windows (real PowerShell): an asked restart starts at once but keeps the b
   assert.match(log, /starting it again in 0 s/, 'the asked restart starts at once');
   const waits = [...log.matchAll(/starting it again in (\d+) s/g)].map((m) => +m[1]);
   assert.ok(waits.at(-1)! >= 2, `the exit after an asked restart waits its back-off, not 0: ${waits.join(', ')}\n${log}`);
+});
+
+// w6792: the self-reboot, warn only (lothsahn's lockout rule: stage 1 logs "would reboot now, reason X" and tells the portal).
+// Each test runs the whole supervisor with a 3 s stuck window for the 900 s one: a daemon stuck mid-exit is left behind (w6784)
+// and a fresh `live` one never says it works, so the episode goes on; stop.txt then ends the run.
+const REBOOT_AFTER_S = 3;
+const rebootState = (dir: string) => JSON.parse(fs.readFileSync(path.join(dir, 'logs', SELF_REBOOT_STATE), 'utf8').replace(/^\uFEFF/, ''));
+const stopRun = async (r: Rig, done: Promise<{ code: number | null }>) => {
+  fs.writeFileSync(path.join(r.dir, 'stop.txt'), '');
+  const { code } = await done;
+  assert.equal(code, 0, r.log());
+};
+
+test('windows (real PowerShell): a stuck episode with no working daemon 15 minutes on says "would reboot now", once, and reboots nothing (w6792)', { skip }, async (t) => {
+  const r = rig(t, 'stuck,live', { rebootAfterS: REBOOT_AFTER_S });
+  fs.writeFileSync(path.join(r.dir, 'elig.ps1'), ELIGIBLE_PS);
+  const done = r.run({ noKill: true });
+  await until('would reboot', () => r.log().includes('would reboot now'));
+  await new Promise((res) => setTimeout(res, 1500));
+  await stopRun(r, done);
+  const log = r.log();
+  const [stuck] = r.pids();
+  assert.match(log, /self-reboot: eligible: test: eligible; mode warn only \(w6792\)/);
+  assert.match(log, new RegExp(`self-reboot: a stuck episode began at \\S+ \\(pid ${stuck.pid} said it ends \\(test: stuck\\) and did not exit\\)`));
+  assert.match(log, new RegExp(`self-reboot: would reboot now \\(warn only\\), reason: the daemon was stuck \\d+ min \\(pid ${stuck.pid} said it ends \\(test: stuck\\) and did not exit\\) and this supervisor's own recovery brought back no working daemon \\(w6792\\)`));
+  assert.equal(log.match(/would reboot now/g)?.length, 1, 'once per episode');
+  assert.ok(log.indexOf('stuck episode began') < log.indexOf('would reboot now'));
+  // The timing: not before the window, counted from when the daemon said it ends (its marker), and not long after.
+  const st = rebootState(r.dir);
+  assert.equal(st.mode, 'warn');
+  assert.equal(st.eligible, true);
+  assert.equal(st.last.mode, 'warn');
+  const waited = (Date.parse(st.last.at) - Date.parse(st.last.stuckSince)) / 1000;
+  assert.ok(waited >= REBOOT_AFTER_S && waited < REBOOT_AFTER_S + 10, `answered ${waited} s after the stuck state began`);
+  assert.equal(st.stuckSince, st.last.stuckSince, 'the episode is still going on');
+});
+
+test('windows (real PowerShell): a fresh daemon that says it works ends the stuck episode: no reboot (w6792)', { skip }, async (t) => {
+  const r = rig(t, 'stuck,linked', { rebootAfterS: REBOOT_AFTER_S });
+  fs.writeFileSync(path.join(r.dir, 'elig.ps1'), ELIGIBLE_PS);
+  const done = r.run({ noKill: true });
+  await until('the episode over', () => r.log().includes('the episode is over'));
+  await new Promise((res) => setTimeout(res, (REBOOT_AFTER_S + 1.5) * 1000));
+  await stopRun(r, done);
+  const [, fresh] = r.pids();
+  assert.match(r.log(), new RegExp(`self-reboot: the daemon, pid ${fresh.pid}, works \\(linked to the portal\\) \\d+ min after the stuck state began: the episode is over, no reboot \\(w6792\\)`));
+  assert.doesNotMatch(r.log(), /would reboot now/);
+  const st = rebootState(r.dir);
+  assert.equal(st.stuckSince, undefined);
+  assert.equal(st.last, undefined);
+});
+
+test('windows (real PowerShell): a machine that would not come back by itself only logs why (w6792)', { skip }, async (t) => {
+  const r = rig(t, 'stuck,live', { rebootAfterS: REBOOT_AFTER_S });
+  const done = r.run({ noKill: true });
+  await until('not eligible', () => r.log().includes('no reboot: this machine would not come back by itself: test: not eligible'));
+  await stopRun(r, done);
+  assert.match(r.log(), /self-reboot: not eligible: test: not eligible; mode warn only \(w6792\)/);
+  assert.doesNotMatch(r.log(), /would reboot now/);
+  const st = rebootState(r.dir);
+  assert.equal(st.eligible, false);
+  assert.equal(st.skip.why, 'this machine would not come back by itself: test: not eligible');
+});
+
+test('windows (real PowerShell): another session at the console, or keyboard or mouse input in the last 30 minutes, holds it until it ends (w6792)', { skip }, async (t) => {
+  const r = rig(t, 'stuck,live', { rebootAfterS: REBOOT_AFTER_S });
+  fs.writeFileSync(path.join(r.dir, 'elig.ps1'), ELIGIBLE_PS);
+  fs.writeFileSync(path.join(r.dir, 'idle.txt'), '120');
+  fs.writeFileSync(path.join(r.dir, 'console.txt'), 'test: the console is session 2');
+  const done = r.run({ noKill: true });
+  await until('console held', () => r.log().includes('no reboot: test: the console is session 2'));
+  fs.rmSync(path.join(r.dir, 'console.txt'));
+  await until('input held', () => r.log().includes('no reboot: the console had keyboard or mouse input 2 min ago; it waits for 30 min with none'));
+  assert.match(rebootState(r.dir).skip.why, /keyboard or mouse input 2 min ago/);
+  assert.doesNotMatch(r.log(), /would reboot now/);
+  fs.writeFileSync(path.join(r.dir, 'idle.txt'), String(win.SUPERVISOR_REBOOT_IDLE_S + 1));
+  await until('would reboot', () => r.log().includes('would reboot now'));
+  await stopRun(r, done);
+  assert.equal(r.log().match(/keyboard or mouse input/g)?.length, 1, 'a held reboot is logged once per reason');
+  assert.equal(rebootState(r.dir).skip, undefined);
+});
+
+test('windows (real PowerShell): at most one automatic reboot in 6 hours, and supervisor-no-reboot turns it off (w6792)', { skip }, async (t) => {
+  const r = rig(t, 'stuck,live,stuck,live', { rebootAfterS: REBOOT_AFTER_S });
+  fs.writeFileSync(path.join(r.dir, 'elig.ps1'), ELIGIBLE_PS);
+  fs.mkdirSync(path.join(r.dir, 'logs'), { recursive: true });
+  const seed = (agoH: number) => {
+    const at = new Date(Date.now() - agoH * 3600_000).toISOString();
+    const last = { at, mode: 'live', why: 'test: an earlier one', stuckSince: new Date(Date.parse(at) - 900_000).toISOString() };
+    fs.writeFileSync(path.join(r.dir, 'logs', SELF_REBOOT_STATE), JSON.stringify({ mode: 'warn', why: 'x', last, lastLiveAt: at }));
+    return at;
+  };
+  const lastLiveAt = seed(1);
+  fs.writeFileSync(path.join(r.dir, win.SUPERVISOR_NO_REBOOT), '');
+  const done = r.run({ noKill: true });
+  await until('off', () => r.log().includes(`no reboot: ${path.join(r.dir, win.SUPERVISOR_NO_REBOOT)} turns it off`));
+  fs.rmSync(path.join(r.dir, win.SUPERVISOR_NO_REBOOT));
+  await until('rate', () => /no reboot: it rebooted itself at \S+, under 6 h ago/.test(r.log()));
+  assert.doesNotMatch(r.log(), /would reboot now/);
+  // The last reboot outlives the supervisor: it is the next daemon's to report.
+  const st = rebootState(r.dir);
+  assert.equal(Date.parse(st.lastLiveAt), Date.parse(lastLiveAt));
+  assert.equal(st.last.why, 'test: an earlier one');
+  await stopRun(r, done);
+  // A supervisor that starts with the last one seven hours back answers.
+  fs.rmSync(path.join(r.dir, 'stop.txt'));
+  seed(7);
+  const again = r.run({ noKill: true });
+  await until('would reboot', () => r.log().includes('would reboot now'));
+  await stopRun(r, again);
+});
+
+test('windows: the warn-only stage has no way to reboot, and its switch is off (w6792)', () => {
+  assert.equal(win.SUPERVISOR_REBOOT_LIVE, false);
+  const s = win.supervisorScript('C:\\node\\node.exe', false);
+  assert.match(s, /^\$rebootLive = \$false$/m);
+  assert.doesNotMatch(s, /shutdown|Restart-Computer|NtShutdownSystem|InitiateSystemShutdown|ExitWindowsEx/i);
+  // The eligibility check reads the Winlogon key's values by name, never the stored password's.
+  const e = win.selfRebootEligibilityScript();
+  assert.doesNotMatch(e, /GetValue\('DefaultPassword'\)|Get-ItemProperty/);
+  assert.match(e, /\$w\.names -contains 'DefaultPassword'/);
+});
+
+// w6792: the eligibility check, its readers replaced after ELIG_READERS_END with fakes (a later function replaces an earlier one).
+// The base answers as BEAST did on 2026-11-28: automatic logon on for this user, no DefaultPassword value (the password in the
+// LSA), the last boot logged on by itself 11 s after it started and 2.3 s after the console connected, and the logon task there.
+const ELIG_BASE = `function Read-Winlogon { @{ names = @('AutoAdminLogon', 'DefaultUserName', 'AutoLogonSID'); auto = '1'; user = 'rydin'; domain = 'BEAST'; autoSid = 'S-1-5-21-1' } }
+function Read-Who { @{ name = 'BEAST\\rydin'; sid = 'S-1-5-21-1'; groups = @('S-1-1-0', 'S-1-11-96-9'); user = 'rydin'; domain = 'BEAST'; computer = 'BEAST' } }
+function Read-Sid($domain, $user) { if ($user -eq 'me@example.com') { 'S-1-11-96-9' } else { 'S-1-5-21-2' } }
+function Read-Logon { @(11, 2.3) }
+function Read-Task { $true }
+`;
+const winlogon = (fields: string) => `function Read-Winlogon { $w = @{ names = @('AutoAdminLogon', 'DefaultUserName'); auto = '1'; user = 'rydin'; domain = 'BEAST'; autoSid = '' }; ${fields}; $w }`;
+
+test('windows (real PowerShell): a machine is eligible only when it would come back by itself, read without the password (w6792)', { skip }, async (t) => {
+  const cases: { name: string; fakes?: string; prev?: boolean; eligible: boolean; why: RegExp; task?: boolean | null }[] = [
+    { name: 'BEAST', eligible: true, task: true, why: /^automatic logon to this daemon's user \(BEAST\\rydin\), its password stored \(the last boot logged this user on by itself 11 s after it started, 2\.3 s after the console connected, and AutoAdminLogon stayed 1\), and the FFFactoryDaemon logon task$/ },
+    { name: 'off', fakes: winlogon("$w.auto = '0'"), eligible: false, why: /^automatic logon is off \(Winlogon AutoAdminLogon is '0', not 1\)$/ },
+    { name: 'unset', fakes: winlogon("$w.auto = ''"), eligible: false, why: /AutoAdminLogon is '', not 1/ },
+    { name: 'another SID', fakes: winlogon("$w.autoSid = 'S-1-5-21-7'"), eligible: false, why: /^automatic logon is for another account \(Winlogon AutoLogonSID is not this daemon's user, BEAST\\rydin\)$/ },
+    { name: 'another name', fakes: winlogon("$w.user = 'guest'"), eligible: false, why: /^automatic logon names another account than this daemon's user \(BEAST\\rydin\)$/ },
+    { name: 'another domain', fakes: winlogon("$w.domain = 'CORP'"), eligible: false, why: /names another account/ },
+    // A Microsoft account: its address, matched by the group SID this user's token carries; a DefaultPassword value by its name.
+    { name: 'Microsoft account', fakes: `${winlogon("$w.user = 'me@example.com'; $w.domain = 'MicrosoftAccount'; $w.names += 'DefaultPassword'")}\nfunction Read-Logon { throw 'never asked' }`, eligible: true, task: true, why: /^automatic logon to this daemon's user \(BEAST\\rydin\), its password stored \(a DefaultPassword value, not read\), and the FFFactoryDaemon logon task$/ },
+    { name: 'a slow logon', fakes: 'function Read-Logon { @(300, 40) }', eligible: false, why: /^no stored password for automatic logon can be seen: no DefaultPassword value, and this user's logon came 300 s after the last boot and 40 s after the console connected \(by itself: within 120 s and 5 s\); one in the LSA only an administrator can check$/ },
+    { name: 'a quick logon typed late', fakes: 'function Read-Logon { @(60, 30) }', eligible: false, why: /no stored password/ },
+    { name: 'no logon times', fakes: 'function Read-Logon { $null }', eligible: false, why: /this session's logon times could not be read/ },
+    { name: 'no task', fakes: "function Read-Task { 'ERROR: The system cannot find the file specified.' }", eligible: false, task: false, why: /^schtasks finds no FFFactoryDaemon logon task \(ERROR: The system cannot find the file specified\.\), so the daemon would not start after a reboot$/ },
+    // The Task Scheduler hung (BEAST, w6784): the last answer stands; with none yet it says so.
+    { name: 'hung, seen before', fakes: 'function Read-Task { $null }', prev: true, eligible: true, task: true, why: /and the FFFactoryDaemon logon task$/ },
+    { name: 'hung, never seen', fakes: 'function Read-Task { $null }', eligible: false, task: null, why: /^the Task Scheduler did not say in 15 s whether the FFFactoryDaemon logon task is there$/ },
+  ];
+  const dir = tmpDir('ffelig-', t as never);
+  const script = win.selfRebootEligibilityScript();
+  assert.ok(script.includes(win.ELIG_READERS_END));
+  cases.forEach((c, i) => fs.writeFileSync(path.join(dir, `case${i}.ps1`), script.replace(win.ELIG_READERS_END, `${ELIG_BASE}${c.fakes ?? ''}\n`)));
+  fs.writeFileSync(
+    path.join(dir, 'drive.ps1'),
+    `$prev = @(${cases.map((c) => (c.prev ? '$true' : '$null')).join(', ')})
+for ($i = 0; $i -lt ${cases.length}; $i++) {
+  $r = & (Join-Path $PSScriptRoot "case$i.ps1") 'FFFactoryDaemon' '' $prev[$i] ${win.SUPERVISOR_AUTOLOGON_BOOT_S} ${win.SUPERVISOR_AUTOLOGON_CONNECT_S}
+  [pscustomobject]@{ eligible = $r.eligible; why = $r.why; task = $r.task } | ConvertTo-Json -Compress
+}
+`,
+  );
+  const out = await new Promise<string>((res, rej) =>
+    execFile(powershell!, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(dir, 'drive.ps1')], { timeout: 60_000 }, (e, so, se) => (e ? rej(new Error(`${e.message}\n${se}`)) : res(so))),
+  );
+  const answers = out.trim().split(/\r?\n/).map((l) => JSON.parse(l));
+  assert.equal(answers.length, cases.length, out);
+  cases.forEach((c, i) => {
+    assert.equal(answers[i].eligible, c.eligible, `${c.name}: ${answers[i].why}`);
+    assert.match(answers[i].why, c.why, c.name);
+    if (c.task !== undefined) assert.equal(answers[i].task, c.task, c.name);
+  });
 });

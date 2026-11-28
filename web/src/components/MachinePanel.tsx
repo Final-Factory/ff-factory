@@ -13,6 +13,7 @@ import { DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './Pan
 import { Chip, Confirm, CopyButton, Icon, Modal, StateText } from './ui';
 import { currentProduct } from '../brand';
 import { PAUSED_STATE } from '../../../shared/availability.ts';
+import { selfRebootChip, selfRebootEligibility } from '../../../shared/selfReboot.ts';
 
 const midTurn = (status: string) => status === 'running' || status === 'starting' || status === 'waiting_permission';
 
@@ -162,6 +163,22 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
               {m.statusDetail && m.status === 'ready' ? ` · ${m.statusDetail}` : ''}
             </span>
           </div>
+          {/* w6792: whether it reboots itself when its daemon stays stuck, and when it last did (or, warn only, would have). */}
+          {m.selfReboot && (
+            <div className="unity-bar" data-testid="machine-self-reboot" title={selfRebootEligibility(m.selfReboot)}>
+              <Chip tone={selfRebootChip(m.selfReboot).tone}>Self-reboot {selfRebootChip(m.selfReboot).label}</Chip>
+              <span className="dim small ellipsis">
+                {[
+                  m.selfReboot.stuckSince && `daemon stuck since ${fmtRelative(m.selfReboot.stuckSince, now)}`,
+                  m.selfReboot.skip && `held: ${m.selfReboot.skip.why}`,
+                  m.selfReboot.last && `${m.selfReboot.last.mode === 'live' ? 'rebooted itself' : 'would have rebooted itself (warn only)'} ${fmtRelative(m.selfReboot.last.at, now)}: ${m.selfReboot.last.why}`,
+                  m.selfReboot.why,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </span>
+            </div>
+          )}
           {bench && (
             <div className="unity-bar" data-testid="machine-bench" data-mode={bench.mode} title={bench.hint}>
               <Chip tone={bench.tone}>Bench lock {bench.label}</Chip>

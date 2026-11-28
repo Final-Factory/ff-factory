@@ -33,6 +33,7 @@ import { safeImage } from './images.ts';
 import { hostStartFailed, offlineDetail } from '../shared/agentState.ts';
 import { ghLoginLabel, sanitizeGhLogin } from '../shared/ghLogin.ts';
 import { sanitizeSteamClient, steamLabel } from '../shared/steam.ts';
+import { sanitizeSelfReboot, selfRebootEligibility, selfRebootEventLine } from '../shared/selfReboot.ts';
 import { desktopLabel, sanitizeDesktop } from '../shared/desktop.ts';
 import { HOST_LOGIN, accountKeyOf, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
@@ -3047,6 +3048,17 @@ export class MachineManager {
         this.update(id, desktop ? { steam, desktop } : { steam });
         if (steamLabel(steam) !== was) console.log(`machine ${id}: steam client ${steamLabel(steam)}`);
         if (desktop && desktopLabel(desktop) !== wasDesk) console.log(`machine ${id}: screen ${desktopLabel(desktop)}`);
+        return;
+      }
+      case 'self_reboot': {
+        // w6792: the supervisor's self-reboot state, as short strings (sanitizeSelfReboot); the machine's panel shows it.
+        const selfReboot = sanitizeSelfReboot(msg.selfReboot);
+        if (!selfReboot) return;
+        const was = m.selfReboot;
+        this.update(id, { selfReboot });
+        if (!was || selfRebootEligibility(was) !== selfRebootEligibility(selfReboot)) console.log(`machine ${id}: ${selfRebootEligibility(selfReboot)}`);
+        if (selfReboot.last && selfReboot.last.at !== was?.last?.at) console.log(`machine ${id}: ${selfRebootEventLine(selfReboot.last)}`);
+        if (selfReboot.skip && selfReboot.skip.why !== was?.skip?.why) console.log(`machine ${id}: self-reboot held: ${selfReboot.skip.why}`);
         return;
       }
       case 'self_update_ack':

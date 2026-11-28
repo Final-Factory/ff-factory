@@ -57,7 +57,10 @@ version: it copies the current helper script and registers new actions (it is id
 starts at logon (the `ffsb-server` task). After a reboot without automatic logon nothing comes back
 until someone logs in, so the helper refuses. To allow reboots as a last resort, set up automatic
 logon with Sysinternals Autologon, which stores the password as an LSA secret, not in plain text.
-Prefer to leave it off and fix what makes reboots necessary.
+Prefer to leave it off and fix what makes reboots necessary. The daemon's supervisor reads the same setup (w6792) to tell a
+machine that comes back by itself after a reboot: on such a machine a daemon still stuck 15 minutes after the stuck state
+began, with no working daemon brought back, is logged as `would reboot now (warn only)` and shown on the machine's panel
+([machines.md](machines.md), "A machine that reboots itself"); the reboot itself waits for its own reviewed change.
 
 ## 2. The host guard (`server/hostHealth.ts`)
 

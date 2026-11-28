@@ -5,6 +5,7 @@ import type { TurnUsage } from './spend.ts';
 import type { GithubPermissionId } from './githubRequirements.ts';
 import type { GhLogin } from './ghLogin.ts';
 import type { SteamClient } from './steam.ts';
+import type { SelfRebootInfo } from './selfReboot.ts';
 import type { DesktopSession } from './desktop.ts';
 import type { MachineBaseline } from './machineBaseline.ts';
 import type { Answered } from './replies.ts';
@@ -1372,6 +1373,8 @@ export interface Machine {
   gh?: GhLogin;
   /** Its Steam client as its daemon last read it (w2459, shared/steam.ts): installed, running, the signed-in account id and name. */
   steam?: SteamClient;
+  /** Whether it reboots itself when its daemon stays stuck, and when it last did or (warn only) would have (w6792, shared/selfReboot.ts). */
+  selfReboot?: SelfRebootInfo;
   /** Its desktop session as its daemon last read it (w2459, shared/desktop.ts): a locked screen takes no menu clicks. */
   desktop?: DesktopSession;
   git?: GitStatus;
