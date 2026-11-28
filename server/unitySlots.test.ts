@@ -349,6 +349,9 @@ test('unity slots: a crashed holder (process gone) or a silent one (no heartbeat
   })();
   const old = new Date(Date.now() - 120_000);
   fs.utimesSync(reqFile(dir, silent.id!), old, old);
+  // The first may join a look under way that read the mailbox before the aging (w6695: its writes are awaited); the
+  // second is a look begun after it.
+  await slots.tick();
   await slots.tick();
   assert.equal(fs.existsSync(reqFile(dir, silent.id!)), false);
   assert.match(events.at(-1)!, /freed 1 Unity slot\(s\) of "stuck build" .*no heartbeat for \d+ s/);
@@ -382,6 +385,9 @@ test('unity slots: a waiter whose request the arbiter dropped (silent while susp
   one.stop();
   await waiting;
   assert.equal(box.second?.id, id);
+  // The look that granted it may still be finishing (w6695: its writes are awaited, so the client can see its grant file
+  // before the look records it): tick() joins a look under way.
+  await slots.tick();
   assert.deepEqual(slots.report()!.granted.map((g) => g.label), ['warm slot1']);
   box.second!.stop();
 });
@@ -530,7 +536,11 @@ test('unity slots: system_status, the Capacity block and the dashboard say "edit
 });
 
 test('unity slots: a second arbiter answering the same mailbox is reported once (a hung test daemon granted BEAST\'s slots, w469)', async (t) => {
-  const { dir, slots, events } = arbiter(t);
+  // Both looked by hand, one at a time, as two daemons' looks on a real machine (the helper's 10 ms timer would run looks
+  // of the first in this process between them; w6695: its arbiter.json write is awaited).
+  const dir = tmpDir('ff-slots-', t);
+  const events: string[] = [];
+  const slots = new UnitySlots({ dir, platform: 'win32', procs: async () => [], alive: () => true, now: () => Date.now(), limit: () => 1, places: () => [], ramPct: () => undefined, onEvent: (e) => void events.push(e) });
   await slots.tick();
   const rogue = new UnitySlots({ dir, platform: 'win32', procs: async () => [], alive: () => true, now: () => Date.now(), limit: () => undefined, places: () => [], ramPct: () => undefined, machine: 'mx' });
   await rogue.tick();
