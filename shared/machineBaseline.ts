@@ -18,9 +18,7 @@ export interface MachineBaseline {
 
 /**
  * The daemon.json keys that turn features, fences and hardening on or off: the ones every machine of an OS should agree
- * on. Left out on purpose: identity and folders (portalUrl, id, token, tokenFile, root, repoPath, appDir, tempDir,
- * unityEditorRoot, unityPath, configFile, previousPortalUrl, relocatedAt, extraRoots, env, claude, unityMcpServer) and
- * sizing (maxSessions, sandboxes, sandboxIdleStopMinutes, cleanup).
+ * on. Every other DaemonConfig key is in NON_FEATURE_KEYS (a test keeps the two lists covering it exactly).
  */
 export const FEATURE_KEYS = [
   'workerFence',
@@ -53,10 +51,27 @@ export const FEATURE_KEYS = [
   'editorGitPackages',
   'longRuns',
   'sandboxCacheTrim',
-  'sessionSweep',
+  'freezeWatch',
   'unityMcpScopedHome',
   'pinnedPortalHosts',
 ] as const;
+
+/**
+ * The DaemonConfig keys left out of the baseline, on purpose. Identity and folders: env, extraRoots, portalUrl, id, token,
+ * tokenFile, root, repoPath, claude, appDir, unityEditorRoot, unityPath, tempDir, maxEventsFile, unityMcpServer,
+ * previousPortalUrl, relocatedAt, configFile, unitySlotsDir, slotQueueDir. Sizing and timing: maxSessions, sandboxes,
+ * sandboxIdleStopMinutes, sessionSweep, cleanup. One machine's own: hostGuard (the portal host's guard), voice (a GPU
+ * machine's), updateOrigin (tests only).
+ */
+export const NON_FEATURE_KEYS = [
+  'env', 'extraRoots', 'portalUrl', 'id', 'token', 'tokenFile', 'root', 'repoPath', 'claude', 'appDir', 'unityEditorRoot',
+  'unityPath', 'tempDir', 'maxEventsFile', 'unityMcpServer', 'previousPortalUrl', 'relocatedAt', 'configFile',
+  'unitySlotsDir', 'slotQueueDir', 'maxSessions', 'sandboxes', 'sandboxIdleStopMinutes', 'sessionSweep', 'cleanup',
+  'hostGuard', 'voice', 'updateOrigin',
+] as const;
+
+/** Feature keys whose value is sizing (sandboxCacheTrim's kept builds and GB): compared only as on, off or unset. */
+const ON_OFF_KEYS: ReadonlySet<string> = new Set(['sandboxCacheTrim']);
 
 /** The tools a daemon reports, in the order list_machines shows them. */
 export const BASELINE_TOOLS = ['daemonNode', 'agentNode', 'claude', 'git', 'bash', 'gh', 'python', 'uv'] as const;
@@ -82,7 +97,7 @@ function sortKeys(v: unknown): unknown {
 
 /** The daemon's feature flags from its config, normalised (FEATURE_KEYS). */
 export function featureFlags(cfg: Record<string, unknown>, o: { root?: string; home?: string } = {}): Record<string, string> {
-  return Object.fromEntries(FEATURE_KEYS.map((k) => [k, flagValue(cfg[k], o)]));
+  return Object.fromEntries(FEATURE_KEYS.map((k) => [k, ON_OFF_KEYS.has(k) && cfg[k] !== undefined ? (cfg[k] === false ? 'off' : 'on') : flagValue(cfg[k], o)]));
 }
 
 /** The version in a tool's first output line ("git version 2.56.1.windows.1" -> "2.56.1.windows.1"), else the line. */

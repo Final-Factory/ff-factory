@@ -644,9 +644,12 @@ thresholds) and its folders may differ. Each daemon reports, in its hello (probe
   the Agent SDK's own binary the sessions start), git and bash (`tools/git` on Windows where installed), gh, python
   (`FF_PYTHON`, else `python`/`python3`) and uv; `missing` or `failed (exit N)` when a tool does not answer.
 - `flags`: its daemon.json feature keys (`FEATURE_KEYS` in shared/machineBaseline.ts: the fences, locks, guards and
-  similar), each as JSON with paths under its root written `<root>`; `unset` when absent.
+  similar; sandboxCacheTrim only as `on`/`off`, its numbers being sizing), each as JSON with paths under its root written
+  `<root>`; `unset` when absent. Every other DaemonConfig key is listed in `NON_FEATURE_KEYS`, and a test fails on a new key
+  in neither list. The report is taken at each hello (a link that stays up keeps the one from its connect).
 
-list_machines compares each machine with the other online-reported machines of its OS, adding the portal's own sandbox
+list_machines compares each machine with every other machine of its OS that has a report (an offline one by its last
+report), adding the portal's own sandbox
 settings for it (Library seed set or not, editors below normal, slot repos, commit check), and prints
 `baseline (w6603, warn only): off its Windows PC baseline: <key> <its value> (<other value> on <machines>)`. A key only one
 machine reports is no drift. It changes and refuses nothing: the fix for a difference is the installer/updater or the

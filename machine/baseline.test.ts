@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { agentClaude, probeBaseline, toolCommands } from './baseline.ts';
-import { baselineDrift, driftLine, flagValue, portalSettings, sanitizeBaseline, versionOf } from '../shared/machineBaseline.ts';
+import { FEATURE_KEYS, NON_FEATURE_KEYS, baselineDrift, driftLine, featureFlags, flagValue, portalSettings, sanitizeBaseline, versionOf } from '../shared/machineBaseline.ts';
 
 test('w6603: versionOf reads the version from each tool line, past node warnings', () => {
   assert.equal(versionOf('git version 2.56.1.windows.1\n'), '2.56.1.windows.1');
@@ -74,4 +75,32 @@ test('w6603: sanitizeBaseline keeps short strings only', () => {
   assert.equal(sanitizeBaseline(undefined), undefined);
   assert.deepEqual(sanitizeBaseline({ tools: { git: '2', 'bad key!': 'x', n: 3 }, flags: 'no' }), { tools: { git: '2' }, flags: {} });
   assert.equal(sanitizeBaseline({ tools: { a: 'y'.repeat(999) } })!.tools.a.length, 160);
+});
+
+test('w6603 (w6613 review): every DaemonConfig key is in exactly one of FEATURE_KEYS and NON_FEATURE_KEYS', () => {
+  const src = fs.readFileSync(new URL('./daemon.ts', import.meta.url), 'utf8');
+  const start = src.indexOf('interface DaemonConfig {');
+  const body = src.slice(start, src.indexOf('\n}', start));
+  const keys = [...body.matchAll(/^ {2}(?:readonly )?([A-Za-z]+)\??:/gm)].map((m) => m[1]);
+  assert.ok(keys.length > 40, `read ${keys.length} keys`);
+  const lists = [...FEATURE_KEYS, ...NON_FEATURE_KEYS] as string[];
+  for (const k of keys) assert.equal(lists.filter((x) => x === k).length, 1, `DaemonConfig.${k}: add it to FEATURE_KEYS or NON_FEATURE_KEYS`);
+  for (const k of lists) assert.ok(keys.includes(k), `${k} is no DaemonConfig key`);
+});
+
+test('w6603 (w6613 review): sandboxCacheTrim compares on/off only; sessionSweep is sizing', () => {
+  const f = featureFlags({ sandboxCacheTrim: { buildCacheGB: 9 }, sessionSweep: { graceMin: 5 } });
+  assert.equal(f.sandboxCacheTrim, 'on');
+  assert.equal(featureFlags({ sandboxCacheTrim: false }).sandboxCacheTrim, 'off');
+  assert.equal(featureFlags({}).sandboxCacheTrim, 'unset');
+  assert.equal(f.sessionSweep, undefined);
+  assert.equal(featureFlags({ freezeWatch: false }).freezeWatch, 'false');
+});
+
+test('w6603 (w6613 review): the sanitiser caps keys, and a key with three values lists them all', () => {
+  const many = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`k${i}`, 'v']));
+  assert.equal(Object.keys(sanitizeBaseline({ tools: many })!.tools).length, 64);
+  assert.deepEqual(sanitizeBaseline({ tools: { ['x'.repeat(41)]: 'v', 'a.b-c_1': 'v' } })!.tools, { 'a.b-c_1': 'v' });
+  const d = baselineDrift(['1', '2', '2', '3'].map((v, i) => ({ id: `m${i}`, platform: 'linux' as const, baseline: { tools: { git: v }, flags: {} } })));
+  assert.equal(driftLine('m0', d.get('linux')), 'tool.git 1 (2 on m1, m2; 3 on m3)');
 });
