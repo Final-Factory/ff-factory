@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FIXED_GIT_CONFIG, HOOKS, SUBMODULE_GIT_CONFIG, submoduleRecursion, submoduleRefusal, gitlinkListArgs, gitlinkIn, gitlinkCovered, gitFence, wholeIndexCall, fenceArgs, firstWinsArgs, firstWinsRefusal, gitExecFileSync, gitFenceSync, gitOffThread, gitSpawnSync, isGit, lazyFetchOff, needsScan, parseScan, refusal, scanCut, scannedOverrides, splitGlobal, withConfigFirst } from './safeGit.ts';
+import { FIXED_GIT_CONFIG, HOOKS, SUBMODULE_GIT_CONFIG, submoduleRecursion, submoduleRefusal, aliasRefusal, gitlinkListArgs, gitlinkIn, gitlinkCovered, gitFence, wholeIndexCall, fenceArgs, firstWinsArgs, firstWinsRefusal, gitExecFileSync, gitFenceSync, gitOffThread, gitSpawnSync, isGit, lazyFetchOff, needsScan, parseScan, refusal, scanCut, scannedOverrides, splitGlobal, withConfigFirst } from './safeGit.ts';
 import { readGitStatus } from './gitStatus.ts';
 import { run } from './proc.ts';
 
@@ -826,14 +826,19 @@ test('w6630: a call that recurses into submodules by its own option is refused; 
   assert.deepEqual(gitlinkListArgs(['--literal-pathspecs', 'add', '-A']), [...ls, ':/'], 'the listing runs with literal pathspecs off');
   assert.deepEqual(gitlinkListArgs(['mv', '-k', 'sub', 'sub2']), [...ls, 'sub', 'sub2']);
   // w6691: calls that look into every submodule whatever any option says list the whole index.
-  for (const a of [['commit', '-a'], ['commit', '-q', '-m', 'x', '--', 'f'], ['stash'], ['stash', '-q'], ['stash', 'push', '-q'], ['stash', 'save', 'x'], ['stash', 'create'], ['stash', 'branch', 'b'], ['describe', '--dirty'], ['describe', '--always', '--broken=-b'], ['describe', '--dir'], ['rebase', '--autostash', 'main'], ['merge', '--autos', 'x'], ['pull', '--autostash'], ['-c', 'rebase.autoStash=true', 'rebase', 'main'], ['-cmerge.autostash', 'merge', 'x'], ['--config-env=rebase.autostash=V', 'pull'], ['merge', 'x'], ['merge', '--no-ff', '-m', 'x', 'x'], ['merge', '--squash', 'x'], ['merge', '--continue'], ['merge', '--ff', 'x'], ['pull'], ['pull', '--no-rebase', '.', 'x'], ['pull', '--rebase'], ['difftool', '-y'], ['mergetool']]) {
+  for (const a of [['commit', '-a'], ['commit', '-q', '-m', 'x', '--', 'f'], ['stash'], ['stash', '-q'], ['stash', 'push', '-q'], ['stash', 'save', 'x'], ['stash', 'create'], ['stash', 'branch', 'b'], ['describe', '--dirty'], ['describe', '--always', '--broken=-b'], ['describe', '--dir'], ['rebase', '--autostash', 'main'], ['merge', '--autos', 'x'], ['pull', '--autostash'], ['-c', 'rebase.autoStash=true', 'rebase', 'main'], ['-cmerge.autostash', 'merge', 'x'], ['--config-env=rebase.autostash=V', 'pull'], ['merge', 'x'], ['merge', '--no-ff', '-m', 'x', 'x'], ['merge', '--squash', 'x'], ['merge', '--continue'], ['merge', '--ff', 'x'], ['pull'], ['pull', '--no-rebase', '.', 'x'], ['pull', '--rebase'], ['difftool', '-y'], ['mergetool'], ['merge', '--ff-o', 'x'], ['merge', '--ff-only', '--no-ff', '-m', 'x', 'x'], ['merge', '--ff-only', '--ff', 'x'], ['merge', '--no-ff', '-m', '--ff-only', 'x'], ['merge', '-m', '--abort', '--no-ff', 'x'], ['merge', '-m', '--quit', 'x'], ['merge', '--abort', 'x'], ['merge', '--ff-only', '--', 'x'], ['pull', '--ff-only', '--no-ff', '.', 'x'], ['pull', '--ff-only', '--ff', '.', 'x'], ['pull', '--ff-only', '--rebase']]) {
     assert.ok(wholeIndexCall(a), a.join(' '));
     assert.deepEqual(gitlinkListArgs(a), [...ls, ':/'], a.join(' '));
   }
-  for (const a of [['stash', 'list'], ['stash', 'pop'], ['stash', 'show', '-p'], ['describe', '--tags'], ['describe', '--', '--dirty'], ['rebase', 'main'], ['rebase', '--no-autostash', 'main'], ['merge', '--ff-only', '@{u}'], ['merge', '--ff-o', 'x'], ['merge', '--abort'], ['merge', '--quit'], ['pull', '--ff-only'], ['-c', 'rebase.autoStash=false', 'rebase', 'main'], ['checkout', 'main'], ['status']]) {
+  for (const a of [['stash', 'list'], ['stash', 'pop'], ['stash', 'show', '-p'], ['describe', '--tags'], ['describe', '--', '--dirty'], ['rebase', 'main'], ['rebase', '--no-autostash', 'main'], ['merge', '--ff-only', '@{u}'], ['merge', '--ff-only', '--quiet', 'origin/main'], ['merge', '-q', '--ff-only', 'x'], ['merge', '--abort'], ['merge', '--quit'], ['pull', '--ff-only'], ['pull', '-q', '--ff-only', 'origin', 'main'], ['-c', 'rebase.autoStash=false', 'rebase', 'main'], ['checkout', 'main'], ['status']]) {
     assert.ok(!wholeIndexCall(a), a.join(' '));
     assert.equal(gitlinkListArgs(a), undefined, a.join(' '));
   }
+  // w6731: a name git would run as an alias is refused; a command passes, whatever aliases say.
+  const aliases = [{ key: 'alias.st' }, { key: 'alias.cm' }, { key: 'alias.dt' }, { key: 'alias.status' }, { key: 'alias.commit' }];
+  for (const a of [['st'], ['-C', 'x', 'cm', '-m', 'x'], ['ST'], ['--git-dir=x', 'dt', '-y']]) assert.match(aliasRefusal(a, aliases) ?? '', /^refused by FF Factory \(w6731\): `git .*alias\.(st|cm|dt)\b/, a.join(' '));
+  for (const a of [['-c', 'alias.co=checkout', 'co'], ['-calias.co=checkout', 'co'], ['--config-env=alias.CO=V', 'co'], ['-c', 'Alias.Co=checkout', 'CO']]) assert.match(aliasRefusal(a, []) ?? '', /w6731/, a.join(' '));
+  for (const a of [['status'], ['-c', 'alias.status=diff', 'status'], ['-C', 'x', 'commit', '-m', 'x'], ['stash', 'list'], ['lfs', 'pull'], ['co'], ['--version'], []]) assert.equal(aliasRefusal(a, a[0] === 'co' ? [] : aliases), undefined, a.join(' '));
   assert.match(gitlinkCovered(['commit', '-m', 'x'], 0, '160000 bb 0\tlib/sub\0') ?? '', /^refused by FF Factory \(w6630\): `git commit` runs in a repository with the submodule lib\/sub.*`ignore` setting.*git -C lib\/sub/);
   assert.equal(gitlinkCovered(['commit', '-m', 'x'], 0, '100644 aa 0\ta.txt\0'), undefined);
   assert.equal(gitlinkIn('100644 aa 0\ta.txt\x00160000 bb 0\tlib/sub\0'), 'lib/sub');
@@ -1030,6 +1035,17 @@ test('w6630: a submodule’s planted uploadpack and filter run on plain git, nev
       assert.match(r.stderr, /w6630/, a.join(' '));
       assert.equal(f.ran(), '', `fence: ${a.join(' ')}`);
     }
+    // w6731: the merge shapes that slipped past a scan for --ff-only, and aliases (a caller's and the repository's).
+    git(victim, 'config', 'alias.rst', 'status');
+    plain('rst');
+    assert.match(f.ran(), /clean/, 'plain git: the repository’s alias runs status, and the submodule’s filter');
+    for (const a of [['merge', '--ff-only', '--no-ff', '-m', 'x', 'side'], ['merge', '--ff-only', '--ff', '-m', 'x', 'side'], ['merge', '--no-ff', '-m', '--ff-only', 'side'], ['merge', '-m', '--abort', '--no-ff', 'side'], ['merge', '-m', '--quit', 'side'], ['pull', '--ff-only', '--no-ff', '--no-edit', '.', 'side'], ['-c', 'alias.st=status', 'st'], ['-c', 'alias.cm=commit', 'cm', '-m', 'x'], ['-c', 'alias.dt=difftool', 'dt', '-y', '-x', 'true'], ['rst']]) {
+      const r = fenced(...who, ...a);
+      assert.notEqual(r.status, 0, a.join(' '));
+      assert.match(r.stderr, /w6630|w6731/, a.join(' '));
+      assert.equal(f.ran(), '', `fence: ${a.join(' ')}`);
+    }
+    git(victim, 'config', '--unset', 'alias.rst');
     plain('checkout', '-q', '--', 'top.txt');
     // E: with the submodule keys gone from the superproject's config, the forced config still stops it.
     git(victim, 'config', '--remove-section', 'submodule.sub');

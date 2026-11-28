@@ -7,7 +7,7 @@
   stop is refused with a message that says what to run instead: `git submodule`, `--recurse-submodules`,
   `--submodule=diff|log`, a caller's `-c` of those keys, `git add`/`rm`/`mv` whose pathspec covers a submodule (leave it out
   with `':!<submodule>'`, or run git in the submodule itself), and, in a repository with a submodule, `commit`, `stash` push
-  or branch, `describe --dirty`, an autostash, a merge or pull other than `--ff-only`, `difftool` and `mergetool`. Since a superproject's status no longer shows a submodule's edits, the
+  or branch, `describe --dirty`, an autostash, a merge or pull other than plain `--ff-only` (or `merge --abort`/`--quit`), `difftool` and `mergetool`. A call whose name is an alias (the repository's, the user's or a caller's `-c alias.*`) is refused too, since the fence checks the name it is given. Since a superproject's status no longer shows a submodule's edits, the
   clean-up checks each submodule as its own repository: a populated submodule, a deinit'ed one's git folder (a linked
   worktree's too), and an untracked clone inside; what it cannot read counts as work. Tests: `server/safeGit.test.ts`,
   `server/cleanupFolders.test.ts`.

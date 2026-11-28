@@ -222,8 +222,10 @@ export function wholeIndexCall(args: string[]): boolean {
   if (name === 'difftool' || name === 'mergetool') return true;
   if (!/^(rebase|merge|pull)$/.test(name)) return false;
   if (opts.some((o) => o.startsWith('--au') && isOpt(o, '--autostash'))) return true;
-  // `merge --abort` and `--quit` reset to a commit; `--continue` commits (refused above as commit would be).
-  if (name !== 'rebase' && !opts.some((o) => (o.startsWith('--ff-') && isOpt(o, '--ff-only')) || (name === 'merge' && ((o.startsWith('--ab') && isOpt(o, '--abort')) || (o.startsWith('--q') && isOpt(o, '--quit')))))) return true;
+  // Only the shapes FF Factory runs pass (w6731: a later `--no-ff` or `--ff` beats `--ff-only`, and `-m --ff-only` is a
+  // message): `merge --abort`, `merge --quit` (each resets to a commit), and `merge` or `pull` with `--ff-only`, `-q` and
+  // refs, none of which takes a value.
+  if (name !== 'rebase' && !(name === 'merge' && rest.length === 1 && /^--(abort|quit)$/.test(rest[0]!)) && !(rest.includes('--ff-only') && rest.every((a) => a === '--ff-only' || a === '-q' || a === '--quiet' || !a.startsWith('-')))) return true;
   for (let i = 0; i < sub; i++) {
     const a = args[i]!;
     const pair = a === '-c' || a === '--config-env' ? args[i + 1] ?? '' : a.startsWith('--config-env=') ? a.slice(13) : a.startsWith('-c') ? a.slice(2) : '';
@@ -278,6 +280,29 @@ export function submoduleRefusal(args: string[]): string | undefined {
   if (!how) return undefined;
   const name = args[splitGlobal(args).sub] ?? '';
   return `refused by FF Factory (w6630): \`git ${name}\` recurses into submodules (${how}), where git reads each submodule's own config, which the fence does not scan; run git in the submodule itself (\`git -C <submodule> ...\`), where the fence scans its config`;
+}
+
+/** git's own commands, which no alias shadows (git runs a builtin before it looks for an alias). */
+const BUILTINS = new Set(['add', 'am', 'apply', 'archive', 'branch', 'cat-file', 'check-ignore', 'checkout', 'cherry-pick', 'clean', 'clone', 'commit', 'config', 'count-objects', 'describe', 'diff', 'diff-files', 'diff-index', 'diff-tree', 'difftool', 'fetch', 'for-each-ref', 'fsck', 'gc', 'grep', 'hash-object', 'init', 'log', 'ls-files', 'ls-remote', 'ls-tree', 'maintenance', 'merge', 'merge-base', 'mergetool', 'mv', 'notes', 'prune', 'pull', 'push', 'read-tree', 'rebase', 'reflog', 'remote', 'repack', 'reset', 'restore', 'rev-list', 'rev-parse', 'revert', 'rm', 'show', 'show-ref', 'sparse-checkout', 'stash', 'status', 'submodule', 'switch', 'symbolic-ref', 'tag', 'update-index', 'update-ref', 'var', 'version', 'worktree', 'write-tree']);
+
+/**
+ * The w6731 refusal of an alias, or undefined. git runs a name that is neither one of its commands nor a `git-<name>` program
+ * as `alias.<name>` (the repository's config, the user's, or a caller's `-c`), and the fence's options and refusals apply to
+ * the name it is given: `-c alias.st=status st`, and `st` with `alias.st=status` in the repository's config, ran a
+ * submodule's clean filter (measured by w6731's review on git 2.56.1). The scan reads every `alias.*` (SCAN_KEYS); a call
+ * whose name an alias defines is refused, unless it names one of git's own commands (BUILTINS), which an alias never shadows.
+ */
+export function aliasRefusal(args: string[], rows: { key: string }[]): string | undefined {
+  const { sub } = splitGlobal(args);
+  const name = args[sub];
+  if (!name || name.startsWith('-') || BUILTINS.has(name)) return undefined;
+  const key = `alias.${name.toLowerCase()}`;
+  const caller = args.slice(0, sub).some((a, i) => {
+    const pair = a === '-c' || a === '--config-env' ? args[i + 1] ?? '' : a.startsWith('--config-env=') ? a.slice(13) : a.startsWith('-c') ? a.slice(2) : '';
+    return pair.split('=')[0]!.toLowerCase() === key;
+  });
+  if (!caller && !rows.some((r) => r.key === key)) return undefined;
+  return `refused by FF Factory (w6731): \`git ${name}\` runs the alias ${key}, which the fence does not resolve (its options and refusals apply to the name it is given); name the git command itself`;
 }
 
 /** Calls the fence lists the index entries of their pathspec for (gitlinkListArgs). */
@@ -510,7 +535,7 @@ export function refusal(args: string[], rows: { scope: string; key: string; valu
   // FF Factory caller passes it, and adding the remote, then fetching it, is the same work with each step scanned.
   if (args[sub] === 'remote' && remoteAddFetches(fromVerb(args.slice(sub + 1))))
     return "refused by FF Factory (w6650): `git remote add` with --fetch fetches the new remote after writing its URL, past the fence's scan of the config (an includeIf on that URL switches on only then); run `git remote add` without -f, then `git fetch <name>`";
-  const recursion = submoduleRefusal(args);
+  const recursion = submoduleRefusal(args) ?? aliasRefusal(args, rows);
   if (recursion) return recursion;
   const bad = rows.find((r) => !TRUSTED_SCOPES.has(r.scope) && isUrlRewrite(r.key));
   if (!bad || !NETWORK.has(args[splitGlobal(args).sub] ?? '')) return firstWinsRefusal(args, rows);
@@ -540,7 +565,7 @@ export function scannedOverrides(rows: { scope: string; key: string; value: stri
   const out: [string, string][] = [];
   const seen = new Set<string>();
   for (const r of repo) {
-    if (isCredential(r.key) || isUrlRewrite(r.key) || isFirstWins(r.key) || isReadOnly(r.key) || FIXED_KEYS.has(r.key) || seen.has(r.key)) continue;
+    if (isAlias(r.key) || isCredential(r.key) || isUrlRewrite(r.key) || isFirstWins(r.key) || isReadOnly(r.key) || FIXED_KEYS.has(r.key) || seen.has(r.key)) continue;
     seen.add(r.key);
     const back = trusted.filter((t) => t.key === r.key).at(-1);
     out.push([r.key, back ? back.value : neutral(r.key)]);
@@ -654,7 +679,10 @@ function unscanned(args: string[], env: Env): { args: string[]; env: Env } {
   return { args: f.args, env: { ...f.env, GIT_NO_LAZY_FETCH: '1' } };
 }
 
-const scanArgs = (location: string[]) => [...location, 'config', '--show-scope', '--includes', '-z', '--get-regexp', SCANNED_KEYS];
+/** What the fence's scan reads: SCANNED_KEYS, and every alias (aliasRefusal), which no override covers. */
+const SCAN_KEYS = `${SCANNED_KEYS.slice(0, -2)}|alias\\..+)$`;
+const isAlias = (key: string) => key.startsWith('alias.');
+const scanArgs = (location: string[]) => [...location, 'config', '--show-scope', '--includes', '-z', '--get-regexp', SCAN_KEYS];
 
 /**
  * Why a scan's rows cannot be trusted, or undefined (w6632): only a scan that ended by itself with exit 0, or with exit 1 (no
