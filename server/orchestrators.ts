@@ -81,7 +81,7 @@ import { reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
 import { notesSettle, personNotes, relatedRequests, settledRefusal } from './priorDecisions.ts';
 import { alreadySent, asksSame, matchedAsk, needsYouDigestText, needsYouRecord, needsYouText, whoOf, workersNamedBy, type NeedsYouWait } from './needsYou.ts';
-import { asksAnsweredBy, sameAsk, WAIT_LINE_CHARS } from '../shared/waitSummary.ts';
+import { asksAnsweredBy, asksWhatItAsks, onlyAsksBack, openAsksOf, sameAsk, WAIT_LINE_CHARS } from '../shared/waitSummary.ts';
 import { holdsItsPlace, stoppedOffline } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
 import { permissionAccess, permissionWhat, type PermissionAccess } from '../shared/permissionAccess.ts';
@@ -1655,6 +1655,40 @@ It is for your part of the work, not an answer to another worker's question.`;
       if (a) return { id: x.id, on: a.on, at: a.at, ...(a.note ? { note: a.note } : {}) };
     }
     return undefined;
+  }
+
+  /** Copies refused once by cardCopyRefusal (w6813), by chat, request and [needs you]: the same call again goes through. */
+  private readonly cardCopies = new Set<string>();
+
+  /**
+   * w6813 (lothsahn: "I've answered all the cards but many were duplicates"): a question about a request whose [needs you]
+   * waits on this person is already a card on their Waiting tab, with its answers as buttons. The orchestrator's ask_person
+   * copy of it, reworded so the page could not tell them apart, was a second card: w6778's #152099 at 17:39 beside the
+   * worker's [needs you] of 17:39:28, w6792's #152081 beside its own of 17:35:26. Refused once per [needs you]; the same call
+   * again goes through, for a question that really is another one.
+   */
+  private cardCopyRefusal(asker: string, person: Requester, ask: Ask, input: unknown): string | undefined {
+    const raw = (input ?? {}) as { request?: unknown };
+    const named = typeof raw.request === 'string' && /^w\d+$/i.test(raw.request.trim()) ? raw.request.trim().toLowerCase() : undefined;
+    const ids = [...new Set([ask.question, ...ask.options.map((o) => `${o.label} ${o.description}`)].flatMap((t) => [...splitMedia(t).text.matchAll(/w\d+/gi)].map((m) => m[0].toLowerCase())))];
+    const id = named ?? (ids.length === 1 ? ids[0] : undefined);
+    const w = id ? this.store.work.get(id) : undefined;
+    const r = w && isOpen(w) && w.needsYou && !w.needsYou.answered ? w.needsYou : undefined;
+    // Only a card that shows with buttons: one with its answers listed, on a request not blocked (a blocked one's card leaves
+    // the tab, as w6781's did from 14:40 while the copy of its GPU-label question, #151470, was the only one).
+    if (!w || !r?.asks?.length || w.status === 'blocked' || w.blocked || !r.who.some((n) => same(n, person.displayName) || same(n, person.userId))) return undefined;
+    const key = `${asker}
+${w.id}
+${r.raisedAt ?? r.at}
+${JSON.stringify([ask.question, ask.options.map((o) => o.label)])}`;
+    if (this.cardCopies.has(key)) return undefined;
+    this.cardCopies.add(key);
+    console.log(`ask_person refused (w6813) for ${person.displayName} on ${w.id}: its [needs you] is already their card`);
+    return (
+      `Not asked: ${person.displayName} already has this as a card. ${w.id}'s [needs you] (raised ${(r.raisedAt ?? r.at).slice(11, 16)} UTC) shows on their Waiting tab with its answers as buttons, and an answer there reaches its worker. ` +
+      `A second card of the same question is the duplicate w6813 stops (lothsahn: "I've answered all the cards but many were duplicates"). If they need it explained, say it in a line and point them at that card. ` +
+      `If this really is another question, call ask_person again with it and it goes through.`
+    );
   }
 
   /** Repeats refused once by answeredBefore (w1812), by who asks and the question: the same call again goes through. */
@@ -3233,12 +3267,18 @@ It is for your part of the work, not an answer to another worker's question.`;
         what.push(`answers the ${w.flag.kind === 'error' ? 'escalated error' : 'design question'} "${clip(w.flag.text, 120)}"`);
         w.flag = undefined;
       }
+      // w6813: the [needs you] it answers, taken before routeNote marks it answered: the cards that ask the same go too.
+      const before = w.humanAsked && w.needsYou && !w.needsYou.answered && !keeps ? { ...w.needsYou } : undefined;
       // w1378: a person's own answer to a [needs you] question goes to the worker that waits on it.
       if (w.humanAsked && w.needsYou && !w.needsYou.answered && !keeps) what.push(this.routeNote(w, owner, note, forOwner ? asked.map((r) => r.displayName) : undefined));
+      // Only the questions this note answered (w1868: one of several leaves the rest open, and their cards with them).
+      const left = w.needsYou && !w.needsYou.answered ? openAsksOf(w.needsYou) : [];
+      const answeredNow = before ? openAsksOf(before).filter((q) => !left.includes(q)) : [];
+      const record = before && (!before.asks?.length || answeredNow.length) ? { question: before.question, asks: answeredNow } : undefined;
       // w1868: and the open question cards about it that the note answers leave the person's Waiting on input tab.
-      if (w.humanAsked) this.closeAsksAnsweredBy(owner, w, note);
+      if (w.humanAsked) this.closeAsksAnsweredBy(owner, w, note, record);
       // w3606: answered for another owner, the asked owners' own cards about it leave their tabs too.
-      if (forOwner && answering) for (const p of asked.filter((r) => !same(r.userId, owner.userId))) this.closeAsksAnsweredBy(p, w, note);
+      if (forOwner && answering) for (const p of asked.filter((r) => !same(r.userId, owner.userId))) this.closeAsksAnsweredBy(p, w, note, record);
     }
     if (input.close) {
       // A PERSON'S CLOSE IS FINAL (w370): no automatic-close mark or loose PR link survives it for the cleanup's
@@ -3307,6 +3347,8 @@ It is for your part of the work, not an answer to another worker's question.`;
     // w1812: a question this person already answered is not asked again (refused once; a repeat goes through).
     const again = this.repeatRefusal(chat.info.id, owner, checked.ask);
     if (again) throw new Error(again);
+    const copy = this.cardCopyRefusal(chat.info.id, owner, checked.ask, input);
+    if (copy) throw new Error(copy);
     const settled = this.settledByNotes(owner, checked.ask, input);
     if (settled) throw new Error(settled);
     const missing = this.previewsMissing(checked.ask, input, owner.displayName);
@@ -3376,8 +3418,10 @@ It is for your part of the work, not an answer to another worker's question.`;
     }
     if (e.kind === 'user' && e.from === 'human') {
       this.cardShown.delete(sid);
-      const seq = splitReply(e.text, NOTE_MARKS).quote?.seq;
-      if (seq !== undefined) this.closeAsks(sid, (a) => a.seq === seq);
+      const reply = splitReply(e.text, NOTE_MARKS);
+      const seq = reply.quote?.seq;
+      // w6813: a reply that only asks back answers nothing: its card stays open until it is answered or closed.
+      if (seq !== undefined) this.closeAsks(sid, (a) => a.seq === seq && !onlyAsksBack(reply.words, a.ask));
       if (seq !== undefined) this.closeForYou(sid, (m) => m.seq === seq);
     }
   }
@@ -3443,15 +3487,18 @@ It is for your part of the work, not an answer to another worker's question.`;
 
   /**
    * A person's note on request `w` (their answer, update_work) closes their orchestrator's open questions about it that it
-   * answers: the one that quotes one of its answers, or the only one open about it.
+   * answers: the one that quotes one of its answers, or the only one open about it. And w6813: every card that asks what the
+   * request's [needs you] `record` asked, whatever request it names, or none: lothsahn answered w6781's GPU-label question on
+   * its card at 14:42 and the orchestrator's copy, filed under w6786 (#151470), stayed open, a card nobody could see.
    */
-  private closeAsksAnsweredBy(person: Requester, w: WorkItem, note: string) {
+  private closeAsksAnsweredBy(person: Requester, w: WorkItem, note: string, record?: { question: string; asks: Ask[] }) {
     const chat = this.personalOf(person.userId);
     if (!chat) return;
     const about = (chat.info.openAsks ?? []).filter((a) => a.request === w.id);
     const hit = about.filter((a) => asksAnsweredBy([a.ask], note).length);
     const go = hit.length ? hit : about.length === 1 ? about : [];
-    if (go.length) this.closeAsks(chat.info.id, (a) => go.includes(a));
+    const twins = record ? (chat.info.openAsks ?? []).filter((a) => !go.includes(a) && asksWhatItAsks(a.ask, record)) : [];
+    if (go.length || twins.length) this.closeAsks(chat.info.id, (a) => go.includes(a) || twins.includes(a));
   }
 
   /**

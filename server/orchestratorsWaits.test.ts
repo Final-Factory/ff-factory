@@ -774,7 +774,7 @@ test('w2478: a worker\'s waiting_on_person and decide_work ask on a request with
 });
 
 test('w1597: a worker asks with questions: refused with a path, a PR list or no answers; kept on the wait and the record, listed in [needs you]; the answer a click sends, recorded, resumes the worker', async (t) => {
-  const { store, machines, agents, sessions, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  const { store, machines, agents, sessions, o, dispatcher, chat, call, heard } = await setupOnMachine(t);
   const ben = chat(BEN).info;
   await call(ben, 'request_work', { title: 'Pre-1.0 release picks', brief: 'Which fixes go in.' });
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do it', title: 'w1: Pre-1.0 release picks', work_id: 'w1' });
@@ -801,7 +801,7 @@ test('w1597: a worker asks with questions: refused with a path, a PR list or no 
   assert.equal(r.asks?.length, 2, 'the record carries the questions for the card');
   assert.ok(r.previews.includes('/srv/fff/review/w1/notes.png'), "a question's still is among the previews");
   const msg = heard(ben.id, '[needs you]')[0].text;
-  assert.match(msg, /Ask these 2 one at a time with ask_person[\s\S]*Q1\. When should the update go live\?\n1\. As soon as it is built, with a Steam event \(Recommended\) - Ten builds reach players at once\.\n2\. Hold it: I pick the day\n\nQ2\. Should the vision speed-up go in\?\n1\. Put it in \(Recommended\)/);
+  assert.match(msg, /Its card asks these 2 on the Waiting tab[\s\S]*Q1\. When should the update go live\?\n1\. As soon as it is built, with a Steam event \(Recommended\) - Ten builds reach players at once\.\n2\. Hold it: I pick the day\n\nQ2\. Should the vision speed-up go in\?\n1\. Put it in \(Recommended\)/);
   // A click on the card sends the answer as typed words would (shared/questionCard.ts answerMessage); the orchestrator records
   // it with update_work in Ben's turn, and the worker resumes with it.
   const answer = answersText(r.asks!, ['As soon as it is built, with a Steam event', 'Put it in']);
@@ -809,8 +809,26 @@ test('w1597: a worker asks with questions: refused with a path, a PR list or no 
   await until('that turn ends', () => chat(BEN).info.status === 'idle');
   await new Promise((r) => setTimeout(r, 300));
   chat(BEN).lastFrom = 'human';
+  // w6813: the orchestrator's reworded ask_person copy of the card's question is refused once (lothsahn: "I've answered all
+  // the cards but many were duplicates"); the same call again goes through, for a question that really is another.
+  const reworded = { question: 'w1 asks: do you want the vision change shipped with this update?', options: [{ label: 'Put it in', description: '', recommended: true }, { label: 'Leave it out', description: '' }], request: 'w1', no_previews: 'a yes or no on code' };
+  const copy = await call(ben, 'ask_person', reworded);
+  assert.equal(copy.isError, true, copy.text);
+  assert.match(copy.text, /Not asked: Ben already has this as a card\. w1's \[needs you\] \(raised \d\d:\d\d UTC\) shows on their Waiting tab/);
+  // A copy that got through anyway (filed under another request, as #151470 was under w6786 beside w6781's own) is closed by
+  // the answer on the card, whatever request it names; one about something else stays.
+  store.onEvent = (sid, e) => o.observeAsk(sid, e);
+  const shown = (input: Record<string, unknown>, toolUseId: string) => {
+    const ev = store.append(ben.id, { kind: 'tool_use', toolUseId, name: 'mcp__sandboxes__ask_person', input });
+    store.append(ben.id, { kind: 'tool_result', toolUseId, isError: false, text: 'Shown' });
+    return ev.seq;
+  };
+  shown({ ...reworded, request: 'w9' }, 'twin');
+  const other = shown({ question: 'Should the release notes name the testers?', options: [{ label: 'Name them', description: '', recommended: true }, { label: 'Leave names out', description: '' }] }, 'other');
+  assert.equal(o.personalOf('ben')!.info.openAsks?.length, 2);
   const done = await call(ben, 'update_work', { id: 'w1', note: answer });
   assert.match(done.text, new RegExp(`answers the \\[needs you\\] question: sent to its worker ${id}, which resumes with it`));
+  assert.deepEqual(o.personalOf('ben')!.info.openAsks?.map((a) => a.seq), [other], 'the copy of the answered question closed with it');
   const pending = (agents as unknown as { waker: { pending(id: string): { note: string } | undefined } }).waker.pending(id);
   assert.match(pending!.note, /^\[answer\] Ben answered on w1 "Pre-1\.0 release picks", in their own words: 1\. When should the update go live\?\n   As soon as it is built, with a Steam event\n2\. Should the vision speed-up go in\?\n   Put it in\n/);
   assert.equal(store.work.get('w1')!.needsYou!.answered!.by, 'Ben');
@@ -989,6 +1007,30 @@ test('w1868: every ask_person question is an open card until it is answered, ask
   assert.deepEqual(open(), [seqs[3], seqs[4], again]);
   const listed = await call(loth.info, 'close_question', { why: 'list' });
   assert.match(listed.text, new RegExp(`${seqs[3]}: Question 4 about w14`));
+});
+
+test('w6813: a reply that only asks back leaves its card open; one that picks an answer, or says it in words, closes it', async (t) => {
+  const env = setup(t);
+  const { store, o, chat } = env;
+  store.onEvent = (sid, e) => o.observeAsk(sid, e);
+  const loth = chat(LOTH);
+  const asked = (toolUseId: string) => {
+    const ev = store.append(loth.info.id, { kind: 'tool_use', toolUseId, name: 'mcp__sandboxes__ask_person', input: { question: 'How should w6778 close now that the static map costs nothing?', options: [{ label: 'Close it and hand up the off-screen animator follow-up', description: '', recommended: true }, { label: 'Merge the skip anyway', description: '' }], request: 'w6778' } });
+    store.append(loth.info.id, { kind: 'tool_result', toolUseId, isError: false, text: 'Shown' });
+    return ev.seq;
+  };
+  const open = () => (o.personalOf('lothsahn')!.info.openAsks ?? []).map((a) => a.seq);
+  const card = asked('a1');
+  // 17:29:45: lothsahn's reply to #152055, which closed it before.
+  const back = "What do you mean? The planets and stars and camps and stuff should not be moving. How is there nothing that doesn't move?";
+  store.append(loth.info.id, { kind: 'user', from: 'human', text: o.replyWords(loth.info.id, back, card), requestedBy: LOTH });
+  assert.deepEqual(open(), [card], 'a question back answers nothing: the card stays');
+  // A question that quotes an answer picks it.
+  store.append(loth.info.id, { kind: 'user', from: 'human', text: o.replyWords(loth.info.id, 'Merge the skip anyway, why not?', card), requestedBy: LOTH });
+  assert.deepEqual(open(), [], 'quoting an answer closes it');
+  const second = asked('a2');
+  store.append(loth.info.id, { kind: 'user', from: 'human', text: o.replyWords(loth.info.id, 'Close it and pause animations that are off screen.', second), requestedBy: LOTH });
+  assert.deepEqual(open(), [], 'an answer in words closes it');
 });
 
 test('w1955: a card answered in typed words stays open, and request_work and update_work list it so the orchestrator closes it', async (t) => {

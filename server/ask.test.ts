@@ -266,7 +266,8 @@ test('w1397: the brief tells the orchestrator to ask every question this way, an
   const prompt = (env.agents.orchestratorOptions(ben.info) as { systemPrompt: { append: string } }).systemPrompt.append;
   assert.match(prompt, /Ask every question to Ben with ask_person/);
   assert.match(prompt, /one recommended option/);
-  assert.ok(prompt.includes('Ask it with ask_person, one question at a time, its answers as buttons'));
+  assert.ok(prompt.includes('never ask it again with ask_person (w6813'), 'w6813: a [needs you] that lists its answers is its own card');
+  assert.ok(prompt.includes('ask with ask_person, one question at a time, its answers as buttons'));
 });
 
 test('w1419: a question’s and an option’s stills and clips are kept whole, apart from the words the limits count', () => {

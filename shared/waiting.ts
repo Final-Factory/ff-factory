@@ -2,7 +2,7 @@
 // asked, whose move it is, how long it has waited, and FF Factory's read of it. A pure function over the ledger and the
 // live states (shared/workState.ts), so the sidebar, the phone's bell and the tab all count the same items.
 import { FLAG_LABEL, questionFor, WORK_OPEN, type OpenAsk, type SessionInfo, type WorkItem } from './types.ts';
-import { openAsksOf, sameAsk, sameWords } from './waitSummary.ts';
+import { asksWhatItAsks } from './waitSummary.ts';
 import { handUpCardOf, type WorkLive } from './workState.ts';
 import { onRequest } from './blockers.ts';
 
@@ -107,29 +107,48 @@ export interface AskItem {
   /** The orchestrator chat it was asked in: a click answers it there. */
   sessionId: string;
   a: OpenAsk;
-  /** The request it is about, when it names an open one. */
+  /** The request it is about, when it names one the ledger holds, open or not (w6813). */
   w?: WorkItem;
+  /** The request it names is stalled or closed: the question still waits until it is answered or closed (w6813). */
+  closedRequest?: boolean;
 }
 
 /**
  * The viewer's orchestrator's open questions (SessionInfo.openAsks), each its own card on the tab (w1868, lothsahn: "make
  * sure that all pending questions that you have show up on the intake portal so that I can click through them quickly"),
- * oldest first. Left out: one about a request that is closed, and one its request's own card already asks (the same
- * question in its [needs you]): one question, one card.
+ * oldest first. Left out only: one its request's own card on this tab already asks (the same question in its [needs you]):
+ * one question, one card.
+ *
+ * w6813 (lothsahn, 2026-11-28: "I don't have cards for those six. Please investigate and figure out why those cards were
+ * missing in the dispatch window"): every question the store holds open shows. Six were left out: four named a request that
+ * was stalled or closed meanwhile (w5710 and w5691 stalled, w6780 and w6704 done; #1287's keep-or-revert question still
+ * mattered after its request closed), so a card about a request that is not open now shows, marked so. And a question its
+ * request's [needs you] asks was left out even when that request's card was not on the tab (its worker went on to another
+ * wait, so its live state left Waiting on input): `onTab` names the requests whose cards the tab shows, and only those hide one.
  */
-export function orchestratorAsks(sessions: readonly Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'requestedBy' | 'openAsks'>[], work: readonly WorkItem[], me: Pick<WaitingViewer, 'userId'>): AskItem[] {
+export function orchestratorAsks(
+  sessions: readonly Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'requestedBy' | 'openAsks'>[],
+  work: readonly WorkItem[],
+  me: Pick<WaitingViewer, 'userId'>,
+  onTab?: ReadonlySet<string>,
+): AskItem[] {
   const out: AskItem[] = [];
   for (const s of sessions) {
     if (s.kind !== 'orchestrator' || s.orchestratorRole !== 'personal' || !same(s.requestedBy?.userId, me.userId)) continue;
     for (const a of s.openAsks ?? []) {
       const w = a.request ? work.find((x) => x.id === a.request) : undefined;
-      if (a.request && w && !OPEN.has(w.status)) continue;
-      const r = w?.needsYou && !w.needsYou.answered ? w.needsYou : undefined;
-      if (r && (openAsksOf(r).some((q) => sameAsk(a.ask, q)) || (!r.asks?.length && sameWords(a.ask.question, r.question)))) continue;
-      out.push({ sessionId: s.id, a, ...(w && OPEN.has(w.status) ? { w } : {}) });
+      const open = !!w && OPEN.has(w.status);
+      if (w && open && (!onTab || onTab.has(w.id)) && askedByItsCard(a, w)) continue;
+      out.push({ sessionId: s.id, a, ...(w ? { w } : {}), ...(w && !open ? { closedRequest: true } : {}) });
     }
   }
   return out.sort((x, y) => x.a.at.localeCompare(y.a.at));
+}
+
+/** Whether request `w`'s own card asks what open question `a` asks: its unanswered [needs you] holds the same question (w1812). */
+export function askedByItsCard(a: Pick<OpenAsk, 'ask'>, w: Pick<WorkItem, 'needsYou'>): boolean {
+  const r = w.needsYou && !w.needsYou.answered ? w.needsYou : undefined;
+  return !!r && asksWhatItAsks(a.ask, r);
 }
 
 /** The one count the Waiting tab, its badge, its tooltip and the Requests banner share (w6436). */

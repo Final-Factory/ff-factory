@@ -330,6 +330,26 @@ export function asksAnsweredBy(asks: readonly Ask[], note: string): number[] {
 /** The questions of a [needs you] record still open: those no note answered yet (w1868, answeredAsks). */
 export const openAsksOf = (r: { asks?: Ask[]; answeredAsks?: number[] }) => (r.asks ?? []).filter((_, i) => !(r.answeredAsks ?? []).includes(i));
 
+/**
+ * Whether question card `ask` asks what [needs you] record `r` still asks (w6813): one of its open questions, or its one
+ * question when it has no list. The orchestrator is told to ask a [needs you] with ask_person (needsYou.ts), so its card and
+ * the record are one question: the page shows it once, and an answer to either closes both.
+ */
+export function asksWhatItAsks(ask: Pick<Ask, 'question'> & { options?: readonly { label: string }[] }, r: { question: string; asks?: Ask[]; answeredAsks?: number[] }): boolean {
+  return openAsksOf(r).some((q) => sameAsk(ask, q)) || (!r.asks?.length && sameWords(ask.question, r.question));
+}
+
+/**
+ * Whether a person's reply to question card `ask` only asks back (w6813): its words end in a question mark and quote none of
+ * its answers. Such a reply leaves the card open. lothsahn's "What do you mean? The planets and stars and camps and stuff
+ * should not be moving. How is there nothing that doesn't move?" closed w6778's card #152055 at 17:29, and "Can check run on
+ * any other machines?" closed #150635 at 14:00, while the orchestrator told him both stayed open; neither was asked again.
+ */
+export function onlyAsksBack(words: string, ask: Pick<Ask, 'options'>): boolean {
+  const said = splitMedia(words).text.trim();
+  return /\?["')\]]*$/.test(said) && !asksAnsweredBy([{ question: '', options: ask.options } as Ask], said).length && !ask.options.some((o) => askWords(o.label) && askWords(said) === askWords(o.label));
+}
+
 /** How long ago, in words ("5 min", "3 h", "2 days"). */
 export function waitedFor(since: string, now: number): string {
   const m = Math.max(0, Math.round((now - Date.parse(since)) / 60_000));
