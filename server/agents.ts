@@ -1,4 +1,5 @@
 import { newCost, timedCost, type Cost } from './placeCost.ts';
+import { baselineDrift, driftLine, portalSettings } from '../shared/machineBaseline.ts';
 import { deployLead, deployStayNote, deployWaitLine } from './deployResume.ts';
 import { describePortalPin } from '../machine/portalPin.ts';
 import { crashHoldMark } from './crashHolds.ts';
@@ -8970,6 +8971,8 @@ ${w.repo ?? ''}
     return [
       `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${machineKind(m)}, ${m.local ? "this host itself (the portal's own computer), no ssh" : m.noSsh ? 'no ssh (joined with -NoSsh: updated over its link, w4674)' : `ssh ${m.host}`}): ${this.machines.isOnline(m.id) ? (m.pause?.paused ? PAUSED_STATE : 'online') : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}${this.machines.isOnline(m.id) && m.pause?.paused ? ` (${pauseHold(m.pause, Date.now())}): nothing is placed, queued or planned here, and what waits here moves, as for an offline computer; only work pinned here waits, Blocked` : `; ${m.status}`}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
       `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${ghMachineLine(m.gh)}${githubFromVault(this.cfg, m.id) ? ' (runs for a person with a vault GitHub token use theirs instead: machines.githubFromVault)' : ''}; Steam: ${steamLabel(m.steam)}; screen: ${desktopLabel(m.desktop)}; ${pool ? 'workers in its sandboxes' : 'no workers (no sandbox_root)'}; up to ${agentCap(m)} agents in all, standing agents included; Claude account of its agents: ${MACHINE_ACCOUNT}`,
+      // w6603: where it differs from the other machines of its OS (warn only).
+      ...(this.baselineLine(m) ? [`  baseline (w6603, warn only): off its ${platformNoun(m.platform)} baseline: ${this.baselineLine(m)}`] : []),
       ...(this.runnerHoldLine(m) ? [`  CI runners (w5916): ${this.runnerHoldLine(m)}`] : []),
       ...(detail ? [`  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`] : []),
       // The portal hosts its daemon follows (w5576): online machines only.
@@ -8989,6 +8992,12 @@ ${w.repo ?? ''}
       ...(detail ? [`  last clean-up: ${m.lastCleanup ? describeCleanup(m.lastCleanup) : 'none reported yet'}`] : []),
       this.agentsPart(standing).replace(/^ {2}agents/, '  standing agents'),
     ].join('\n');
+  }
+
+  /** Where a machine differs from the other machines of its OS (w6603): tools, daemon feature keys and the portal's own settings. */
+  private baselineLine(m: Machine): string | undefined {
+    const all = this.machines.list().map((x) => ({ id: x.id, platform: x.platform, baseline: x.info?.baseline, portal: portalSettings(poolSettingsOf(x)) }));
+    return m.platform ? driftLine(m.id, baselineDrift(all).get(m.platform)) : undefined;
   }
 
   /** "  placement: reserved for urgent work only (placement.minPriority urgent) ..." for list_machines (w1643), or undefined. */

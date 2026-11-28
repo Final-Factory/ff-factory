@@ -635,6 +635,26 @@ Host lothdesktop
 `ssh_host: lothdesktop` (or the Add button in the sidebar) does the rest; `list_machines` shows the progress.
 
 
+## The machine baseline (w6603)
+
+Every machine of one OS should run the same tools and features; only sizing (agents, editors, sandboxes, disk and RAM
+thresholds) and its folders may differ. Each daemon reports, in its hello (probed at most once an hour):
+
+- `tools`: the versions of its own node, the agents' node (`tools/node` where installed), claude (its configured one, else
+  the Agent SDK's own binary the sessions start), git and bash (`tools/git` on Windows where installed), gh, python
+  (`FF_PYTHON`, else `python`/`python3`) and uv; `missing` or `failed (exit N)` when a tool does not answer.
+- `flags`: its daemon.json feature keys (`FEATURE_KEYS` in shared/machineBaseline.ts: the fences, locks, guards and
+  similar; sandboxCacheTrim only as `on`/`off`, its numbers being sizing), each as JSON with paths under its root written
+  `<root>`; `unset` when absent. Every other DaemonConfig key is listed in `NON_FEATURE_KEYS`, and a test fails on a new key
+  in neither list. The report is taken at each hello (a link that stays up keeps the one from its connect).
+
+list_machines compares each machine with every other machine of its OS that has a report (an offline one by its last
+report), adding the portal's own sandbox
+settings for it (Library seed set or not, editors below normal, slot repos, commit check), and prints
+`baseline (w6603, warn only): off its Windows PC baseline: <key> <its value> (<other value> on <machines>)`. A key only one
+machine reports is no drift. It changes and refuses nothing: the fix for a difference is the installer/updater or the
+portal setting, never a hand edit on one machine.
+
 ## The daemon's logs
 
 A machine daemon logs to `<app_dir>/logs/` on its machine: `<root>/daemon/logs` on a worker install (`F:\ffw\daemon\logs`

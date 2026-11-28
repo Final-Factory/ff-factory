@@ -74,6 +74,8 @@ import { fencedLoginFiles, legacyProjectsDirs, loginClaudeEnv, moveClaudeHome, w
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { copyTree, removeTree, run } from '../server/proc.ts';
+import { agentClaude, probeBaseline } from './baseline.ts';
+import type { MachineBaseline } from '../shared/machineBaseline.ts';
 import { workerCopier, type WorkerCopy } from './workerCopy.ts';
 import { probeReadFenceWin } from './readFenceWin.ts';
 import { ensureGitBashTmp, keepGitBashTmp } from '../server/gitBashTmp.ts';
@@ -2818,7 +2820,7 @@ export class Daemon {
   }
 
   /** The OS and claude version probes of the last hello (w970): a reconnect within an hour reuses them. */
-  private helloProbes?: { at: number; osv: { code: number; stdout: string }; claude: { code: number; stdout: string } };
+  private helloProbes?: { at: number; osv: { code: number; stdout: string }; claude: { code: number; stdout: string }; baseline?: MachineBaseline };
   /** Whether this computer offers the lab's fixtures, as last looked (w6486: offeredDir runs off the event loop). */
   private labFixturesOffered?: boolean;
   private labFixturesLooking?: Promise<boolean>;
@@ -2861,15 +2863,20 @@ export class Daemon {
     const fixtures = this.labFixturesLook();
     let probed = this.helloProbes;
     if (!probed || Date.now() - probed.at > HELLO_PROBE_TTL_MS) {
-      const [osv, claude] = await Promise.all([
+      // w6603: the claude its agents run (the SDK's own when none is configured), and the machine baseline beside it.
+      const [osv, claude, baseline] = await Promise.all([
         process.platform === 'darwin' ? run('sw_vers', ['-productVersion'], { timeoutMs: 5000 }) : Promise.resolve({ code: -1, stdout: '', stderr: '' }),
-        run(this.cfg.claude ?? 'claude', ['--version'], { timeoutMs: 15000 }),
+        run(agentClaude(this.cfg.claude), ['--version'], { timeoutMs: 15000 }),
+        probeBaseline({ run, cfg: this.cfg as unknown as Record<string, unknown>, root: this.cfg.root, home: HOME, claude: this.cfg.claude }).catch((e: Error) => {
+          log(`machine baseline (w6603): ${e.message}`);
+          return undefined;
+        }),
       ]);
       // A failed probe (claude missing or timed out) is tried again on the next hello.
-      this.helloProbes = claude.code === 0 ? { at: Date.now(), osv, claude } : undefined;
-      probed = { at: Date.now(), osv, claude };
+      this.helloProbes = claude.code === 0 ? { at: Date.now(), osv, claude, baseline } : undefined;
+      probed = { at: Date.now(), osv, claude, baseline };
     }
-    const { osv, claude } = probed!;
+    const { osv, claude, baseline } = probed!;
     const labFixtures = await fixtures;
     const selfUpdate = this.selfUpdate.offered();
     this.selfUpdateOffered = selfUpdate;
@@ -2924,6 +2931,8 @@ export class Daemon {
         claude: claude.code === 0 ? claude.stdout.trim().split(/\s+/)[0] : undefined,
         daemon: readVersion(),
         platform: machinePlatformOf(process.platform),
+        // w6603: its tools' versions and feature keys, for the portal's per-OS drift check.
+        ...(baseline ? { baseline } : {}),
       },
     });
     this.flush();
