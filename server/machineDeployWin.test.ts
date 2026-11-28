@@ -901,8 +901,9 @@ $null = [Console]::In.ReadLine()
 // w2038: the supervisor's rotation, run for real (the rest of retention: logRetention.test.ts).
 test('logs: the real supervisor block, run by PowerShell over many restarts, keeps every run', { skip: process.platform !== 'win32' && 'PowerShell runs the Windows supervisor' }, () => {
   const s = win.supervisorScript('C:\\nodejs\\node.exe', false);
-  const block = /  # Each run's output is kept[\s\S]*?\n  \}\n(?=  \$started)/.exec(s)?.[0];
-  assert.ok(block, 'the rotation block of supervisorScript');
+  const fn = /function Rotate-Out\(\$base\) \{[\s\S]*?\n\}\n/.exec(s)?.[0];
+  assert.ok(fn, 'Rotate-Out in supervisorScript (w6784)');
+  const block = `${fn}$null = Rotate-Out 'daemon'\n$null = Rotate-Out 'daemon.err'\n`;
   const dir = tmpDir('fflogs-');
   // The same second twice (a fast crash loop) must not overwrite either.
   const script = `$logs = $env:FFLOGS\n${block}`;

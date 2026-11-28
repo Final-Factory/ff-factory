@@ -12,8 +12,9 @@ import { tmpDir } from './testTmp.ts';
 // w6784, stage 2: the whole supervisor (run-daemon.ps1) run by real PowerShell (Windows PowerShell 5.1 on Windows, pwsh on
 // macOS and Linux) against a fake daemon whose every run does what plan.txt says: `stuck` writes its ending marker and never
 // exits, `live` runs until it is ended, `yield` exits 75 at once (DAEMON_YIELD_EXIT), which ends the supervisor and the test.
-// A process stuck mid-exit cannot be made on purpose, so a stuck run's kill is a no-op Stop-Process (a PowerShell function
-// wins over the cmdlet); on Windows that run then really holds daemon.log, as BEAST's pid 16100 did.
+// A process stuck mid-exit cannot be made on purpose, so a stuck run's kill is a no-op (the supervisor's Stop-Held, which
+// ends the daemon through its held handle, made empty); on Windows that run then really holds daemon.log, as BEAST's pid
+// 16100 did.
 
 const FAKE_DAEMON = `const fs = process.getBuiltinModule('node:fs');
 const path = process.getBuiltinModule('node:path');
@@ -72,7 +73,9 @@ function rig(t: { after: (fn: () => void) => void }, plan: string): Rig {
     log: () => (fs.existsSync(path.join(dir, 'logs', 'supervisor.log')) ? fs.readFileSync(path.join(dir, 'logs', 'supervisor.log'), 'utf8') : ''),
     run: ({ noKill } = {}) => {
       const script = path.join(dir, 'run-daemon.ps1');
-      fs.writeFileSync(script, (noKill ? 'function Stop-Process { param($Id, [switch]$Force, $ErrorAction) }\n' : '') + s);
+      const held = 'function Stop-Held($p) { $p.Kill() }';
+      assert.ok(s.includes(held), 'the supervisor ends its daemon through Stop-Held');
+      fs.writeFileSync(script, noKill ? s.replace(held, 'function Stop-Held($p) { }') : s);
       const t0 = Date.now();
       return new Promise((resolve) => {
         execFile(powershell!, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script], { timeout: 60_000 }, (e) => resolve({ code: e ? ((e as { code?: number }).code ?? null) : 0, took: Date.now() - t0 }));
@@ -177,4 +180,36 @@ test('windows (real PowerShell): a held daemon.log gets daemon.held1.log, and th
   const archives = fs.readdirSync(logs).filter((f) => /^daemon\.log\.\d{8}T\d{9}Z(-\d+)?$/.test(f));
   assert.equal(archives.length, 2, fs.readdirSync(logs).join(', '));
   assert.deepEqual(archives.map((f) => fs.readFileSync(path.join(logs, f), 'utf8').trim()).sort(), ['fresh run', 'old run']);
+});
+
+test('windows (real PowerShell): a restart request older than the asker waits is dropped, a fresh one taken once (w6790)', { skip }, async (t) => {
+  const dir = tmpDir('ffsup-req-', t as never);
+  const logs = path.join(dir, 'logs');
+  fs.mkdirSync(logs);
+  const req = path.join(logs, win.SUPERVISOR_REQUEST);
+  const s = win.supervisorScript(process.execPath, false);
+  const fn = /function Take-Request \{[\s\S]*?\n\}\n/.exec(s)?.[0];
+  assert.ok(fn, 'Take-Request in supervisorScript');
+  const script = [
+    '$logs = $env:FFLOGS',
+    `$request = Join-Path $logs '${win.SUPERVISOR_REQUEST}'`,
+    '$log = Join-Path $logs "supervisor.log"',
+    'function Say($line) { $line | Out-File $log -Append -Encoding utf8 }',
+    fn,
+    '"old=" + [string](Take-Request)',
+    `Set-Content -LiteralPath $request -Value '{"why":"fresh ask"}'`,
+    '"fresh=" + [string](Take-Request)',
+    '"again=" + [string](Take-Request)',
+  ].join('\n');
+  fs.writeFileSync(req, JSON.stringify({ why: 'left behind' }));
+  const old = new Date(Date.now() - (win.SUPERVISOR_ANSWER_S + 30) * 1000);
+  fs.utimesSync(req, old, old);
+  const out = await new Promise<string>((resolve, reject) =>
+    execFile(powershell!, ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, FFLOGS: logs } }, (e, o, err) => (e ? reject(new Error(`${e.message}\n${o}\n${err}`)) : resolve(o))),
+  );
+  assert.match(out, /^old=\s*$/m, out);
+  assert.match(out, /^fresh=fresh ask\s*$/m, out);
+  assert.match(out, /^again=\s*$/m, out);
+  assert.ok(!fs.existsSync(req));
+  assert.match(fs.readFileSync(path.join(logs, 'supervisor.log'), 'utf8'), /dropped a restart request \d+ s old/);
 });

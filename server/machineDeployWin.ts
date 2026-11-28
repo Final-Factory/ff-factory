@@ -505,11 +505,15 @@ $abandoned = New-Object System.Collections.Generic.List[int]
 function Say($line) { "$(Get-Date -Format s) $line" | Out-File $log -Append -Encoding utf8 }
 function Beat($daemonPid) {
   $alive = @($abandoned | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
-  try { [pscustomobject]@{ pid = $PID; daemonPid = $daemonPid; abandoned = $alive; at = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress | Set-Content -LiteralPath $state -Encoding utf8 } catch { }
+  try { [pscustomobject]@{ pid = $PID; daemonPid = $daemonPid; abandoned = $alive; at = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress | Set-Content -LiteralPath "$state.tmp" -Encoding utf8; Move-Item -LiteralPath "$state.tmp" -Destination $state -Force } catch { }
 }
 # A restart asked over ssh (controlScript): its why, once; the file is taken away so each ask acts once.
 function Take-Request {
   if (-not (Test-Path -LiteralPath $request)) { return $null }
+  # One older than the asker's wait (an ask whose asker died before it could take it back, w6790) is dropped, never acted on.
+  $age = 0
+  try { $age = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $request).LastWriteTimeUtc).TotalSeconds } catch { }
+  if ($age -gt ${SUPERVISOR_ANSWER_S}) { Remove-Item -LiteralPath $request -Force -ErrorAction SilentlyContinue; Say "dropped a restart request $([int]$age) s old: its asker gave up on it (w6784)"; return $null }
   $why = 'no reason given'
   try { $why = [string](Get-Content -LiteralPath $request -Raw -ErrorAction Stop | ConvertFrom-Json).why } catch { }
   Remove-Item -LiteralPath $request -Force -ErrorAction SilentlyContinue
@@ -535,9 +539,12 @@ function Rotate-Out($base) {
   $name
 }
 # Ends the daemon and checks it went (w6785's review: the supervisor, not the daemon, owns the kill and its check). Answers
-# whether it is gone.
+# whether it is gone. It ends it through the handle this supervisor holds from Start-Process (Process.Kill uses it), which has
+# every access right, so a live daemon cannot refuse it (w6790: a refused Stop-Process must never leave a healthy daemon behind
+# a fresh one); TerminateProcess on that handle fails only for a process already ending, which is the stuck case.
+function Stop-Held($p) { $p.Kill() }
 function End-Daemon($p) {
-  try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { Say "could not end the daemon, pid $($p.Id): $($_.Exception.Message)" }
+  try { Stop-Held $p } catch { Say "ending the daemon, pid $($p.Id), answered: $($_.Exception.Message) (it is already ending)" }
   $p.WaitForExit(15000)
 }
 while ($true) {

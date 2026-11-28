@@ -83,7 +83,8 @@ so starting nothing, about 15 WMI and perf-counter PowerShells hung beside it, a
   still there to say it.
 - `run-daemon.ps1` removes that file before each start and waits for the daemon in 5 s steps instead of one unbounded
   `WaitForExit()`. When the file names the running pid and is `SUPERVISOR_STUCK_AFTER_S` (120) s old, the supervisor ends
-  the daemon again itself (Stop-Process, then 15 s to go: the supervisor owns the kill and its check), and if it is still there
+  the daemon again itself (through the process handle it holds from starting it, which a live daemon cannot refuse, then 15 s
+  to go: the supervisor owns the kill and its check), and if it is still there
   writes `the daemon, pid N, is still there: it is stuck mid-exit; left behind, a fresh one starts beside it (w6784)` and
   starts a fresh daemon 10 s later. A left-behind pid is listed in `logs\supervisor.json` (`abandoned`) while it is there.
   Off switch, no reinstall: a file `supervisor-warn-only` in the daemon's folder; then it only logs `... it is stuck mid-exit;
@@ -110,6 +111,8 @@ so starting nothing, about 15 WMI and perf-counter PowerShells hung beside it, a
   later: that process is stuck in the kernel and runs no code, so it cannot answer beside the next daemon (the w1918 refusal
   stays for one that refused Stop-Process). It is named in the answer: `pid(s) N took Stop-Process and are still there, stuck
   mid-exit (they run no code); left behind`.
+  Not yet known (w6790): whether Windows answers that Stop-Process on a process already ending with access denied, which
+  would file BEAST's kind of stuck pid as refused on this route; the supervisor's route (above) does not depend on it.
 - A fresh daemon beside a stuck one would not yield to it: the newer-twin handshake (`machine/unitySlots.ts`, w1918) yields
   only to a twin with a later start whose `arbiter.json` is fresh (`ARBITER_FRESH_MS`), and a stuck process writes nothing;
   daemonRpc and the live port listen on port 0 (OS-picked), so nothing to bind twice.
