@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FIXED_GIT_CONFIG, HOOKS, fenceArgs, gitExecFileSync, gitFenceSync, isGit, needsScan, parseScan, scannedOverrides, splitGlobal, withConfigFirst } from './safeGit.ts';
+import { FIXED_GIT_CONFIG, HOOKS, fenceArgs, firstWinsArgs, firstWinsWarning, gitExecFileSync, gitFenceSync, gitSpawnSync, isGit, needsScan, parseScan, scannedOverrides, splitGlobal, withConfigFirst } from './safeGit.ts';
 import { readGitStatus } from './gitStatus.ts';
 import { run } from './proc.ts';
 
@@ -205,12 +205,73 @@ test('w5541: a repository-set program key takes the user’s value back, else a 
     ['filter.lfs.clean', 'git-lfs clean -- %f'],
     ['filter.lfs.smudge', 'git-lfs smudge -- %f'],
     ['filter.x.clean', ''],
-    ['remote.origin.uploadpack', 'git-upload-pack'],
     ['credential.helper', ''],
     ['credential.helper', 'osxkeychain'],
     ['credential.https://github.com.helper', '!gh auth git-credential'],
   ]);
   assert.deepEqual(scannedOverrides(parseScan('global\0filter.lfs.clean\nx\0')), [], 'nothing a repository set, nothing to override');
+});
+
+test('w6570: a repository-set upload or receive program goes to the transport as an option; another transport is refused again', () => {
+  const rows = parseScan(
+    [
+      ['local', 'remote.origin.uploadpack\n/evil'],
+      ['local', 'remote.origin.receivepack\n/evil'],
+      ['global', 'remote.origin.receivepack\n/usr/bin/git-receive-pack'],
+      ['local', 'protocol.ext.allow\nalways'],
+      ['local', 'protocol.https.allow\nnever'],
+      ['local', 'core.gitproxy\n/evil'],
+    ]
+      .map(([s, kv]) => `${s}\0${kv}\0`)
+      .join(''),
+  );
+  // git keeps the first value of these, so no override by value is passed for them; the protocol allow gets one.
+  assert.deepEqual(scannedOverrides(rows), [['protocol.ext.allow', 'never']]);
+  assert.deepEqual(firstWinsArgs(['-C', 'd', 'fetch', 'origin'], rows), ['-C', 'd', 'fetch', '--upload-pack=git-upload-pack', 'origin']);
+  assert.deepEqual(firstWinsArgs(['pull', '--ff-only'], rows), ['pull', '--upload-pack=git-upload-pack', '--ff-only']);
+  assert.deepEqual(firstWinsArgs(['ls-remote', 'origin'], rows), ['ls-remote', '--upload-pack=git-upload-pack', 'origin']);
+  assert.deepEqual(firstWinsArgs(['push', 'origin', 'x'], rows), ['push', '--receive-pack=/usr/bin/git-receive-pack', 'origin', 'x'], 'the user’s own value');
+  assert.deepEqual(firstWinsArgs(['status'], rows), ['status']);
+  assert.deepEqual(firstWinsArgs(['fetch', 'origin'], parseScan('global\0remote.origin.uploadpack\nx\0')), ['fetch', 'origin'], 'nothing a repository set');
+  // Warn-only (lothsahn's lockout rule): the calls no option covers say what enforcing will do.
+  const up = rows.filter((r) => r.key === 'remote.origin.uploadpack');
+  const rp = rows.filter((r) => r.key.endsWith('receivepack'));
+  for (const a of [['fetch', 'origin'], ['pull'], ['ls-remote', 'origin']]) assert.equal(firstWinsWarning(a, up), undefined, a.join(' '));
+  assert.equal(firstWinsWarning(['push', 'origin', 'x'], rp), undefined, 'push passes --receive-pack');
+  for (const a of [['push', 'origin', 'x'], ['remote', 'update'], ['-C', 'd', 'lfs', 'push', 'origin'], ['submodule', 'update']])
+    assert.match(firstWinsWarning(a, up) ?? '', /remote\.origin\.uploadpack.*will be refused.*--unset-all remote\.origin\.uploadpack/, a.join(' '));
+  assert.match(firstWinsWarning(['status'], up) ?? '', /lazy fetch off/);
+  // A fetch or pull of several remotes starts a child `git fetch` per remote, which never gets the option (review of PR #1523).
+  const group = [...up, ...parseScan('local\0remotes.origin\nb c\0local\0remotes.both\nb c\0')];
+  const all = [...up, ...parseScan('global\0fetch.all\ntrue\0')];
+  for (const [a, r] of [
+    [['fetch', '--all'], up],
+    [['fetch', '--multiple', 'b', 'c'], up],
+    [['fetch', '--prune', 'both'], group],
+    [['fetch', '--prune', 'origin'], group],
+    [['pull', 'origin', 'master'], group],
+    [['pull', '--all'], up],
+    [['fetch'], all],
+    [['fetch', '--prune'], all],
+  ] as [string[], typeof up][])
+    assert.match(firstWinsWarning(a, r) ?? '', /will be refused/, a.join(' '));
+  for (const [a, r] of [
+    [['fetch', '--prune', 'origin'], all],
+    [['fetch', '--no-all'], all],
+    [['fetch', '--depth', '1', 'b'], group],
+    [['-C', 'd', 'fetch', '--quiet', 'origin', 'master'], up],
+  ] as [string[], typeof up][])
+    assert.equal(firstWinsWarning(a, r), undefined, a.join(' '));
+  // Calls that start no upload program (measured by the review): only the lazy-fetch note, never a refusal.
+  for (const a of [['remote', '-v'], ['remote', 'get-url', 'origin'], ['lfs', 'env'], ['clone', 'x', 'y'], ['archive', '--remote', 'origin', 'HEAD']])
+    assert.match(firstWinsWarning(a, up) ?? '', /lazy fetch off/, a.join(' '));
+  for (const a of [['remote', 'show', 'origin'], ['remote', 'prune', 'origin'], ['remote', 'set-head', 'origin', '--auto'], ['remote', 'add', '-f', 'x', 'u'], ['lfs', 'fetch']])
+    assert.match(firstWinsWarning(a, up) ?? '', /will be refused/, a.join(' '));
+  assert.deepEqual(scannedOverrides(group), [], 'a remote group is read, never overridden');
+  assert.deepEqual(scannedOverrides(parseScan('local\0fetch.all\ntrue\0')), [], 'fetch.all is read, never overridden');
+  assert.match(firstWinsWarning(['fetch', 'origin'], rows.filter((r) => r.key === 'core.gitproxy')) ?? '', /core\.gitproxy.*will be refused/);
+  assert.equal(firstWinsWarning(['status'], rows.filter((r) => r.key === 'core.gitproxy')), undefined);
+  assert.equal(firstWinsWarning(['push', 'origin'], []), undefined);
 });
 
 test('w5541: the subcommand is found past the global options; diff, log and show get no external diff or textconv', () => {
@@ -450,6 +511,101 @@ test('w5573: a repository-set url.insteadOf refuses the daemon’s push and fetc
     git(main, 'config', '--unset', `url.${slash(theirs)}.insteadOf`);
     const ok = await run('git', ['-C', wt, 'push', 'origin', 'sandbox/x']);
     assert.equal(ok.code, 0, ok.stderr);
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('w6570: a clone’s planted uploadpack and receivepack run on plain git, never through the fence', { skip }, async () => {
+  const f = fixture();
+  try {
+    const { main } = worktree(f);
+    const bare = path.join(f.root, 'bare.git');
+    git(f.root, 'clone', '-q', '--bare', '--no-local', slash(main), bare);
+    const victim = path.join(f.root, 'victim');
+    git(f.root, 'clone', '-q', '--no-local', slash(bare), victim);
+    // Logs and exits without speaking the protocol (the fixture's evil.sh reads stdin, which git never closes here).
+    const pack = slash(path.join(f.root, 'pack.sh'));
+    fs.writeFileSync(pack, `#!/bin/sh\necho "pack $*" >> '${f.marker}'\nexit 1\n`, { mode: 0o755 });
+    git(victim, 'config', 'remote.origin.uploadpack', pack);
+    git(victim, 'config', 'remote.origin.receivepack', pack);
+    git(victim, 'commit', '-q', '--allow-empty', '-m', 'v');
+
+    // Control: plain git runs both, and the fence's old override by value (`-c`, read last) does not stop it: git keeps the first.
+    spawnSync('git', ['-C', victim, '-c', 'remote.origin.uploadpack=git-upload-pack', 'fetch', 'origin'], { encoding: 'utf8', timeout: 30_000 });
+    assert.match(f.ran(), /pack /, 'plain git fetch ran the planted uploadpack');
+    fs.rmSync(f.marker, { force: true });
+    spawnSync('git', ['-C', victim, '-c', 'remote.origin.receivepack=git-receive-pack', 'push', 'origin', 'HEAD:refs/heads/v0'], { encoding: 'utf8', timeout: 30_000 });
+    assert.match(f.ran(), /pack /, 'plain git push ran the planted receivepack');
+    fs.rmSync(f.marker, { force: true });
+
+    // The fence: the sync wrapper and run() (server/proc.ts) fetch, list, pull and push, and each works.
+    // Each warning prints once per process, so the capture starts here, before the first fenced call.
+    const warns: string[] = [];
+    const warn = console.warn;
+    console.warn = (m: string) => void warns.push(String(m));
+    const fetch = gitSpawnSync(['fetch', 'origin'], { cwd: victim, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(fetch.status, 0, fetch.stderr);
+    const fetchAll = await run('git', ['-C', victim, 'fetch', '--all']);
+    assert.equal(fetchAll.code, 0, fetchAll.stderr);
+    const ls = await run('git', ['-C', victim, 'ls-remote', 'origin']);
+    assert.equal(ls.code, 0, ls.stderr);
+    const pull = await run('git', ['-C', victim, '-c', 'user.name=t', '-c', 'user.email=t@users.noreply.github.com', 'pull', '-q', '--no-rebase', 'origin', 'master']);
+    assert.equal(pull.code, 0, pull.stderr);
+    assert.equal(f.ran(), '', 'no planted program ran on a fenced fetch, ls-remote or pull');
+    // Review of PR #1523: with two remotes and a group named origin, `fetch origin` and `fetch --all` start a child fetch per
+    // remote, which never gets the option. The scan reads the group, and the fence warns that the enforcing step refuses it.
+    for (const r of ['b', 'c']) {
+      git(victim, 'remote', 'add', r, slash(bare));
+      git(victim, 'config', `remote.${r}.uploadpack`, pack);
+    }
+    git(victim, 'config', 'remotes.origin', 'b c');
+    try {
+      gitSpawnSync(['fetch', '--prune', 'origin'], { cwd: victim, encoding: 'utf8', timeout: 30_000 });
+      await run('git', ['-C', victim, 'pull', '--all', '--ff-only']);
+      gitSpawnSync(['remote', '-v'], { cwd: victim, encoding: 'utf8', timeout: 30_000 });
+    } finally {
+      console.warn = warn;
+    }
+    assert.match(warns.join('\n'), /uploadpack.*`git fetch`; this call will be refused/);
+    assert.match(warns.join('\n'), /uploadpack.*`git pull`; this call will be refused/);
+    assert.doesNotMatch(warns.join('\n'), /`git remote`; this call will be refused/, 'remote -v starts no program');
+    assert.match(f.ran(), /pack /, 'the group fetch still runs it until the enforcing step (why it warns)');
+    fs.rmSync(f.marker, { force: true });
+    git(victim, 'config', '--unset', 'remotes.origin');
+    git(victim, 'remote', 'remove', 'b');
+    git(victim, 'remote', 'remove', 'c');
+    // A push passes --receive-pack, but git-lfs's pre-push hook runs `git ls-remote origin`, which starts a planted uploadpack
+    // (measured): with only receivepack planted the push runs nothing of the worker's; with uploadpack planted too it is the
+    // call the enforcing step refuses (firstWinsWarning says so until then).
+    git(victim, 'config', '--unset', 'remote.origin.uploadpack');
+    const push = gitSpawnSync(['push', 'origin', 'HEAD:refs/heads/v1'], { cwd: victim, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(push.status, 0, push.stderr);
+    assert.equal(git(f.root, '--git-dir', bare, 'rev-parse', 'refs/heads/v1').trim(), git(victim, 'rev-parse', 'HEAD').trim());
+    const push2 = await run('git', ['-C', victim, 'push', 'origin', 'HEAD:refs/heads/v2']);
+    assert.equal(push2.code, 0, push2.stderr);
+    assert.equal(f.ran(), '', 'no planted program ran through the fence');
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('w6570: a repository-set protocol.ext.allow runs an ext:: command on plain git, never through the fence', { skip }, async () => {
+  const f = fixture();
+  try {
+    const me = path.join(f.root, 'me');
+    git(f.root, 'init', '-q', me);
+    const cmd = slash(path.join(f.root, 'ext.sh'));
+    fs.writeFileSync(cmd, `#!/bin/sh\necho "ext $*" >> '${f.marker}'\nexit 1\n`, { mode: 0o755 });
+    git(me, 'config', 'protocol.ext.allow', 'always');
+    git(me, 'remote', 'add', 'x', `ext::sh ${cmd}`);
+    spawnSync('git', ['-C', me, 'fetch', 'x'], { encoding: 'utf8', timeout: 30_000 });
+    assert.match(f.ran(), /ext /, 'plain git ran the ext:: command');
+    fs.rmSync(f.marker, { force: true });
+    const r = await run('git', ['-C', me, 'fetch', 'x']);
+    assert.notEqual(r.code, 0);
+    assert.match(r.stderr, /transport 'ext' not allowed/);
+    assert.equal(f.ran(), '', 'the fence ran no ext:: command');
   } finally {
     fs.rmSync(f.root, { recursive: true, force: true });
   }
