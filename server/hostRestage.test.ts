@@ -52,16 +52,18 @@ function rig(id: string, mode: RestageMode | undefined) {
   };
   const s = new HostedSession(info(id), 0, deps);
   const f = hostFiles(path.join(root, id));
-  const commands = () => (fs.existsSync(f.in) ? fs.readFileSync(f.in, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { op: string; text?: string; n: number }) : []);
+  const commandsNow = () => (fs.existsSync(f.in) ? fs.readFileSync(f.in, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { op: string; text?: string; n: number }) : []);
+  /** w6695: commands go to in.jsonl off the loop: read once those given so far are there. */
+  const commands = async () => (await s.flushed(), commandsNow());
   const hostSays = (m: object) => fs.appendFileSync(f.out, JSON.stringify(m) + '\n');
   /** The daemon restarted with sharedLock warn: what its runs get from now on. */
   const switchToWarn = () => (lock = { ...WARN });
-  return { root, s, f, launched, logs, commands, hostSays, switchToWarn };
+  return { root, s, f, launched, logs, commands, commandsNow, hostSays, switchToWarn };
 }
 
 /** The host's agent reports a state, as its host's out.jsonl line does; the daemon's poll reads it. */
 const say = async (r: ReturnType<typeof rig>, status: SessionInfo['status'], live: boolean, id: string, backgroundTasks?: number) => {
-  const before = r.commands().length;
+  const before = (await r.commands()).length;
   r.hostSays({ op: 'state', info: { ...info(id, status), ...(backgroundTasks ? { backgroundTasks } : {}) }, live, lastFrom: 'system' });
   await until(`the session reads ${status}`, () => r.s.info.status === status && r.s.live === live && (r.s.info.backgroundTasks ?? 0) === (backgroundTasks ?? 0));
   // The same status as before reads at once: a few of the daemon's polls (100 ms) so this line is read too.
@@ -90,22 +92,22 @@ test('w6287: hostRestage on: after a switch an idle agent is restaged, never mid
   assert.equal(r.launched[0].spec.env?.FF_PLAYER_BROKER, undefined);
   // The same mode: its turns end and nothing is restaged.
   await say(r, 'idle', true, 'h1');
-  assert.deepEqual(r.commands().map((c) => c.op), ['send']);
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['send']);
   // The switch lands mid-turn (95c5d71d was running): nothing is sent while the turn runs.
   await say(r, 'running', true, 'h1');
   r.switchToWarn();
   await say(r, 'running', true, 'h1');
-  assert.deepEqual(r.commands().map((c) => c.op), ['send'], 'never a restage mid-turn');
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['send'], 'never a restage mid-turn');
   // Its turn ends: the host is told to restage, once.
   await say(r, 'idle', true, 'h1');
-  assert.deepEqual(r.commands().map((c) => c.op), ['send', 'restage']);
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['send', 'restage']);
   await say(r, 'idle', true, 'h1');
-  assert.deepEqual(r.commands().map((c) => c.op), ['send', 'restage'], 'asked once per idle stretch');
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['send', 'restage'], 'asked once per idle stretch');
   assert.ok(r.logs.some((l) => /h1: .*another shared-lock environment.*ends now/.test(l)), r.logs.join('\n'));
   // The host stopped the agent and closed; the next message starts a new host on the warn environment.
   await say(r, 'stopped', false, 'h1');
   r.hostSays({ op: 'closed', consumed: 2 });
-  await until('the old host is gone', () => !r.s.live && r.commands().length === 0);
+  await until('the old host is gone', () => !r.s.live && r.commandsNow().length === 0);
   r.s.send('next turn', 'system');
   await until('a new host started', () => r.launched.length === 2);
   const env = r.launched[1].spec.env ?? {};
@@ -116,7 +118,7 @@ test('w6287: hostRestage on: after a switch an idle agent is restaged, never mid
   assert.equal(fs.readFileSync(r.f.lockEnv, 'utf8'), lockEnvOf(WARN));
   // On the new mode it is left alone.
   await say(r, 'idle', true, 'h1');
-  assert.deepEqual(r.commands().map((c) => c.op), ['send']);
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['send']);
 });
 
 test('w6287: a restage the host skipped (a turn had started) is asked again at the next turn end', { timeout: 30_000 }, async (t) => {
@@ -126,11 +128,11 @@ test('w6287: a restage the host skipped (a turn had started) is asked again at t
   await say(r, 'idle', true, 'h2');
   r.switchToWarn();
   await say(r, 'idle', true, 'h2');
-  assert.deepEqual(r.commands().map((c) => c.op), ['send', 'restage']);
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['send', 'restage']);
   // A message the host read before the restage started a turn: the host skipped it.
   await say(r, 'running', true, 'h2');
   await say(r, 'idle', true, 'h2');
-  assert.deepEqual(r.commands().map((c) => c.op), ['send', 'restage', 'restage']);
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['send', 'restage', 'restage']);
 });
 
 test('w6439: hostRestage on: an idle agent with a background task is not restaged until its task ends, then once', { timeout: 30_000 }, async (t) => {
@@ -142,12 +144,12 @@ test('w6439: hostRestage on: an idle agent with a background task is not restage
   r.switchToWarn();
   await say(r, 'idle', true, 'h5', 1);
   await say(r, 'idle', true, 'h5', 1);
-  assert.deepEqual(r.commands().map((c) => c.op), ['send'], 'never a restage while a background task runs');
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['send'], 'never a restage while a background task runs');
   // Its task ends: the host is told to restage, once.
   await say(r, 'idle', true, 'h5');
-  assert.deepEqual(r.commands().map((c) => c.op), ['send', 'restage']);
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['send', 'restage']);
   await say(r, 'idle', true, 'h5');
-  assert.deepEqual(r.commands().map((c) => c.op), ['send', 'restage'], 'asked once');
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['send', 'restage'], 'asked once');
 });
 
 /** w6445: a host the daemon before this one started on the old environment (a process stands in for it), idle, taken back after the switch. */
@@ -170,16 +172,16 @@ function adoptIdle(t: { after: (fn: () => void) => void }, id: string, backgroun
 
 test('w6445: hostRestage on: an idle host taken back at the daemon restart after a switch is restaged at once, once', { timeout: 30_000 }, async (t) => {
   const r = adoptIdle(t, 'h6');
-  assert.deepEqual(r.commands().map((c) => c.op), ['attach', 'restage']);
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['attach', 'restage']);
   await say(r, 'idle', true, 'h6');
-  assert.deepEqual(r.commands().map((c) => c.op), ['attach', 'restage'], 'asked once');
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['attach', 'restage'], 'asked once');
 });
 
 test('w6445: an idle host taken back with a background task is not restaged until its task ends', { timeout: 30_000 }, async (t) => {
   const r = adoptIdle(t, 'h7', 1);
-  assert.deepEqual(r.commands().map((c) => c.op), ['attach'], 'never a restage while a background task runs');
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['attach'], 'never a restage while a background task runs');
   await say(r, 'idle', true, 'h7');
-  assert.deepEqual(r.commands().map((c) => c.op), ['attach', 'restage']);
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['attach', 'restage']);
 });
 
 test('w6287: hostRestage warn (the default) only logs an agent on the old environment, once, and never stops it', { timeout: 30_000 }, async (t) => {
@@ -190,7 +192,7 @@ test('w6287: hostRestage warn (the default) only logs an agent on the old enviro
   await say(r, 'idle', true, 'h3');
   await say(r, 'running', true, 'h3');
   await say(r, 'idle', true, 'h3');
-  assert.deepEqual(r.commands().map((c) => c.op), ['send']);
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['send']);
   const lines = r.logs.filter((l) => /h3: .*hostRestage warn/.test(l));
   assert.equal(lines.length, 1, `one line per host, never a stop:\n${r.logs.join('\n')}`);
 });
@@ -202,5 +204,5 @@ test('w6287: a host from before w6287 (no lockenv.sha) is left alone', { timeout
   fs.rmSync(r.f.lockEnv);
   r.switchToWarn();
   await say(r, 'idle', true, 'h4');
-  assert.deepEqual(r.commands().map((c) => c.op), ['send']);
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['send']);
 });

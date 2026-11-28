@@ -48,10 +48,12 @@ function rig(id: string, t: { after: (fn: () => void) => void }) {
   };
   const s = new HostedSession(info(id), 0, deps);
   const f = hostFiles(path.join(root, id));
-  const commands = () => (fs.existsSync(f.in) ? fs.readFileSync(f.in, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { op: string; text?: string; n: number }) : []);
+  const commandsNow = () => (fs.existsSync(f.in) ? fs.readFileSync(f.in, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { op: string; text?: string; n: number }) : []);
+  /** w6695: commands go to in.jsonl off the loop: read once those given so far are there. */
+  const commands = async () => (await s.flushed(), commandsNow());
   /** The host writes a line, as the real one does to out.jsonl. */
   const hostSays = (m: object) => fs.appendFileSync(f.out, JSON.stringify(m) + '\n');
-  return { root, s, f, launched, commands, hostSays, setToken: (t: string) => (env = { ...env, CLAUDE_CODE_OAUTH_TOKEN: t }) };
+  return { root, s, f, launched, commands, commandsNow, hostSays, setToken: (t: string) => (env = { ...env, CLAUDE_CODE_OAUTH_TOKEN: t }) };
 }
 
 test('w1745: a message for another token while the host is closing starts a new host on that token, never the agent again in the old one', { timeout: 30_000 }, async (t) => {
@@ -67,17 +69,17 @@ test('w1745: a message for another token while the host is closing starts a new 
   // The portal built the next run on a token with room: that message must not reach the old host.
   r.setToken(TOKEN_ROOM);
   r.s.send('resumed on a token with room', 'system');
-  const after = r.commands();
+  const after = (await r.commands());
   assert.deepEqual(after.map((c) => c.op), ['send', 'stop'], 'the old host gets a stop, not the message');
   assert.equal(r.launched.length, 1, 'no new host while the old one still runs');
   // A second message meanwhile waits behind the first, in order.
   r.s.send('and another', 'system');
-  assert.deepEqual(r.commands().map((c) => c.op), ['send', 'stop']);
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['send', 'stop']);
   // The old host closes (it carried out the first turn and the stop): a new host starts on the new token with both messages.
   r.hostSays({ op: 'closed', consumed: 2 });
   await until('a new host started', () => r.launched.length === 2);
   assert.equal(r.launched[1].spec.env?.CLAUDE_CODE_OAUTH_TOKEN, TOKEN_ROOM);
-  assert.deepEqual(r.commands().filter((c) => c.op === 'send').map((c) => c.text), ['resumed on a token with room', 'and another']);
+  assert.deepEqual((await r.commands()).filter((c) => c.op === 'send').map((c) => c.text), ['resumed on a token with room', 'and another']);
   assert.equal(fs.readFileSync(r.f.creds, 'utf8'), credsOf({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN_ROOM, GH_TOKEN: 'fake-gh-token' }));
 });
 
@@ -87,7 +89,7 @@ test('w1745: the same token keeps today\'s path: a message while the host closes
   r.hostSays({ op: 'state', info: { ...info('m2'), status: 'idle' }, live: false, lastFrom: 'system' });
   await until('the session reads not live', () => !r.s.live);
   r.s.send('next turn', 'system');
-  assert.deepEqual(r.commands().map((c) => c.op), ['send', 'send']);
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['send', 'send']);
   assert.equal(r.launched.length, 1);
 });
 
@@ -106,12 +108,12 @@ test('w1745: a host an older daemon started (no creds.sha), taken back across th
   assert.equal(r.s.live, false, 'its agent has ended (the portal stopped it to move it)');
   r.setToken(TOKEN_ROOM);
   r.s.send('resumed on a token with room', 'system');
-  assert.deepEqual(r.commands().map((c) => c.op), ['attach', 'stop'], 'the old host gets a stop, not the message');
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['attach', 'stop'], 'the old host gets a stop, not the message');
   assert.equal(r.launched.length, 0);
-  r.hostSays({ op: 'closed', consumed: r.commands().length });
+  r.hostSays({ op: 'closed', consumed: (await r.commands()).length });
   await until('a new host started', () => r.launched.length === 1);
   assert.equal(r.launched[0].spec.env?.CLAUDE_CODE_OAUTH_TOKEN, TOKEN_ROOM);
-  assert.deepEqual(r.commands().filter((c) => c.op === 'send').map((c) => c.text), ['resumed on a token with room']);
+  assert.deepEqual((await r.commands()).filter((c) => c.op === 'send').map((c) => c.text), ['resumed on a token with room']);
 });
 
 test('w1745: a message the old host did not carry out goes to the new host ahead of one sent after the stop',{ timeout: 30_000 }, async (t) => {
@@ -127,5 +129,5 @@ test('w1745: a message the old host did not carry out goes to the new host ahead
   r.hostSays({ op: 'closed', consumed: 1 });
   await until('a new host started', () => r.launched.length === 2);
   assert.equal(r.launched[1].spec.env?.CLAUDE_CODE_OAUTH_TOKEN, TOKEN_ROOM);
-  assert.deepEqual(r.commands().filter((c) => c.op === 'send').map((c) => c.text), ['sent before the move', 'sent after the move']);
+  assert.deepEqual((await r.commands()).filter((c) => c.op === 'send').map((c) => c.text), ['sent before the move', 'sent after the move']);
 });

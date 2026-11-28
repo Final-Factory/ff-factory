@@ -646,6 +646,8 @@ const LIVE_LINE_MERGE_MS = 5000;
 const STATS_MS = 15_000;
 /** w6595: how old a session's cached host start (hostSinceCached) may be before it is read again, off the loop. */
 const HOST_SINCE_MS = 20_000;
+/** w6695: how long an exiting daemon waits for agent host commands still being appended (w6703; BEAST measured 59 s appends). */
+const HOST_COMMANDS_EXIT_CAP_MS = 30_000;
 /** w5615: how often the clone keeper looks for a sandbox whose caches to make, merge back or refresh. */
 const SLOT_CACHES_EVERY_MS = 10 * 60_000;
 /** w6393: how long a light folder's create waits for its cache clones before it answers: below the portal's 60 s for the create (server/machines.ts createLightFolder). */
@@ -926,8 +928,30 @@ export class Daemon {
   /** How a restart over the link ends this process (its supervisor starts it again); tests replace it. */
   exitForRestart = () => {
     this.shutdown();
-    setTimeout(() => process.exit(0), 500);
+    void this.exitWhenWritten().then(() => process.exit(0));
   };
+
+  /**
+   * w6695: resolves once every hosted session's commands are in its in.jsonl (an append under way off the loop, w6703's
+   * review: a send lost on exit is never delivered), or after capMs.
+   */
+  hostCommandsWritten(capMs = HOST_COMMANDS_EXIT_CAP_MS): Promise<void> {
+    const hosted = [...this.entries.values()].map((e) => e.s).filter((s): s is HostedSession => s instanceof HostedSession);
+    let timer: NodeJS.Timeout | undefined;
+    const cap = new Promise<void>((r) => {
+      timer = setTimeout(() => {
+        log(`shutting down: agent host commands still being written after ${capMs / 1000} s; exiting anyway`);
+        r();
+      }, capMs);
+      timer.unref?.();
+    });
+    return Promise.race([Promise.all(hosted.map((s) => s.flushed())).then(() => undefined), cap]).finally(() => clearTimeout(timer));
+  }
+
+  /** After shutdown(): at least 500 ms as before, and until the hosts' commands are written (capped). */
+  exitWhenWritten(): Promise<void> {
+    return Promise.all([this.hostCommandsWritten(), new Promise((r) => setTimeout(r, 500))]).then(() => undefined);
+  }
 
   /**
    * A newer daemon of this machine answers its Unity slots mailbox (w1918: three answered LothLaptop's): this older one ends
@@ -6015,7 +6039,7 @@ if (isMainModule(import.meta.filename)) {
   const quit = () => {
     log('shutting down: agents in agent hosts run on for the next daemon; any others stop');
     d.shutdown();
-    setTimeout(() => process.exit(0), 500);
+    void d.exitWhenWritten().then(() => process.exit(0));
   };
   process.on('SIGTERM', quit);
   process.on('SIGINT', quit);
