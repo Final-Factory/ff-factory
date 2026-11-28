@@ -1196,7 +1196,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; steamUpload?: boolean; steamInstall?: boolean; portalPin?: PortalPinStatus; readFenceSwitch?: boolean; lightFolders?: boolean }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; steamUpload?: boolean; steamInstall?: boolean; steamStart?: boolean; portalPin?: PortalPinStatus; readFenceSwitch?: boolean; lightFolders?: boolean }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -2632,6 +2632,12 @@ export class MachineManager {
       this.transcribeCalls.delete(cid);
       c.reject(new Error(`${id} went offline`));
     }
+    for (const [cid, c] of this.steamStartCalls) {
+      if (c.machine !== id) continue;
+      clearTimeout(c.timer);
+      this.steamStartCalls.delete(cid);
+      c.reject(new Error(`${id} went offline before it answered the Steam start; whether Steam started is unknown (list_machines shows its Steam)`));
+    }
     if (this.stats.delete(id)) emit({ type: 'machine_stats', id, stats: null });
     const m = this.store.machines.get(id);
     if (m) {
@@ -2716,7 +2722,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.steamUpload ? { steamUpload: true } : {}), ...(msg.steamInstall ? { steamInstall: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}), ...(msg.portalPin && typeof msg.portalPin === 'object' ? { portalPin: msg.portalPin } : {}), ...(msg.readFenceSwitch ? { readFenceSwitch: true } : {}), ...(msg.lightFolders ? { lightFolders: true } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.steamUpload ? { steamUpload: true } : {}), ...(msg.steamInstall ? { steamInstall: true } : {}), ...(msg.steamStart ? { steamStart: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}), ...(msg.portalPin && typeof msg.portalPin === 'object' ? { portalPin: msg.portalPin } : {}), ...(msg.readFenceSwitch ? { readFenceSwitch: true } : {}), ...(msg.lightFolders ? { lightFolders: true } : {}) });
         // GitHub App tokens (w1519): a daemon that keeps them gets the current set at once.
         if (msg.ghApp) this.pushGhAppTokens(id);
         // w1946: a play-only machine's timed runs: what it holds now, so the portal sends again what a restart lost.
@@ -2992,6 +2998,15 @@ export class MachineManager {
         if (!h || typeof msg.selfUpdate !== 'number') return;
         h.selfUpdate = msg.selfUpdate;
         console.log(`machine ${id}: its daemon offers updates over its link now (protocol ${msg.selfUpdate}): its install record is readable again`);
+        return;
+      }
+      case 'steam_start_result': {
+        const p = this.steamStartCalls.get(msg.id);
+        if (!p) return;
+        this.steamStartCalls.delete(msg.id);
+        clearTimeout(p.timer);
+        if (msg.ok) p.resolve(String(msg.text ?? ''));
+        else p.reject(new Error(String(msg.text || 'failed')));
         return;
       }
       case 'live_result': {
@@ -3635,6 +3650,37 @@ export class MachineManager {
   /** Whether a machine's daemon installs steamcmd for steam_upload (w5640: its hello offered `steamInstall`). */
   canSteamInstall(machineId: string): boolean {
     return this.canSteamUpload(machineId) && !!this.hellos.get(machineId)?.steamInstall;
+  }
+
+  private readonly steamStartCalls = new Map<string, { machine: string; resolve: (text: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+
+  /** Whether a machine's daemon is online and starts its Steam client on a person's ask (w6727: its hello offered `steamStart`). */
+  canSteamStart(machineId: string): boolean {
+    return this.isOnline(machineId) && !!this.hellos.get(machineId)?.steamStart;
+  }
+
+  /**
+   * Start a Windows machine's installed Steam client in its desktop session (w6727, machine/steamStart.ts): the daemon's
+   * answer text (already running, started), or its refusal or failure as an error. The message carries no path and no
+   * arguments, only who asked; the daemon finds Steam from Steam's own install record.
+   */
+  steamStart(machineId: string, why: string, timeoutMs = 4 * 60_000): Promise<string> {
+    if (!this.canSteamStart(machineId)) return Promise.reject(new Error(`${machineId}'s daemon cannot start Steam (it is offline, not a Windows machine, or needs a daemon update)`));
+    return new Promise<string>((resolve, reject) => {
+      const id = randomUUID();
+      const timer = setTimeout(() => {
+        this.steamStartCalls.delete(id);
+        reject(new Error(`machine ${machineId} did not answer the Steam start in ${Math.round(timeoutMs / 1000)} s`));
+      }, timeoutMs);
+      this.steamStartCalls.set(id, { machine: machineId, resolve, reject, timer });
+      try {
+        this.post(machineId, { type: 'steam_start', id, why: why.slice(0, 300) });
+      } catch (e) {
+        clearTimeout(timer);
+        this.steamStartCalls.delete(id);
+        reject(e as Error);
+      }
+    });
   }
 
   /** Start a Steam check or upload on the machine (w5551); its word comes back through steamUploadReport. */

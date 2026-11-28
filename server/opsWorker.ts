@@ -1041,6 +1041,25 @@ export class OpsWorker {
   }
 
   /**
+   * w6727: the checks of ops_worker steam_start (start a Windows machine's installed Steam client in its desktop session,
+   * machine/steamStart.ts), the same footing as machine_update: Lothsahn's or Ben's own orchestrator, for one of that
+   * person's own open requests. Answers the machine id and who asked (logged by the daemon); the portal sends the daemon
+   * nothing else, no path and no arguments.
+   */
+  steamStartCheck(caller: SessionInfo | undefined, o: { machine: string; workId: string }): { machine: string; why: string } {
+    const person = opsAllowedOrchestrator(caller);
+    if (!person || !caller) throw new Error(OPS_REFUSED);
+    const id = o.workId.trim().toLowerCase();
+    if (!/^w\d+$/.test(id)) throw new Error(`work_id: a request id like "w847", not "${o.workId}"`);
+    const own = this.d.ownRequestProblem ? this.d.ownRequestProblem(id, person.userId) : 'this portal does not link ops jobs to requests';
+    if (own) throw new Error(`work_id: ${own} (a Steam start runs for an open request of ${person.displayName}'s own, which is their approval of it)`);
+    const m = this.d.machine?.(o.machine.trim().toLowerCase());
+    if (!m) throw new Error(`machine: no machine "${o.machine}"`);
+    if (m.platform && m.platform !== 'win32') throw new Error(`machine: ${m.id} is not a Windows PC; steam_start is a Windows daemon operation`);
+    return { machine: m.id, why: `${person.displayName}'s orchestrator for ${id}` };
+  }
+
+  /**
    * A machine update or installer rerun (w855, lothsahn 2026-10-10: "don't ask ben to run installers ... When we say update
    * the machines, do the update, including installers if necessary"). Opens a job in any turn of Lothsahn's or Ben's own
    * orchestrator, a [dispatch] or a timer included, because the gate is the request instead of the turn: it must be one of
