@@ -46,6 +46,7 @@ import { agentState, holdsSandbox, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf, onRequest } from './blockers.ts';
 import { admitsPriority, needsOf, pairRoom, pairText, reservedText, ROOM_STAND_MS, unfitWhy, type ReservedRoom, type RoomFit } from './capacity.ts';
 import type { QueueWait } from './queueWaits.ts';
+import { lostLine, lostStands } from './lostCheckIn.ts';
 
 export type WorkLiveState = 'working' | 'sleeping' | 'waiting' | 'queued' | 'blocked' | 'paused' | 'followup' | 'stalled';
 export const WORK_LIVE_STATES: readonly WorkLiveState[] = ['working', 'sleeping', 'waiting', 'queued', 'blocked', 'paused', 'followup', 'stalled'];
@@ -1248,6 +1249,11 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
   // worker left behind (w750 showed "Working" for an hour while its worker polled gh every 20 minutes). Nothing a worker
   // polls moves a gate. A job it runs meanwhile (CI, a build) is still work.
   if (w.status === 'blocked' && gates.length && !(coming && coming.a.kind === 'job')) return blockedLive(gates, f.now);
+
+  // w6768: its worker's own check-in came due and nothing could deliver it (the worker gone, or its computer away past the
+  // grace): Stalled with that reason, not Sleeping, "stopped until its check-in" or "Merged, follow-up pending", until a
+  // worker on it takes a turn again.
+  if (lostStands(w, workers)) return withMachines({ state: 'stalled', why: `${lostLine(w.lostCheckIn)}: nothing resumes it (w6768)` }, workers);
 
   // w1863: a leg waiting for its computer is Queued, also while the request's own worker is between turns elsewhere.
   if (leg) return leg;

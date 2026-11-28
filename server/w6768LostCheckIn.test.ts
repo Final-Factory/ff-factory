@@ -1,0 +1,249 @@
+// w6768: a worker's own check-in that nothing can deliver (its worker gone, its computer away past the grace) is said:
+// the Waker reports it (onLost), the request carries it (lostCheckIn), its live state is Stalled with the reason, and the
+// dispatcher is told once how to start or move it. Warn-only: nothing moves by itself yet.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { Waker } from './wake.ts';
+import { Store } from './store.ts';
+import { SessionManager } from './sessions.ts';
+import { MachineManager } from './machines.ts';
+import { Agents, releasedFrom } from './agents.ts';
+import { Identity } from './identity.ts';
+import { workLive } from '../shared/workState.ts';
+import { lostLine, lostStands, type LostCheckIn } from '../shared/lostCheckIn.ts';
+import type { Config } from './config.ts';
+import type { Machine, Requester, SessionInfo, UserInfo, WorkItem } from '../shared/types.ts';
+
+const MIN = 60_000;
+const BEN: Requester = { userId: 'ben', displayName: 'Ben' };
+const PEOPLE: UserInfo[] = [{ ...BEN, role: 'owner' }];
+const T = '2026-11-27T15:00:00.000Z';
+
+function wakerSetup(t: { after: (fn: () => void) => void }, send: (id: string) => void = () => {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w6768-'));
+  const store = new Store(dir);
+  const sent: string[] = [];
+  const live = new Set(['w1']);
+  const sessions = {
+    sessions: { has: (id: string) => live.has(id) },
+    get: (id: string) => {
+      if (!live.has(id)) throw new Error(`no session "${id}"`);
+      return {};
+    },
+    send: (id: string, text: string) => (send(id), sent.push(text), 'u'),
+  } as unknown as SessionManager;
+  const w = new Waker(sessions, store, path.join(dir, 'wakes.json'));
+  let now = Date.parse('2026-11-28T09:00:00Z');
+  w.now = () => now;
+  const lost: { id: string; at: number; note: string; why: string }[] = [];
+  w.onLost = (id, wake, why) => lost.push({ id, ...wake, why });
+  t.after(() => {
+    w.close();
+    store.flush();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  return { w, store, sent, lost, live, dir, advance: (ms: number) => (now += ms) };
+}
+
+test('w6768: a due check-in whose worker is gone is reported lost, not dropped unsaid', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { w, sent, lost, live, advance } = wakerSetup(t);
+  w.schedule('w1', 45, 'check the follow-up PR');
+  live.delete('w1'); // removed with its sandbox (w6370's e41a69e8)
+  advance(45 * MIN);
+  t.mock.timers.tick(45 * MIN);
+  assert.equal(sent.length, 0);
+  assert.equal(lost.length, 1);
+  assert.equal(lost[0].id, 'w1');
+  assert.equal(lost[0].why, 'is gone');
+  assert.equal(lost[0].note, 'check the follow-up PR');
+  assert.equal(w.pending('w1'), undefined, 'the wake is spent');
+});
+
+test('w6768: after a restart, a saved check-in whose worker is gone is kept and reported when due', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const a = wakerSetup(t);
+  a.w.schedule('w1', 30, 'look at CI');
+  a.w.close();
+  // A new server: w1 no longer exists.
+  const sessions = { sessions: { has: () => false }, get: () => { throw new Error('gone'); }, send: () => 'u' } as unknown as SessionManager;
+  const b = new Waker(sessions, a.store, path.join(a.dir, 'wakes.json'));
+  b.now = a.w.now;
+  const lost: string[] = [];
+  b.onLost = (id, _w, why) => lost.push(`${id} ${why}`);
+  t.after(() => b.close());
+  assert.equal(b.restore(), 1, 'armed, not dropped');
+  a.advance(30 * MIN);
+  t.mock.timers.tick(30 * MIN);
+  assert.deepEqual(lost, ['w1 is gone']);
+});
+
+test('w6768: a wake refused while its computer is away past the grace is reported once; the retries go on and the last drop says nothing more', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let tries = 0;
+  const { w, lost, advance } = wakerSetup(t, () => {
+    tries++;
+    throw new Error('beast is offline');
+  });
+  w.awayOf = () => 'is on beast (offline 147 min)';
+  w.schedule('w1', 10, 'is the build done?');
+  advance(10 * MIN);
+  t.mock.timers.tick(10 * MIN);
+  assert.equal(tries, 1);
+  assert.deepEqual(lost.map((l) => l.why), ['is on beast (offline 147 min)']);
+  for (let i = 0; i < 15; i++) t.mock.timers.tick(MIN);
+  assert.ok(tries > 5, `retried (${tries})`);
+  assert.equal(lost.length, 1, 'said once per wake');
+});
+
+test('w6768: a wake refused with its computer not away reports only after its last retry', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { w, lost, advance } = wakerSetup(t, () => {
+    throw new Error('at the agent limit');
+  });
+  w.schedule('w1', 10, 'x');
+  advance(10 * MIN);
+  t.mock.timers.tick(10 * MIN);
+  assert.equal(lost.length, 0, 'a retry may still deliver it');
+  for (let i = 0; i < 15; i++) t.mock.timers.tick(MIN);
+  assert.equal(lost.length, 1);
+  assert.match(lost[0].why, /^could not be woken \(at the agent limit\)$/);
+});
+
+// ---------------------------------------------------------------- the ledger state
+
+const item = (o: Partial<WorkItem> = {}): WorkItem =>
+  ({ id: 'w6370', title: 'Follow-up', brief: '', priority: 'normal', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status: 'active', createdAt: T, updatedAt: T, sessionIds: ['e41a69e8'], overlaps: [], asks: 0, log: [], ...o }) as WorkItem;
+const worker = (id: string, o: Partial<SessionInfo> = {}): SessionInfo =>
+  ({ id, kind: 'worker', title: 'w6370: follow-up', status: 'stopped', permissionMode: 'default', createdAt: T, lastActivityAt: T, turns: 4, costUsd: 0, pendingPermissions: [], ...o }) as SessionInfo;
+const lostOf = (o: Partial<LostCheckIn> = {}): LostCheckIn => ({ worker: 'e41a69e8', due: '2026-11-28T09:45:00.000Z', note: 'check the follow-up', why: 'is gone', seen: '2026-11-28T09:45:10.000Z', turns: {}, ...o });
+
+test('w6768: a merged request whose worker is gone with a due check-in is Stalled with the reason, not "Merged, follow-up pending"', () => {
+  const now = Date.parse('2026-11-28T10:00:00Z');
+  const merged = { prs: [{ repo: 'Final-Factory/ff-factory', number: 1500, state: 'merged' as const }] };
+  const before = item(merged);
+  assert.equal(workLive(before, { items: [before], session: () => undefined, now })?.state, 'followup', 'the w6370 reading before the fix');
+  const w = item({ ...merged, lostCheckIn: lostOf() });
+  assert.deepEqual(workLive(w, { items: [w], session: () => undefined, now }), { state: 'stalled', why: 'its check-in at 09:45Z is due, and worker e41a69e8 is gone: nothing resumes it (w6768)' });
+});
+
+test('w6768: a stopped worker on a computer offline past the grace with a due check-in is Stalled with the computer named, not Sleeping', () => {
+  const now = Date.parse('2026-11-28T10:10:00Z');
+  const s = worker('69908625', { machineId: 'beast', machineSandbox: 'agent1', wakeAt: '2026-11-28T10:06:00.000Z' });
+  const w = item({ id: 'w6484', sessionIds: ['69908625'], lostCheckIn: lostOf({ worker: '69908625', due: '2026-11-28T10:06:00.000Z', why: 'is on beast (offline 147 min)', turns: { '69908625': 4 } }) });
+  const l = workLive(w, { items: [w], session: (id) => (id === s.id ? s : undefined), now });
+  assert.equal(l?.state, 'stalled');
+  assert.match(l!.why, /^its check-in at 10:06Z is due, and worker 69908625 is on beast \(offline 147 min\): nothing resumes it \(w6768\)/);
+});
+
+test('w6768: a turn by its worker, or a new worker on the request, ends the lost check-in', () => {
+  const l = lostOf({ worker: '69908625', turns: { '69908625': 4 } });
+  assert.equal(lostStands({ lostCheckIn: l }, [worker('69908625')]), true);
+  assert.equal(lostStands({ lostCheckIn: l }, [worker('69908625', { turns: 5 })]), false, 'it took a turn since');
+  assert.equal(lostStands({ lostCheckIn: l }, [worker('69908625', { status: 'running' })]), false, 'mid-turn');
+  assert.equal(lostStands({ lostCheckIn: l }, [worker('69908625'), worker('new1', { turns: 1 })]), false, 'a new worker came');
+  assert.equal(lostStands({ lostCheckIn: lostOf() }, []), true, 'gone, and nobody else');
+  assert.equal(lostLine(l), 'its check-in at 09:45Z is due, and worker 69908625 is gone');
+});
+
+// ---------------------------------------------------------------- the server
+
+async function agentsSetup(t: { after: (fn: () => void | Promise<void>) => void }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w6768a-'));
+  const cfg = {
+    dataDir: dir,
+    sandboxRoot: dir,
+    standingRoot: path.join(dir, '_agents'),
+    repo: { url: path.join(dir, 'base'), basePath: path.join(dir, 'base') },
+    defaultBase: 'origin/master',
+    models: ['opus'],
+    defaultModel: 'opus',
+    protectedPaths: [],
+    limits: { maxSessions: 30, maxUnity: 2, maxSandboxes: 4, minFreeGB: 0, minFreeRamGB: 0 },
+    orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false },
+    worker: { permissionMode: 'bypassPermissions', effort: 'low' },
+    unity: {},
+  } as unknown as Config;
+  const store = new Store(dir);
+  const sessions = new SessionManager(cfg, store);
+  const machines = new MachineManager(cfg, store, sessions);
+  const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => PEOPLE));
+  agents.boot();
+  t.after(async () => {
+    agents.orchestrators.close();
+    clearInterval(agents.placeAgainTick);
+    agents.close();
+    sessions.stopAll();
+    await new Promise((r) => setTimeout(r, 60));
+    store.flush();
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  });
+  const online = new Set(['lothdesktop']);
+  machines.isOnline = (id: string) => online.has(id.toLowerCase());
+  const told: string[] = [];
+  agents.orchestrators.toDispatcher = (text: string) => void told.push(text);
+  const machine = (id: string, o: Partial<Machine> = {}) =>
+    store.putMachine({ id, host: id, purpose: 'unused', status: 'ready', online: false, repoPath: '/r', home: '/h', portalUrl: 'http://x', sessionIds: [], createdAt: '', ...o } as Machine);
+  const request = (o: Partial<WorkItem> = {}) => {
+    const w = item(o);
+    store.putWork(w);
+    return w;
+  };
+  return { store, agents, told, machine, request };
+}
+
+test('w6768: a gone worker\'s due check-in is recorded on its open request, logged with the would-be move, and the dispatcher told once', async (t) => {
+  const { store, agents, told, request } = await agentsSetup(t);
+  request({ prs: [{ repo: 'Final-Factory/ff-factory', number: 1500, state: 'merged' }] });
+  request({ id: 'w6000', status: 'done', sessionIds: ['e41a69e8'] }); // closed: left alone
+  const at = Date.parse('2026-11-28T09:45:00Z');
+  // The Waker's report reaches Agents (its wiring), once per wake.
+  agents.waker.onLost!('e41a69e8', { at, note: 'check the follow-up PR' }, 'is gone');
+  const w = store.work.get('w6370')!;
+  assert.equal(w.lostCheckIn?.worker, 'e41a69e8');
+  assert.equal(w.lostCheckIn?.due, '2026-11-28T09:45:00.000Z');
+  assert.equal(w.lostCheckIn?.note, 'check the follow-up PR');
+  assert.equal(store.work.get('w6000')!.lostCheckIn, undefined);
+  assert.ok(w.log.some((l) => l.includes("its check-in at 09:45Z is due, and worker e41a69e8 is gone: nothing resumes it (w6768); warn-only, so nothing moves yet: the automatic move would start a fresh worker for it where it fits, with the check-in's note")), w.log.join(' | '));
+  assert.equal(told.length, 1);
+  assert.match(told[0], /^\[ledger\] LOST CHECK-IN \(w6768\): w6370 /);
+  assert.match(told[0], /Start a worker for it with start_agent/);
+  assert.match(told[0], /passing its note: "check the follow-up PR"/);
+  const l = workLive(w, { items: [w], session: (id) => store.sessions.get(id), now: Date.now() });
+  assert.equal(l?.state, 'stalled');
+  assert.equal(agents.lostCheckIn('e41a69e8', { at, note: 'x' }, 'is gone').length, 0, 'the same check-in is not recorded twice');
+  assert.equal(told.length, 1);
+});
+
+test('w6768: a worker on a computer offline past the grace: its wake reads as away, and the would-be move is off that computer', async (t) => {
+  const { store, agents, told, machine, request } = await agentsSetup(t);
+  machine('beast', { lastSeen: new Date(Date.now() - 147 * MIN).toISOString() });
+  machine('lothdesktop', { online: true });
+  store.putSession(worker('69908625', { machineId: 'beast', machineSandbox: 'agent1', title: 'w6484: x' }));
+  store.putSession(worker('aaaa1111', { machineId: 'lothdesktop', machineSandbox: 'slot1' }));
+  request({ id: 'w6484', sessionIds: ['69908625'] });
+  assert.match(agents.waker.awayOf!('69908625') ?? '', /^is on beast \(offline 14\d min\)$/);
+  assert.equal(agents.waker.awayOf!('aaaa1111'), undefined, 'its computer is online');
+  const why = agents.waker.awayOf!('69908625')!;
+  assert.deepEqual(agents.lostCheckIn('69908625', { at: Date.now() - MIN, note: 'is the build done?' }, why), ['w6484']);
+  const w = store.work.get('w6484')!;
+  assert.deepEqual(w.lostCheckIn?.turns, { '69908625': 4 });
+  assert.ok(w.log.some((l) => /worker 69908625 is on beast \(offline .*\): nothing resumes it \(w6768\); warn-only, so nothing moves yet: the automatic move would move it to a computer with room/.test(l)), w.log.join(' | '));
+  assert.match(told[0], /Stop_agent its worker 69908625 with move_to a computer with room/);
+  const l = workLive(w, { items: [w], session: (id) => store.sessions.get(id), now: Date.now() });
+  assert.equal(l?.state, 'stalled');
+  assert.match(l!.why, /^its check-in at \d\d:\d\dZ is due, and worker 69908625 is on beast/);
+  // Its next turn ends it.
+  store.putSession({ ...store.sessions.get('69908625')!, turns: 5 });
+  assert.notEqual(workLive(w, { items: [w], session: (id) => store.sessions.get(id), now: Date.now() })?.why?.includes('w6768'), true);
+});
+
+test('w6768: deleting a sandbox keeps the workers that released it before (e41a69e8 was removed with slot5)', () => {
+  assert.equal(releasedFrom({ placeReleased: { at: T, sandbox: 'slot5', branch: 'b', why: 'x' } } as never, 'slot5'), true);
+  assert.equal(releasedFrom({ machineSandbox: 'slot2' }, 'slot5'), true, 'placed elsewhere since');
+  assert.equal(releasedFrom({ machineSandbox: 'slot5' }, 'slot5'), false, 'still in it');
+  assert.equal(releasedFrom(undefined, 'slot5'), false);
+});

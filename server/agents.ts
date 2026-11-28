@@ -41,6 +41,7 @@ import { statusLinesIn, stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, MEDIA_FILE, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
 import { ciPushHold } from './savePushHold.ts';
+import { lostLine, type LostCheckIn } from '../shared/lostCheckIn.ts';
 import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, offSince, onRequest, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
 import { isSamePerson, personForWork, poolOwnerOf, tokenPersonForWork, vaultContext, withPool } from './vault.ts';
 import { ghRunner, githubFromVault, githubPersonOf, githubTokens } from './githubTokens.ts';
@@ -998,6 +999,13 @@ export class Agents {
     sessions.turnModel = (info, from, text, opens) => turnModels.pick(info, from, text, opens);
     // What each agent waits on between turns (w475): its wake_me and a queued message, on its session for the page.
     this.waker.onChange = () => this.syncWaiting();
+    // w6768: a due check-in nothing can deliver (its worker gone, its computer away past the grace) is said on its requests.
+    this.waker.onLost = (sid, wake, why) => void this.lostCheckIn(sid, wake, why);
+    this.waker.awayOf = (sid) => {
+      const i = this.store.sessions.get(sid);
+      const a = i?.machineId ? this.longAwayOf(i.machineId) : undefined;
+      return a ? `is on ${a.line}` : undefined;
+    };
     sessions.onQueueChange = () => this.syncWaiting();
     const reap = setInterval(() => this.reapIdle(), REAP_EVERY_MS);
     reap.unref?.();
@@ -4552,6 +4560,43 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   }
 
   /**
+   * w6768: a worker's due check-in that nothing can deliver (Waker.onLost): its worker is gone (removed with a deleted sandbox:
+   * w6370's e41a69e8), or its computer is away past the grace and its wake was refused (w6484's 69908625 on BEAST). Each open
+   * request it is on carries it (WorkItem.lostCheckIn), so its live state is Stalled with the reason; its log and the server
+   * log say what the automatic move would do, and the dispatcher is told once to start or move it: the recovery needs nobody
+   * at a machine. Warn-only: nothing moves yet (lothsahn's lockout rule: turning the move on is its own PR). Returns the
+   * requests it was recorded on.
+   */
+  lostCheckIn(sessionId: string, wake: { at: number; note: string }, why: string, now = Date.now()): string[] {
+    const due = new Date(wake.at).toISOString();
+    const reqs = [...this.store.work.values()].filter((w) => isOpen(w) && w.sessionIds.includes(sessionId) && onRequest(w, sessionId));
+    const gone = !this.store.sessions.has(sessionId);
+    const done: string[] = [];
+    for (const w of reqs) {
+      if (w.lostCheckIn?.worker === sessionId && w.lostCheckIn.due === due) continue;
+      const turns: Record<string, number> = {};
+      for (const id of w.sessionIds) {
+        const s = onRequest(w, id) ? this.store.sessions.get(id) : undefined;
+        if (s) turns[s.id] = s.turns;
+      }
+      const l: LostCheckIn = { worker: sessionId, due, note: wake.note.slice(0, 2000), why, seen: new Date(now).toISOString(), turns };
+      const would = gone ? "start a fresh worker for it where it fits, with the check-in's note" : `move it to a computer with room with the check-in's note, as a stopped worker's work is moved off an away computer (w2544)`;
+      const line = `${lostLine(l)}: nothing resumes it (w6768); warn-only, so nothing moves yet: the automatic move would ${would}`;
+      console.warn(`lost check-in: ${w.id}: ${line}`);
+      this.orchestrators.ledgerEdit(w.id, line, (x) => {
+        x.lostCheckIn = l;
+      });
+      const how = gone ? 'start a worker for it with start_agent (an agent slot is enough unless its brief needs more)' : `stop_agent its worker ${sessionId} with move_to a computer with room`;
+      this.orchestrators.toDispatcher(
+        `[ledger] LOST CHECK-IN (w6768): ${w.id} "${w.title.slice(0, 80)}" (${names(w.requesters)}, ${w.priority}): ${lostLine(l)}, so nothing resumes it. ${how[0].toUpperCase()}${how.slice(1)}, passing its note: "${l.note.slice(0, 600) || '(none)'}". Said once.`,
+        w.requesters[0],
+      );
+      done.push(w.id);
+    }
+    return done;
+  }
+
+  /**
    * Whether computer `id` has been away (offline or paused) past the grace (w2544, server/machineAway.ts): FF Factory's blip
    * window, timing.unavailableIdleMinutes (5 min by default). Undefined while it runs or its drop is a blip.
    */
@@ -8024,8 +8069,17 @@ A report is for a person who asked for one, and people want very few. File one w
             // The daemon refuses while an agent process there is live; give the stops a moment to land.
             for (let i = 0; i < 20 && ids.some((id) => this.sessions.sessions.get(id)?.live); i++) await new Promise((r) => setTimeout(r, 500));
             const text = await this.machines.deleteSandbox(t.machine, msb.id);
-            for (const id of ids) if (this.sessions.sessions.has(id)) this.sessions.remove(id);
-            return text;
+            // w6768: a worker that released this sandbox earlier (it is placed again when it resumes) stays on its sandbox's
+            // list (the sandbox's record goes, with that list); it is kept, with its requests and its pending check-in, as a
+            // worker whose light agent folder was deleted is (w5924). On 2026-11-27 at 22:04Z deleting lothdesktop/slot5
+            // removed w6370's worker e41a69e8 that way, 7 h after it released slot5, and its 09:45Z check-in never ran.
+            const kept: string[] = [];
+            for (const id of ids) {
+              if (!this.sessions.sessions.has(id)) continue;
+              if (releasedFrom(this.store.sessions.get(id), msb.id)) kept.push(id);
+              else this.sessions.remove(id);
+            }
+            return kept.length ? `${text} Kept ${kept.join(', ')}: they had released it before (w6768), and are placed again when they resume.` : text;
           }),
         ),
         tool(
@@ -10834,4 +10888,13 @@ export function workByWorker(work: Iterable<WorkItem>): Map<string, WorkItem[]> 
     }
   }
   return out;
+}
+
+/**
+ * w6768: whether `info` released sandbox `sandbox` before (it waits elsewhere or nowhere, and is placed again when it resumes),
+ * so deleting that sandbox keeps it: only the session placed in it now goes with it.
+ */
+export function releasedFrom(info: Pick<SessionInfo, 'placeReleased' | 'machineSandbox'> | undefined, sandbox: string): boolean {
+  if (!info) return false;
+  return !!info.placeReleased || (!!info.machineSandbox && info.machineSandbox !== sandbox);
 }
