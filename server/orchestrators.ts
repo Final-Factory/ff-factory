@@ -90,7 +90,7 @@ import { inheritedPayer, isSamePerson, personForWork, sessionPerson, tokenPerson
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { mergeOwnerProblem, mergeOwnerRefusal, type MergeOwner } from './mergeOwner.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
-import { dataDirClearedText, otherPlayerInWords, PAIR_FILED_BY, type DataDirVerdict } from './gameDataDir.ts';
+import { dataDirClearedText, otherPlayerInWords, PAIR_FILED_BY, type PairDataDirVerdict } from './gameDataDir.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashHold, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkHandedUp, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { designGoAsk } from './designGo.ts';
@@ -5404,7 +5404,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * have room at once, and its own request is Blocked on that request's report: the w890 release frees its sandbox when its
    * turn ends, and the report resumes it. One open pair run per request: asked again, it waits on the one there is.
    */
-  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[]; pr?: string; commit?: string; steam?: string; menus?: string; split?: string; player?: PairPlayer; legacy_data?: string; data_dir?: DataDirVerdict }): string {
+  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[]; pr?: string; commit?: string; steam?: string; menus?: string; split?: string; player?: PairPlayer; legacy_data?: string; data_dir?: PairDataDirVerdict }): string {
     const w = this.workerRequest(sessionId, a.request, 'request_pair', { reopen: true });
     const what = clip(String(a.what ?? '').replace(/\s+/g, ' ').trim(), 100);
     const brief = String(a.brief ?? '').trim();
@@ -5444,9 +5444,11 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const v = a.data_dir;
       // w6235: legacy_data about another player (a Steam 0.50 build, another sha) is not settled by this commit's file;
       // w6451: nor are what and brief that name one, the words a run with no legacy_data is marked from.
-      const other = commit ? otherPlayerInWords(commit, saysNone(legacySaid) ? '' : legacySaid, what, brief) : undefined;
+      // w6680: the verdict names every commit it read (Agents.pairDataDir reads each sha the run names); a sha it did not
+      // read still keeps the mark.
+      const other = commit ? otherPlayerInWords(commit, saysNone(legacySaid) ? '' : legacySaid, what, brief, v?.reads ? v.commits : [commit]) : undefined;
       if (v?.reads && commit && sameCommit(v.commit, commit) && !other) {
-        dataDirChecked = dataDirClearedText(v.commit);
+        dataDirChecked = dataDirClearedText(v.commit, v.commits.slice(1));
         legacyData = undefined;
       } else {
         const why = !commit ? 'no commit was given, so FF Factory could not check it for the FF_GAME_DATA_DIR backport (pass commit; w6189)'

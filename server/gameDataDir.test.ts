@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { forgetDataDirChecks, gameDataDirAt, GAME_DATA_PATHS, lastWordOf, otherPlayerIn, readsDataDirSource } from './gameDataDir.ts';
+import { forgetDataDirChecks, gameDataDirAt, GAME_DATA_PATHS, lastWordOf, otherPlayerIn, pairDataDirAt, pairPlayerShas, readsDataDirSource, type DataDirVerdict } from './gameDataDir.ts';
 import type { Runner } from './githubTokens.ts';
 
 const REPO = 'Final-Factory/FinalFactory';
@@ -181,4 +181,65 @@ test('w6544: lastWordOf is the word before trailing whitespace, else empty', () 
   assert.equal(lastWordOf(''), '');
   assert.equal(lastWordOf('   '), '');
   assert.equal(lastWordOf('-'.repeat(50000) + ' '), '-'.repeat(50000));
+});
+
+// w6680 (for lothsahn): w6678 ran A at the pre-1.0 tip dc4643b4c2 and B at the PR head 718a14689a; its legacy_data named
+// dc4643b4c2, and only 718a14689a (the pair's commit) was read, so the mark stayed though both carry the backport.
+const W6678_A = 'dc4643b4c204739e37b9cb024446053598441c7f';
+const W6678_B = '718a14689a4e05d4b23f391f9bddd5e4e45db3e4';
+const W6678_LEGACY = 'run A is a pre-1.0 player at dc4643b4c2 (0.50.0.120), which predates w5297';
+const W6678_BRIEF = `Do it twice: A) origin/pre-1.0 at ${W6678_A}, without the fix. B) the PR head ${W6678_B}, with the fix. --scenarios-from ${W6678_B}`;
+const reader = (files: Record<string, boolean>, asked: string[] = []) => (c: string): Promise<DataDirVerdict> => {
+  asked.push(c);
+  const full = Object.keys(files).find((k) => k.startsWith(c));
+  return Promise.resolve(!full ? { reads: false, checked: false, why: `GitHub knows no commit ${c.slice(0, 10)}` }
+    : files[full] ? { reads: true, commit: full } : { reads: false, checked: true, why: `GameDataPaths.cs at ${full.slice(0, 10)} does not read FF_GAME_DATA_DIR` });
+};
+
+test('w6680: pairPlayerShas lists the pair commit first, then every other sha the run names, once each', () => {
+  assert.deepEqual(pairPlayerShas('718a14689a', [W6678_LEGACY, 'MP-W6673-guardian-midfight-join, red on pre-1.0 vs green on PR #4463', W6678_BRIEF]), ['718a14689a', W6678_A]);
+});
+
+test('w6680: a two-commit pair whose legacy_data names only the non-head commit is read at both and clears', async () => {
+  const asked: string[] = [];
+  const v = await pairDataDirAt(reader({ [W6678_A]: true, [W6678_B]: true }, asked), '718a14689a', W6678_LEGACY, 'MP-W6673-guardian-midfight-join', '');
+  assert.deepEqual(v, { reads: true, commit: W6678_B, commits: [W6678_B, W6678_A] });
+  assert.deepEqual(asked, ['718a14689a', 'dc4643b4c2'], 'the non-head commit legacy_data names is read too');
+  // The version written as that commit's own, "dc4643b4c2 (0.50.0.120)", is no other build once the commit was read...
+  assert.equal(otherPlayerIn(W6678_LEGACY, '718a14689a', 'legacy_data', ['718a14689a', 'dc4643b4c2']), undefined);
+  // ...but it is while that commit was not read, and other shapes of a version still name a build.
+  assert.match(otherPlayerIn(W6678_LEGACY, '718a14689a') ?? '', /names commit dc4643b4c2, but FF Factory checked only 718a14689a/);
+  assert.match(otherPlayerIn('dc4643b4c2 is 0.50.0.120', '718a14689a', 'legacy_data', ['718a14689a', 'dc4643b4c2']) ?? '', /names build 0\.50\.0\.120/);
+  assert.match(otherPlayerIn('dc4643b4c2 (0.50.0.120) and the Steam 0.50.0.47 build', '718a14689a', 'legacy_data', ['718a14689a', 'dc4643b4c2']) ?? '', /names build 0\.50\.0\.47/);
+});
+
+test('w6680: a pair where one commit lacks the backport, or cannot be read, or names a build, keeps the mark', async () => {
+  const lacks = await pairDataDirAt(reader({ [W6678_A]: false, [W6678_B]: true }), '718a14689a', W6678_LEGACY, '', W6678_BRIEF);
+  assert.equal(lacks.reads, false);
+  assert.match(lacks.reads ? '' : lacks.why, /^GameDataPaths\.cs at dc4643b4c2 does not read FF_GAME_DATA_DIR; it is one of the 2 player commits the run names \(718a14689a, dc4643b4c2\)/);
+  const unknown = await pairDataDirAt(reader({ [W6678_B]: true }), '718a14689a', W6678_LEGACY, '', '');
+  assert.equal(unknown.reads, false, 'a commit GitHub does not know keeps it');
+  const threw = await pairDataDirAt(() => Promise.reject(new Error('gh: command not found')), '718a14689a', '', '', '');
+  assert.match(threw.reads ? '' : threw.why, /could not check 718a14689a.*gh: command not found/);
+  const asked: string[] = [];
+  const steam = await pairDataDirAt(reader({ [W6678_A]: true, [W6678_B]: true }, asked), '718a14689a', W6678_LEGACY, '', 'The client runs the Steam 0.50.0.47 build.');
+  assert.match(steam.reads ? '' : steam.why, /its brief names build 0\.50\.0\.47/);
+  assert.deepEqual(asked, [], 'a named build keeps the mark before GitHub is asked');
+  const wrong = await pairDataDirAt(() => Promise.resolve({ reads: true, commit: W6678_A }), '718a14689a', '', '', '');
+  assert.match(wrong.reads ? '' : wrong.why, /answered for dc4643b4c2, not 718a14689a/);
+  const many = await pairDataDirAt(reader({}), '718a14689a', Array.from({ length: 9 }, (_, i) => `abc${i}def${i}a`).join(' '), '', '');
+  assert.match(many.reads ? '' : many.why, /names 10 commits, more than the 8/);
+});
+
+// w6686 (for lothsahn; w6682's review of PR #1543): the version excuse is only a bare "<sha> (<version>)".
+test('w6686: a version that does not close its bracket, a published word before the sha, or a v-prefixed version keeps the mark', () => {
+  const read = ['718a14689a', 'dc4643b4c2'];
+  assert.equal(otherPlayerIn(W6678_LEGACY, '718a14689a', 'legacy_data', read), undefined, "w6678's real legacy_data still clears");
+  assert.equal(otherPlayerIn('the host runs dc4643b4c2 ( 0.50.0.120 ) built here', '718a14689a', 'legacy_data', read), undefined);
+  assert.match(otherPlayerIn('dc4643b4c2 (0.50.0.47 installed)', '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.47/);
+  assert.match(otherPlayerIn('client runs the published dc4643b4c2 (0.50.0.47)', '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.47/);
+  assert.match(otherPlayerIn('the Steam pre-1.0 dc4643b4c2 (0.50.0.47)', '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.47/);
+  assert.match(otherPlayerIn('the downloaded dc4643b4c2 (0.50.0.47)', '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.47/);
+  assert.match(otherPlayerIn(`${W6678_A}${' '.repeat(20)}(0.50.0.120)`, '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.120/, 'a sha far from the bracket keeps it (w6688)');
+  assert.match(otherPlayerIn('client is v0.50.0.47', '718a14689a', 'legacy_data', read) ?? '', /names build v0\.50\.0\.47/);
 });
