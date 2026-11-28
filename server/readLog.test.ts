@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { READ_LOG_LINES_A_DAY, READ_LOG_SESSION, ReadLog, folderOf, readAllowWin, readLogModeOf } from '../machine/readLog.ts';
+import { READ_LOG_LINES_A_DAY, READ_LOG_SESSION, ReadLog, folderOf, helperEnv, readAllowWin, readLogModeOf } from '../machine/readLog.ts';
 import { csHelper } from '../machine/workerCaps.ts';
 
 const ENV = { SystemRoot: 'C:\\Windows', ProgramFiles: 'C:\\Program Files', 'ProgramFiles(x86)': 'C:\\Program Files (x86)', ProgramData: 'C:\\ProgramData' };
@@ -27,6 +27,12 @@ test('w6599: every allowlist entry has its reason; profiles and Public are not o
   assert.deepEqual(a.filter((e) => !e.exact).map((e) => e.path), ['F:\\ffw\\work', 'C:\\Windows', 'C:\\Program Files', 'C:\\Program Files (x86)', 'C:\\ProgramData']);
   assert.deepEqual(a.filter((e) => e.exact).map((e) => e.path).sort(), ['C:\\', 'F:\\', 'F:\\ffw']);
   assert.ok(!a.some((e) => /users/i.test(e.path)));
+});
+
+test('w6750: the helper is started without FFREADLOG_TRACE from the daemon\'s environment; only a test\'s trace passes it', () => {
+  const env = { PATH: 'p', FFREADLOG_TRACE: 'Users', ffreadlog_trace: 'x' };
+  assert.deepEqual(helperEnv(env), { PATH: 'p' });
+  assert.deepEqual(helperEnv(env, 'outside-secret'), { PATH: 'p', FFREADLOG_TRACE: 'outside-secret' });
 });
 
 test('w6599: a log line groups by a path\'s first three parts', () => {
@@ -91,6 +97,10 @@ test('w6599: the daemon sends the allowlist and the live hosts, writes each read
   assert.match(flagged[0]!, /^read log: sess-1 \(agent5\): cat\.exe read C:\\Users\\rydin\\\.ssh\\config, outside the work folder and not on the allowlist \(warn only: nothing was refused\)$/);
   assert.match(flagged[1]!, /^read log: sess-2 \(slot1\): node\.exe read C:\\Users\\Public\\a\.txt/);
   assert.ok(lines.some((l) => l.startsWith('read log: its first minute saw 900 file opens')));
+  // review w6750: events over a process's waiting cap are counted, not silent
+  f.say({ event: 'stat', fileEvents: 10, procEvents: 1, tracked: 3, reported: 0, dropped: 0, overflow: 2, lost: 0 });
+  await flush();
+  assert.ok(lines.includes("read log: 0 reads over the helper's cap, 2 events over a process's waiting cap and 0 events ETW lost in the last minute (not in the file)"));
   const file = fs.readFileSync(path.join(appDir, 'logs', 'read-log-2026-11-27.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   assert.equal(file.length, 4);
   assert.deepEqual(Object.keys(file[0]).sort(), ['image', 'path', 'pid', 'sandbox', 'session', 't'], 'paths and the reading process only');
@@ -182,9 +192,8 @@ test('w6599: the real ETW helper reports a file a host\'s child opens outside th
   const hostAt = Date.now();
   const host = spawn(process.execPath, ['-e', `process.stdin.once('data', () => { const r = require('child_process').spawnSync('cmd.exe', ['/d', '/c', 'type', ${JSON.stringify(outside)}, '&', 'type', ${JSON.stringify(inside)}], { stdio: 'ignore' }); process.exit(r.status ?? 1); });`], { stdio: ['pipe', 'ignore', 'ignore'] });
   // the helper's decisions about followed pids, shown if the read is not seen
-  process.env.FFREADLOG_TRACE = 'outside-secret';
   const lines: string[] = [];
-  const r = new ReadLog({ appDir, root, mode: 'warn', platform: 'win32', hosts: () => [{ session: 'test-session', pid: host.pid!, startedAt: hostAt }], log: (l) => (lines.push(l), t.diagnostic(l)), helper: () => exe });
+  const r = new ReadLog({ appDir, root, mode: 'warn', platform: 'win32', hosts: () => [{ session: 'test-session', pid: host.pid!, startedAt: hostAt }], log: (l) => (lines.push(l), t.diagnostic(l)), helper: () => exe, trace: 'outside-secret' });
   try {
     r.start();
     const until = async (ok: () => boolean, ms: number) => {
@@ -206,7 +215,6 @@ test('w6599: the real ETW helper reports a file a host\'s child opens outside th
     const rows = fs.readFileSync(path.join(appDir, 'logs', file), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { path: string });
     assert.ok(!rows.some((x) => x.path.toLowerCase() === inside.toLowerCase()), 'a file under the root is not reported');
   } finally {
-    delete process.env.FFREADLOG_TRACE;
     r.stop();
     host.kill();
     await new Promise((res) => setTimeout(res, 1500));

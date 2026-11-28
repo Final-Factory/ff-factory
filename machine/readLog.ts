@@ -69,12 +69,22 @@ export interface ReadLine {
   path: string;
 }
 
+/** The helper's environment: the daemon's, without FFREADLOG_TRACE unless a test asks for it (review w6750). */
+export function helperEnv(env: NodeJS.ProcessEnv, trace?: string): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(env)) if (k.toUpperCase() !== 'FFREADLOG_TRACE') out[k] = v;
+  if (trace) out.FFREADLOG_TRACE = trace;
+  return out;
+}
+
 export interface ReadStat {
   fileEvents: number;
   procEvents: number;
   tracked: number;
   reported: number;
   dropped: number;
+  /** Events dropped because one gone or pending process already held its cap of waiting events (absent from older helpers). */
+  overflow?: number;
   lost: number;
 }
 
@@ -93,6 +103,9 @@ export interface ReadLogDeps {
   helper?: () => string | undefined;
   /** Starts the helper; node's spawn by default. */
   start?: (exe: string, args: string[]) => ChildProcess;
+  /** Tests only: FFREADLOG_TRACE for the helper (its decisions, and opens by unfollowed pids of paths containing this). The
+   *  daemon never sets it, and the helper is started without the variable whatever the daemon's own environment holds. */
+  trace?: string;
 }
 
 /** A day's read-log file over this is not written further that day (the count still goes into the daily line). */
@@ -166,7 +179,7 @@ export class ReadLog {
   }
 
   private launch(exe: string): void {
-    const child = (this.d.start ?? ((e, a) => spawn(e, a, { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true })))(exe, [READ_LOG_SESSION]);
+    const child = (this.d.start ?? ((e, a) => spawn(e, a, { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env: helperEnv(process.env, this.d.trace) })))(exe, [READ_LOG_SESSION]);
     this.child = child;
     this.rootsSent = '';
     this.firstStat = true;
@@ -272,7 +285,8 @@ export class ReadLog {
       this.firstStat = false;
       this.d.log(`read log: its first minute saw ${s.fileEvents} file opens on the machine and ${s.procEvents} process events, followed ${s.tracked} worker processes, reported ${s.reported}${s.fileEvents === 0 ? '. WARNING: no file opens at all: the session runs but Kernel-File gives it nothing' : ''}`);
     }
-    if (s.dropped || s.lost) this.d.log(`read log: ${s.dropped} reads over the helper's cap and ${s.lost} events ETW lost in the last minute (not in the file)`);
+    const overflow = s.overflow ?? 0;
+    if (s.dropped || s.lost || overflow) this.d.log(`read log: ${s.dropped} reads over the helper's cap, ${overflow} events over a process's waiting cap and ${s.lost} events ETW lost in the last minute (not in the file)`);
   }
 
   /** Read-log files older than READ_LOG_KEEP_DAYS go. */

@@ -14,7 +14,7 @@
 // stdout, one JSON object a line: {"event":"ready"}, {"event":"error","why":"..."} (then it exits 1),
 // {"event":"read","root":R,"rootAt":MS,"pid":P,"image":"C:\\...\\x.exe","path":"C:\\..."} (each root, program and path once an hour, at most
 // MAX_PER_MINUTE a minute), {"event":"root-refused","root":"R","why":"..."} (once an hour) and each minute {"event":"stat","fileEvents":N,"procEvents":N,"tracked":N,"reported":N,"dropped":N,
-// "lost":N}.
+// "overflow":N,"lost":N} (overflow: events dropped because one gone or pending process already held MAX_WAITING waiting).
 //
 // Starting a session needs Administrators or Performance Log Users (the daemon runs at Medium, as a member of one of them), never
 // a Low worker. 64-bit only.
@@ -141,7 +141,7 @@ static class FfReadLog
     static readonly Dictionary<uint, long> NotWorker = new Dictionary<uint, long>();
     static readonly HashSet<string> RefusedRoots = new HashSet<string>();
     static List<KeyValuePair<string, string>> devices = new List<KeyValuePair<string, string>>();
-    static long fileEvents, procEvents, reported, dropped;
+    static long fileEvents, procEvents, reported, dropped, overflow;
     static int thisMinute;
     static RecordCallback keep; // the delegate ProcessTrace calls, kept from the collector
     static readonly IntPtr NameFileName = Marshal.StringToHGlobalUni("FileName");
@@ -221,7 +221,7 @@ static class FfReadLog
             DropStale();
             int tracked;
             lock (Gate) { tracked = Tracked.Count; thisMinute = 0; }
-            Say("{\"event\":\"stat\",\"fileEvents\":" + Interlocked.Exchange(ref fileEvents, 0) + ",\"procEvents\":" + Interlocked.Exchange(ref procEvents, 0) + ",\"tracked\":" + tracked + ",\"reported\":" + Interlocked.Exchange(ref reported, 0) + ",\"dropped\":" + Interlocked.Exchange(ref dropped, 0) + ",\"lost\":" + (lost - lostBefore) + "}");
+            Say("{\"event\":\"stat\",\"fileEvents\":" + Interlocked.Exchange(ref fileEvents, 0) + ",\"procEvents\":" + Interlocked.Exchange(ref procEvents, 0) + ",\"tracked\":" + tracked + ",\"reported\":" + Interlocked.Exchange(ref reported, 0) + ",\"dropped\":" + Interlocked.Exchange(ref dropped, 0) + ",\"overflow\":" + Interlocked.Exchange(ref overflow, 0) + ",\"lost\":" + (lost - lostBefore) + "}");
             lostBefore = lost;
         }, null, 60000, 60000);
         // what was reported is reported again an hour later, so a long run still shows its reads
@@ -289,7 +289,8 @@ static class FfReadLog
     // EVENT_RECORD: EVENT_HEADER (80 bytes: ProcessId at 12, TimeStamp at 16, ProviderId at 24, EventDescriptor.Id at 40), then
     // UserData at 96.
     // FFREADLOG_TRACE=<text>: each decision about a followed pid, and opens by other pids of paths containing <text>, as trace
-    // lines (the real-ETW CI test's evidence when it sees nothing). Unset in the daemon.
+    // lines (the real-ETW CI test's evidence when it sees nothing). The daemon starts the helper without it, whatever its own
+    // environment holds (review w6750: it logs paths a person's processes open); only ReadLogDeps.trace, set by the test, passes it.
     static readonly string TraceFilter = Environment.GetEnvironmentVariable("FFREADLOG_TRACE");
     static void Tr(string s) { if (!string.IsNullOrEmpty(TraceFilter)) Say("{\"event\":\"trace\",\"msg\":\"" + Esc(s) + "\"}"); }
 
@@ -363,10 +364,15 @@ static class FfReadLog
             {
                 // a pending entry's events wait for its parent's verdict, a gone process's for its own stop
                 Entry t;
-                if (Tracked.TryGetValue(pid, out t) && t == e && e.Waiting.Count < MAX_WAITING)
+                if (Tracked.TryGetValue(pid, out t) && t == e)
                 {
-                    e.Waiting.Add(new Waiter { Ts = ts, Run = act, Drop = drop });
-                    return;
+                    if (e.Waiting.Count < MAX_WAITING)
+                    {
+                        e.Waiting.Add(new Waiter { Ts = ts, Run = act, Drop = drop });
+                        return;
+                    }
+                    // counted in the minute's stat line (review w6750): a read lost here is not silent
+                    Interlocked.Increment(ref overflow);
                 }
             }
             else run = true;
