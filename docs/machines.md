@@ -117,6 +117,15 @@ so starting nothing, about 15 WMI and perf-counter PowerShells hung beside it, a
   only to a twin with a later start whose `arbiter.json` is fresh (`ARBITER_FRESH_MS`), and a stuck process writes nothing;
   daemonRpc and the live port listen on port 0 (OS-picked), so nothing to bind twice.
 
+**The offline backstop (w6784).** The offline redeploy above leaves two kinds of machine alone: a worker root install
+(BEAST, started on its computer, never redeployed over ssh) and one with agents running. BEAST stayed offline from 07:41Z
+on 2026-11-28 until a person acted. So for such a daemon, offline 10 minutes while its computer answers ssh, the portal
+runs one `machine_daemon restart` at most every 30 minutes (`server/machines.ts` `backstop`, `DAEMON_BACKSTOP`); on
+Windows that asks its supervisor for a fresh daemon, as above. It is warn-only first: it posts `[machines] backstop
+(w6784, warn-only): ... would run machine_daemon restart` instead. `FF_DAEMON_BACKSTOP=enforce` in the portal's
+environment (or `DAEMON_BACKSTOP.mode`) makes it act, `off` turns it off. A daemon stopped on purpose, relocated, or
+waiting for its installer is left alone, and so is a computer ssh does not reach.
+
 **The probe guard (w6784, `server/probeGuard.ts`).** Every program run with a timeout through `execFileOffThread`
 (`server/spawnThread.ts`, so `run()` too) or `runOffThread` (`server/hostProbe.ts`) is a probe of a kind: its `probe` name,
 else its program, arguments and folder. One whose answer has not come 10 s after its timeout (execFile answers only once it

@@ -1,0 +1,1 @@
+- The portal restarts a daemon the offline redeploy leaves alone (a worker root install, or one with agents running) once it has been offline 10 minutes while ssh answers, at most every 30 minutes: warn-only for now (`DAEMON_BACKSTOP`, `FF_DAEMON_BACKSTOP=enforce|off`; w6784).
