@@ -66,23 +66,25 @@ function adopted(t: { after: (fn: () => void) => void }, id: string, host: Parti
   fs.writeFileSync(f.state, JSON.stringify({ op: 'state', info: { ...info(id), status: 'stopped' }, live: false, lastFrom: 'system' }));
   assert.equal(s.adopt(), true);
   assert.equal(s.live, false, 'its agent has ended');
-  const commands = () => fs.readFileSync(f.in, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { op: string; text?: string });
+  const commandsNow = () => fs.readFileSync(f.in, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { op: string; text?: string });
+  /** w6695: commands go to in.jsonl off the loop: read once those given so far are there. */
+  const commands = async () => (await s.flushed(), commandsNow());
   const hostSays = (m: object) => fs.appendFileSync(f.out, JSON.stringify(m) + '\n');
-  return { s, launched, commands, hostSays, old };
+  return { s, launched, commands, commandsNow, hostSays, old };
 }
 
 /** The old host gets a stop, not the message; once it has closed, a new host starts from the run now with the message. */
 async function startsANewHost(r: ReturnType<typeof adopted>, mcp: LaunchSpec['mcp']) {
   r.s.send('#tools', 'system');
-  assert.deepEqual(r.commands().map((c) => c.op), ['attach', 'stop'], 'the old host gets a stop, not the message');
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['attach', 'stop'], 'the old host gets a stop, not the message');
   assert.equal(r.launched.length, 0, 'no new host while the old one still runs');
-  r.hostSays({ op: 'closed', consumed: r.commands().length });
+  r.hostSays({ op: 'closed', consumed: (await r.commands()).length });
   // and exits, as a real host does after its closed line. A stand-in left running made each test wait out the 10 s
   // EXIT_WAIT_MS and a tree kill before the new host, past this 15 s wait on a loaded Windows machine (BEAST, w5915).
   r.old.kill();
   await until('a new host started', () => r.launched.length === 1);
   assert.deepEqual(r.launched[0].spec.mcp, mcp);
-  assert.deepEqual(r.commands().filter((c) => c.op === 'send').map((c) => c.text), ['#tools']);
+  assert.deepEqual((await r.commands()).filter((c) => c.op === 'send').map((c) => c.text), ['#tools']);
 }
 
 test('w2625: a host on other FF Factory code, adopted across the update, gets no message once its agent ended: a new host on the new code carries it', { timeout: 30_000 }, async (t) => {
@@ -104,7 +106,7 @@ test('w2625: a host from before w2625 (its host.json says neither code nor tools
 test("w2625: the same code, tools and credentials keep today's path: the message goes to the closing host", { timeout: 30_000 }, async (t) => {
   const r = adopted(t, 'c4', { code: LOADED_CODE, tools: toolsOf({ mcp: NEW_TOOLS }) }, NEW_TOOLS);
   r.s.send('#tools', 'system');
-  assert.deepEqual(r.commands().map((c) => c.op), ['attach', 'send']);
+  assert.deepEqual((await r.commands()).map((c) => c.op), ['attach', 'send']);
   assert.equal(r.launched.length, 0);
 });
 
