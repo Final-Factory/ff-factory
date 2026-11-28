@@ -43,6 +43,7 @@ const NOT_GIT: Record<string, string> = {
   'machine/daemon.ts|runnerEnvCmd': 'plutil, launchctl and powershell.exe for the macOS and Windows CI runners (machine/runnerEnv.ts, w5999)',
   'server/spawnThread.ts|m.cmd': 'whatever execFileOffThread is given: its callers fence git (proc.run), and the lint checks each caller as a spawner (w6077)',
   'server/spawnThread.ts|cmd': 'the same, on the main thread when the spawn thread is off: its callers fence git (proc.run; w6077)',
+  'server/spawnThread.ts|s.cmd': 'an agent host (node and its script), started detached by launchDetached for machine/agentHost.ts launchHost, never git (w6639)',
   'server/rerunGuard.ts|trustedGh(': 'gh (resolved from a trusted PATH, w5542)',
   'machine/ownerSecrets.ts|cmd': 'gh auth token (trustedGh, w5548)',
   'machine/lowIntegrity.ts|cmd': 'icacls (LowCopies execSync, w5838)',
