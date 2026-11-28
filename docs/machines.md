@@ -682,6 +682,14 @@ npm ci and `run-daemon.ps1` then use that node. When it cannot be placed (no dow
 `WARNING: Daemon node: ...`, keeps the node the daemon had, and the next update tries again: a machine is never left with
 no node for its daemon.
 
+Low workers start that node too: ff-pr, ff-leftovers, ffu-slot, the Unity slot shims and the gh shim and its credential
+helper all run the daemon's `process.execPath`, and Windows needs read access to start an exe. So the read fence gives
+`node-<version>` back to reads (`FENCE_READ_ALLOW`, server/daemonReads.ts; machine/readFenceGaps.test.ts checks every
+node the shims start), and `ensureDaemonNode` sets the folder's own plain Medium label before it moves it into place.
+Without that label, the new folder stays closed to Low reads like the rest of the daemon's folder until the restarted daemon's
+label pass reaches it, which took minutes on LothDesktop (w5980). A label it cannot set counts as a failed placement
+(review w6655).
+
 Recovery needs nobody at the machine: the install keeps the supervisor it replaces as `run-daemon.ps1.old`, and the update
 job's rollback (`rollbackScript`, server/machineDeployWin.ts; scripts/worker/linkJob.ts puts the old code back when the
 new daemon does not come up) puts it back with `app.old`, so the old code starts on the node it ran on before. The one

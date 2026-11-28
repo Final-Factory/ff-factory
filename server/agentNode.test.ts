@@ -6,7 +6,7 @@ import { tmpDir } from './testTmp.ts';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseHolders, holdersScript, type Holder } from './agentNodeHolders.ts';
-import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodeHome, agentNodePathDir, agentNodeStamp, daemonNodeExe, ensureAgentNode, ensureDaemonNode, labelProblem, treeDiff, treeDigest, firewallCheckScript, parseFirewallCheck, type AgentNodeDeps } from './agentNode.ts';
+import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodeHome, agentNodePathDir, agentNodeStamp, daemonNodeDir, daemonNodeExe, ensureAgentNode, ensureDaemonNode, labelProblem, treeDiff, treeDigest, firewallCheckScript, parseFirewallCheck, type AgentNodeDeps } from './agentNode.ts';
 
 /**
  * w1742: the agents' node lives at one fixed path per Windows worker root, so no worker unpacks its own into a session temp
@@ -868,4 +868,28 @@ test("w6603: when the daemon's node cannot be placed the answer is none, the cal
   const f = fake(Buffer.from('x'));
   assert.equal(await ensureDaemonNode(root, { ...f.d, platform: 'darwin' }), undefined, 'Windows only for now');
   assert.deepEqual(f.said, []);
+});
+
+test("w6603 (w6655's review): the daemon's node gets its own plain Medium label before it is moved into place, so Low workers' shims can start it before the daemon's label pass; a refused label keeps the node it had", async () => {
+  const root = tmp();
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    const calls: string[][] = [];
+    const exec = f.d.exec;
+    const d: AgentNodeDeps = { ...f.d, exec: async (cmd, args, o) => (cmd === 'icacls' && calls.push(args), exec(cmd, args, o)) };
+    const exe = (await ensureDaemonNode(root, d))!;
+    const grant = calls.findIndex((a) => a[1] === '/grant');
+    const label = calls.findIndex((a) => a[1] === '/setintegritylevel');
+    assert.ok(grant >= 0 && label > grant, 'the account gets Full (WRITE_OWNER) before the label is set');
+    assert.equal(calls[grant][2], 'TEST\\worker:(OI)(CI)F');
+    assert.deepEqual(calls[label].slice(1), ['/setintegritylevel', '(OI)(CI)medium']);
+    assert.equal(path.basename(calls[label][0]), unpackedName, 'set on the unpacked folder, which the rename carries into place');
+    assert.equal(path.dirname(exe), daemonNodeDir(root));
+    const other = tmp();
+    const refused = fake(zip, { icaclsFails: true });
+    assert.equal(await ensureDaemonNode(other, refused.d), undefined);
+    assert.match(refused.said.at(-1)!, /^WARNING: Daemon node: .*could not label .* readable to Low workers: Access is denied\..*the daemon keeps the node it had/);
+    assert.deepEqual(fs.readdirSync(path.join(other, 'daemon')).filter((n) => n.startsWith('node-')), [], 'nothing unlabelled is left in place');
+  });
 });

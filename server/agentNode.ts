@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { holdersScript, parseHolders, type Holder } from './agentNodeHolders.ts';
 import { currentAccount } from '../machine/lowIntegrity.ts';
+import { AGENT_NODE, DAEMON_NODE_FOLDER } from './agentNodePin.ts';
 
 /**
  * The agents' node on a Windows worker root (w1742; lothsahn, 2026-10-22: "we're making random folders under the temp
@@ -19,18 +20,7 @@ import { currentAccount } from '../machine/lowIntegrity.ts';
  * keeps fitting. Windows only: a Mac or Linux worker has no such prompt.
  */
 
-/**
- * The pinned build: nodejs.org's SHASUMS256.txt for v24.22.1 (fetched and checked 2026-10-22, w1742). `exeSha256` is the
- * node.exe inside that zip and `treeSha256` the digest of all its files (`treeDigest`), both from the zip unpacked with
- * Windows' tar.exe (w5839, 2026-11-25: 1994 files; BEAST's tools\node gave the same two digests).
- */
-export const AGENT_NODE = {
-  version: 'v24.22.1',
-  zip: 'node-v24.22.1-win-x64.zip',
-  sha256: 'd2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5',
-  exeSha256: 'd702daa815eabbff763c7d3808e235cf031cf2ca70211b56847bc72f51e240e5',
-  treeSha256: '3983141a10f864dbf120545a5bb459883bfff0ce450d8831cb0a1e8caddafa7b',
-} as const;
+export { AGENT_NODE, DAEMON_NODE_FOLDER } from './agentNodePin.ts';
 
 /** The firewall group of the node's rule (scripts/worker/firewall.ps1 $NodeGroup). */
 export const NODE_GROUP = 'Final Factory agent node';
@@ -558,7 +548,7 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
  * supervisor (run-daemon.ps1.old, machineDeployWin.ts) still finds the node it named, and a new pin never replaces the
  * folder the running daemon holds open.
  */
-export const daemonNodeDir = (root: string, version: string = AGENT_NODE.version) => path.join(root, 'daemon', `node-${version}`);
+export const daemonNodeDir = (root: string) => path.join(root, 'daemon', DAEMON_NODE_FOLDER);
 export const daemonNodeExe = (root: string) => path.join(daemonNodeDir(root), 'node.exe');
 
 /** Why the node at `dir` is not the pinned download, read by hashing; undefined when it is. Never runs it. */
@@ -649,6 +639,18 @@ export async function ensureDaemonNode(root: string, d: AgentNodeDeps): Promise<
     const x = await d.exec(tar, ['-xf', zip, '-C', stage], { timeoutMs: 10 * 60_000 });
     if (x.code !== 0) throw new Error(`tar could not unpack ${zip}: ${(x.stderr || x.stdout).trim().slice(-300)}`);
     const unpacked = path.join(stage, AGENT_NODE.zip.replace(/\.zip$/, ''));
+    // Its own plain Medium label (No-Write-Up, no No-Read-Up), which a rename keeps: the read fence closes the daemon's
+    // folder to Low reads and gives this folder back (daemonReads.ts FENCE_READ_ALLOW), but only once the restarted daemon's
+    // label pass reaches it, minutes on LothDesktop (w5980); meanwhile the shims Low workers run start this node.exe, and
+    // starting an exe needs read access (w6655's review). The account gets Full on the stage first, as for the agents' node
+    // (w6068: setting a label needs WRITE_OWNER, which a group's Modify lacks).
+    const account = d.account ?? currentAccount();
+    if (account) {
+      const g = await d.exec('icacls', [stage, '/grant', `${account}:(OI)(CI)F`], { timeoutMs: 60_000 });
+      if (g.code !== 0) throw new Error(`could not give ${account} Full on ${stage}, which labelling it needs: ${(g.stderr || g.stdout).trim().slice(-200)}`);
+    }
+    const lab = await d.exec('icacls', [unpacked, '/setintegritylevel', '(OI)(CI)medium'], { timeoutMs: 30 * 60_000 });
+    if (lab.code !== 0) throw new Error(`could not label ${unpacked} readable to Low workers: ${(lab.stderr || lab.stdout).trim().slice(-200)}`);
     const bad = pinnedTreeProblem(unpacked, pin);
     if (bad) throw new Error(`the unpacked node is not the pinned download: ${bad}`);
     const got = await versionOf(d, path.join(unpacked, 'node.exe'));
