@@ -102,13 +102,22 @@ async function plan(root: string, o: Opts = {}) {
 const targetItems = (p: { items: CleanupItem[] }) => p.items.filter((i) => i.rule === 'ffu-runner-target');
 const warnLines = (root: string, p: { listed: { path: string; why: string }[] }) => p.listed.filter((l) => /^warn-only \(runnerTargetMode warn, w6291\): would take /.test(l.why)).map((l) => ({ path: rel(root, l.path), why: l.why }));
 const hashesOf = (paths: string[]) => [...new Set(paths.map((p) => /-([0-9a-f]{16})/.exec(path.basename(p))![1]))].sort();
+const WARN = { runnerTargetMode: 'warn' as const };
 const H = { serde: '0000000000000001', glam: '0000000000000002', simNow: '0000000000000003', simOld: '0000000000000004' };
 
-test('w6291: the default is warn: the stale units are listed with what would go, nothing is planned or removed', async (t) => {
+test('w6291: the default is off: nothing is planned or listed for a runner target', async (t) => {
+  const root = install(t);
+  world(root);
+  assert.equal(INSTALL_LEFTOVER_DEFAULTS.runnerTargetMode, 'off');
+  const p = await plan(root);
+  assert.deepEqual(p.items.map((i) => i.rule), []);
+  assert.deepEqual(warnLines(root, p), []);
+});
+
+test('w6291: warn: the stale units are listed with what would go, nothing is planned or removed', async (t) => {
   const root = install(t);
   const w = world(root);
-  assert.equal(INSTALL_LEFTOVER_DEFAULTS.runnerTargetMode, 'warn');
-  const p = await plan(root);
+  const p = await plan(root, { settings: { runnerTargetMode: 'warn' } });
   assert.deepEqual(p.items.map((i) => i.rule), [], 'warn plans nothing');
   const lines = warnLines(root, p);
   assert.deepEqual(lines.map((l) => l.path), [TARGET]);
@@ -277,7 +286,7 @@ test('w6291 warn: a recorded stale unit a build used again is a miss, counted an
   const warnFile = path.join(root, 'daemon', 'ffu-runner-sweep-warn.json');
   const key = (u: FakeUnit) => `${u.name}-${u.hash}`;
 
-  const first = await plan(root, { warnFile });
+  const first = await plan(root, { warnFile, settings: WARN });
   assert.match(warnLines(root, first)[0].why, /; misses so far: 0 in 0 checks$/);
   const rec1 = JSON.parse(fs.readFileSync(warnFile, 'utf8')).targets[w.target];
   assert.equal(rec1.keepHours, 48);
@@ -285,12 +294,12 @@ test('w6291 warn: a recorded stale unit a build used again is a miss, counted an
   assert.equal(rec1.checks, 0);
 
   // nothing changed: the same units are stale again, no miss
-  const second = await plan(root, { warnFile });
+  const second = await plan(root, { warnFile, settings: WARN });
   assert.match(warnLines(root, second)[0].why, /; misses so far: 0 in 1 checks$/);
 
   // a build since: a new workspace unit that uses glam makes it live again
   writeCargoUnit(w.target, unit('ffu_net', 5, 0.5, { deps: [w.glam], workspace: true }), NOW);
-  const third = await plan(root, { warnFile });
+  const third = await plan(root, { warnFile, settings: WARN });
   const rec3 = JSON.parse(fs.readFileSync(warnFile, 'utf8')).targets[w.target];
   assert.equal(rec3.checks, 2);
   assert.equal(rec3.misses, 1, 'glam is on disk and no longer stale');
@@ -301,7 +310,7 @@ test('w6291 warn: a recorded stale unit a build used again is a miss, counted an
 
   // a recorded unit that was removed meanwhile is not a miss
   fs.rmSync(path.join(w.target, 'debug', '.fingerprint', key(w.simOld)), { recursive: true });
-  await plan(root, { warnFile });
+  await plan(root, { warnFile, settings: WARN });
   const rec4 = JSON.parse(fs.readFileSync(warnFile, 'utf8')).targets[w.target];
   assert.equal(rec4.misses, 1);
   assert.equal(rec4.checks, 3);
@@ -311,20 +320,20 @@ test('w6291 warn: a missing, torn or ill-typed file starts the counts fresh; the
   const root = install(t);
   world(root);
   const warnFile = path.join(root, 'daemon', 'ffu-runner-sweep-warn.json');
-  await plan(root, { warnFile });
+  await plan(root, { warnFile, settings: WARN });
   assert.ok(fs.existsSync(warnFile), 'the missing folder and file are made');
   fs.writeFileSync(warnFile, '{"targets":{"x":{"keepH');
-  const p = await plan(root, { warnFile });
+  const p = await plan(root, { warnFile, settings: WARN });
   assert.match(warnLines(root, p)[0].why, /misses so far: 0 in 0 checks$/);
   assert.equal(Object.keys(JSON.parse(fs.readFileSync(warnFile, 'utf8')).targets).length, 1, 'rewritten whole');
   fs.writeFileSync(warnFile, JSON.stringify({ targets: { [targetOf(root)]: { keepHours: 'x', units: 3 }, other: null } }));
-  assert.match(warnLines(root, await plan(root, { warnFile }))[0].why, /misses so far: 0 in 0 checks$/);
+  assert.match(warnLines(root, await plan(root, { warnFile, settings: WARN }))[0].why, /misses so far: 0 in 0 checks$/);
   // mode on neither reads nor writes it
   const before = fs.readFileSync(warnFile, 'utf8');
   await plan(root, { warnFile, settings: { runnerTargetMode: 'on' } });
   assert.equal(fs.readFileSync(warnFile, 'utf8'), before);
   // no file named: warn lists, counts nothing
-  const bare = await plan(root, {});
+  const bare = await plan(root, { settings: WARN });
   assert.doesNotMatch(warnLines(root, bare)[0].why, /misses so far/);
 });
 
@@ -332,13 +341,13 @@ test('w6291 warn: the misses kept for a person are the last 20', async (t) => {
   const root = install(t);
   const w = world(root);
   const warnFile = path.join(root, 'daemon', 'ffu-runner-sweep-warn.json');
-  await plan(root, { warnFile });
+  await plan(root, { warnFile, settings: WARN });
   const rec = JSON.parse(fs.readFileSync(warnFile, 'utf8'));
   rec.targets[w.target].missedUnits = Array.from({ length: 25 }, (_, i) => `old-${String(i).padStart(16, '0')}`);
   rec.targets[w.target].misses = 25;
   fs.writeFileSync(warnFile, JSON.stringify(rec));
   writeCargoUnit(w.target, unit('ffu_net', 5, 0.5, { deps: [w.glam], workspace: true }), NOW);
-  await plan(root, { warnFile });
+  await plan(root, { warnFile, settings: WARN });
   const after = JSON.parse(fs.readFileSync(warnFile, 'utf8')).targets[w.target];
   assert.equal(after.missedUnits.length, 20);
   assert.equal(after.missedUnits.at(-1), `glam-${w.glam.hash}`);
@@ -356,10 +365,10 @@ test('w6291: a unit key drops the lib prefix and the extension; a superseded obj
 
 test('w6291: the settings parse: only off, warn and on are modes; hours and cap are held to their ranges', () => {
   const d = INSTALL_LEFTOVER_DEFAULTS;
-  assert.deepEqual([d.runnerTargetMode, d.runnerTargetKeepHours, d.runnerTargetCapGB], ['warn', 48, 24]);
-  assert.equal(installLeftoverSettings({}).runnerTargetMode, 'warn');
-  assert.equal(installLeftoverSettings(undefined).runnerTargetMode, 'warn');
-  for (const bad of ['enforce', 'ON', '', 1, true, null, {}]) assert.equal(installLeftoverSettings({ runnerTargetMode: bad }).runnerTargetMode, 'warn', String(bad));
+  assert.deepEqual([d.runnerTargetMode, d.runnerTargetKeepHours, d.runnerTargetCapGB], ['off', 48, 24]);
+  assert.equal(installLeftoverSettings({}).runnerTargetMode, 'off');
+  assert.equal(installLeftoverSettings(undefined).runnerTargetMode, 'off');
+  for (const bad of ['enforce', 'ON', '', 1, true, null, {}]) assert.equal(installLeftoverSettings({ runnerTargetMode: bad }).runnerTargetMode, 'off', String(bad));
   for (const ok of ['off', 'warn', 'on'] as const) assert.equal(installLeftoverSettings({ runnerTargetMode: ok }).runnerTargetMode, ok);
   assert.equal(installLeftoverSettings({ runnerTargetKeepHours: 0 }).runnerTargetKeepHours, 0);
   assert.equal(installLeftoverSettings({ runnerTargetKeepHours: 24 * 365 }).runnerTargetKeepHours, 24 * 365);
@@ -440,7 +449,7 @@ test('w6291 (review w6301): the warn file is written whole through a rename, and
   const root = install(t);
   world(root);
   const warnFile = path.join(root, 'daemon', 'ffu-runner-sweep-warn.json');
-  await plan(root, { warnFile });
+  await plan(root, { warnFile, settings: WARN });
   assert.ok(JSON.parse(fs.readFileSync(warnFile, 'utf8')).targets);
   assert.deepEqual(fs.readdirSync(path.dirname(warnFile)), ['ffu-runner-sweep-warn.json']);
 });
