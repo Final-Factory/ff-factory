@@ -9,6 +9,7 @@ import type { Requester, WorkItem } from '../shared/types.ts';
 import { unfitWhy } from '../shared/capacity.ts';
 import { normalizeSetting } from './appConfig.ts';
 import { setup } from './orchestratorsTestKit.ts';
+import { citeAvoid } from './orchestrators.ts';
 
 const LOTH: Requester = { userId: 'lothsahn', displayName: 'Lothsahn' };
 const T = '2026-11-26T18:39:00.000Z';
@@ -229,4 +230,20 @@ test('w6758 (review 5): a restart logs nothing again however long the log has gr
   store.putWork({ ...store.work.get('w6690')!, queuedFor: { at: T } });
   assert.deepEqual(o.auditExclusions(), []);
   assert.equal(store.work.get('w6690')!.exclusionsLogged, undefined);
+});
+
+test('w6758 (the w6760 review): an asker\'s copy of the server\'s w2041 cite is marked as theirs; a line logged before w6758 gets its mark', (t) => {
+  const p = work('w6707', { pair: { legs: 2, for: 'w6673', retryOf: 'w6690', avoid: ['lothlaptop'] } });
+  citeAvoid(p, ['lothlaptop'], 'an earlier leg of w6690 failed there (w2041)');
+  assert.equal(p.pair!.avoidWhy!.lothlaptop, 'the asker wrote: an earlier leg of w6690 failed there (w2041)');
+  assert.equal(auditExclusions(p, facts([]))[0].keep, false, 'not the server\'s cite');
+  citeAvoid(p, ['lothlaptop'], 'an earlier leg of w6690 failed there (w2041)', true);
+  assert.equal(auditExclusions(p, facts([]))[0].kind, 'failed-leg');
+  // (b) A warning from before w6758 lives only in the log: the first audit after the restart keeps its mark.
+  const { o, store } = kit(t, () => facts([...store.work.values()]));
+  const w = work('w6691', { title: 'Bench', queuedFor: { at: T, needs: ['lothlaptop', 'lothdesktop'] } });
+  w.log = ['2026-11-28T08:00:00Z: w6687 warn-only, nothing dropped: enforcing would drop beast from its queue needs: left out'];
+  store.putWork(w);
+  assert.deepEqual(o.auditExclusions(), []);
+  assert.deepEqual(store.work.get('w6691')!.exclusionsLogged, ['queuedFor.needs|beast']);
 });
