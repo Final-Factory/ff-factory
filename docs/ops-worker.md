@@ -307,10 +307,20 @@ Learned on BEAST, 2026-11-26:
   `WaitForExit(<ms>)`, and kill only that call when it times out. `Restart-Service WSLService -Force` hangs in
   StopPending as well; `Stop-Process -Id <the wslservice pid> -Force` works, and the service starts again by itself
   within seconds (handles back to a few hundred).
+- A script started with `&` over ssh is blocked on a Windows machine with a restrictive execution policy
+  (LothDesktop; w6797). Run it as `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <script>`, the way the
+  ffsb-helper tasks themselves run.
 - Restarting the service does not give back the kernel's paged pool (it stayed at about 19 GB): only a reboot does, and
   that is a person's call.
 - The WSL distros and their disk folders, without `wsl.exe`: `HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss`
   (each key's `DistributionName` and `BasePath`).
+
+## A multi-step job on a machine: check each step (w6797)
+
+Check that each install or change step worked before the next one, for example by reading a scheduled task's arguments
+back after registering it. On LothDesktop's forced test of the nightly dedup self-repair (w6597) an install failed
+unnoticed and the next step ran the repair in the wrong mode. It did no harm, but it could have. Report each check's
+result with the step.
 
 ## How it runs
 
