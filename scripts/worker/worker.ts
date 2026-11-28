@@ -2059,6 +2059,8 @@ export interface UpdateFlags {
   longRuns?: 'off' | 'warn' | 'on';
   /** w6378: daemon.json liveRunGuard: warn (the default) logs a WARNING when a sandbox trim, release or delete would hit a sandbox where a run of its worker still lives; off looks at nothing (the way back). Unset carries daemon.json's. */
   liveRunGuard?: 'off' | 'warn';
+  /** w6599: daemon.json readLog: warn (the default) logs what workers open outside the work folder, Windows only; off stops it (machine/readLog.ts). */
+  readLog?: 'off' | 'warn';
   /** w6412: daemon.json editorGitPackages: how a sandbox editor gets a git package its Packages/manifest.json names that Library/PackageCache lacks (machine/gitPackages.ts). warn (the default) only names the missing packages in the start note, unity status and the Package Manager dialog notice; on also fetches each into a mirror under <root>/cache-medium/git-packages with the daemon's own git and credential, and gives a Windows Low-integrity editor the workers' Git on PATH and a url.insteadOf to that mirror, so its Package Manager fetches without a credential; off looks at nothing (the way back). Takes effect at the editor's next start. Unset carries daemon.json's. */
   editorGitPackages?: 'off' | 'warn' | 'on';
   /** The Dev Drive (w900): "on" makes one if the install has none; unset keeps the one it has (an update never makes one on its own). */
@@ -2253,6 +2255,13 @@ export function liveRunGuardFlag(v: string | undefined): 'off' | 'warn' | undefi
   return v;
 }
 
+/** `--read-log off|warn` (w6599): anything else is refused, never guessed at. Exported for tests. */
+export function readLogFlag(v: string | undefined): 'off' | 'warn' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'off' && v !== 'warn') throw new Error(`--read-log is off or warn, not "${v}"`);
+  return v;
+}
+
 /** `--editor-git-packages off|warn|on` (w6412): anything else is refused, never guessed at. Exported for tests. */
 export function editorGitPackagesFlag(v: string | undefined): 'off' | 'warn' | 'on' | undefined {
   if (v === undefined) return undefined;
@@ -2266,6 +2275,10 @@ export function applyEditorGitPackages(config: Record<string, unknown>, setting:
 /** daemon.json with liveRunGuard set (w6378); every platform. Exported for tests. */
 export function applyLiveRunGuard(config: Record<string, unknown>, setting: 'off' | 'warn' | undefined): Record<string, unknown> {
   return setting ? { ...config, liveRunGuard: setting } : config;
+}
+/** daemon.json with readLog set (w6599); every platform. Exported for tests. */
+export function applyReadLog(config: Record<string, unknown>, setting: 'off' | 'warn' | undefined): Record<string, unknown> {
+  return setting ? { ...config, readLog: setting } : config;
 }
 
 /** `--runner-priority off|warn|enforce` (w6163): anything else is refused, never guessed at. Exported for tests. */
@@ -2328,7 +2341,7 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
     ...(f.devDriveSkip ? { devDriveSkip: f.devDriveSkip } : {}),
     ...(f.moveToDevDrive ? { moveToDevDrive: true, devDrive: 'on' as const } : {}),
-    carry: { ...applyEditorGitPackages(applyLiveRunGuard(applyLongRuns(applyHostRestage(applySharedLock(applyRunnerPriority(applyWinCiFirst(applyToolsDiskLock(applyDaemonTmpdirSetting(applyMediumAgentFolders(applyPathFence(applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), f.pathFence, platform), f.mediumAgentFolders), f.daemonTmpdir), f.toolsDiskLock, platform), f.winCiFirst, platform), f.runnerPriority, platform), f.sharedLock), f.hostRestage), f.longRuns), f.liveRunGuard), f.editorGitPackages), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
+    carry: { ...applyReadLog(applyEditorGitPackages(applyLiveRunGuard(applyLongRuns(applyHostRestage(applySharedLock(applyRunnerPriority(applyWinCiFirst(applyToolsDiskLock(applyDaemonTmpdirSetting(applyMediumAgentFolders(applyPathFence(applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), f.pathFence, platform), f.mediumAgentFolders), f.daemonTmpdir), f.toolsDiskLock, platform), f.winCiFirst, platform), f.runnerPriority, platform), f.sharedLock), f.hostRestage), f.longRuns), f.liveRunGuard), f.editorGitPackages), f.readLog), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
     // A test install stays one through its updates (w1596): daemon.json says so (daemonJson, --no-cleanup).
     ...(config.leftovers === false ? { noCleanup: true } : {}),
     update: true,
@@ -2576,6 +2589,7 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   if (f.hostRestage) say(`host restage: ${f.hostRestage}`);
   if (f.longRuns) say(`long runs: ${f.longRuns}`);
   if (f.liveRunGuard) say(`live-run guard: ${f.liveRunGuard}`);
+  if (f.readLog) say(`read log: ${f.readLog}`);
   if (f.editorGitPackages) say(`editor git packages: ${f.editorGitPackages}`);
   // Every prerequisite first (w629), before anything is fetched, stopped or restarted: m5's update over ssh found no
   // git-lfs, and its refused run still restarted the daemon and then reported the old one as current.
@@ -3197,6 +3211,9 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
             [--live-run-guard off|warn] (w6378, every OS: warn, the default, logs a WARNING when a sandbox trim, release or delete would hit
              a sandbox where a run of its worker still lives; off looks at nothing, the way back; daemon.json liveRunGuard;
              default: as daemon.json has it, warn if it has none)
+            [--read-log off|warn] (w6599, Windows machines: warn, the default, logs what workers open outside the work folder and not on its
+             allowlist, refusing nothing; off runs no ETW session, the way back; daemon.json readLog;
+             default: as daemon.json has it, warn if it has none)
             [--editor-git-packages off|warn|on] (w6412, every OS: how a sandbox editor gets a git package its Packages/manifest.json names that
              Library/PackageCache lacks, machine/gitPackages.ts; warn, the default, only names the missing packages in the start note, unity status
              and the Package Manager dialog notice; on also fetches each into a mirror under <root>/cache-medium/git-packages with the daemon's own
@@ -3316,6 +3333,7 @@ export async function main(argv = process.argv.slice(2)) {
     const hostRestage = flags.has('host-restage') ? hostRestageFlag('') : hostRestageFlag(opts['host-restage']);
     const longRuns = flags.has('long-runs') ? longRunsFlag('') : longRunsFlag(opts['long-runs']);
     const liveRunGuard = flags.has('live-run-guard') ? liveRunGuardFlag('') : liveRunGuardFlag(opts['live-run-guard']);
+    const readLog = flags.has('read-log') ? readLogFlag('') : readLogFlag(opts['read-log']);
     const editorGitPackages = flags.has('editor-git-packages') ? editorGitPackagesFlag('') : editorGitPackagesFlag(opts['editor-git-packages']);
     await update(opts.root, {
       maxSandboxes: opt('max-sandboxes'),
@@ -3342,6 +3360,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(hostRestage ? { hostRestage } : {}),
       ...(longRuns ? { longRuns } : {}),
       ...(liveRunGuard ? { liveRunGuard } : {}),
+      ...(readLog ? { readLog } : {}),
       ...(editorGitPackages ? { editorGitPackages } : {}),
       ...devDriveFlags(opts, flags),
     });

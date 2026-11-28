@@ -461,6 +461,73 @@ Limits:
 - Same as the write half: the guard (server/daemonReads.ts) still decides what a worker's own tools may read; the fence
   is what holds for every process the worker starts.
 
+## The read log: what workers open outside the work folder (w6599, Windows)
+
+lothsahn, 2026-11-27, choosing after w6599's research (r398: every Windows route that refuses reads by default and keeps Git
+Bash, node, editors and players working needs a third-party driver): "Keep today's fence and add read logging only". So the
+fences above stay as they are, nothing changes on any system drive, and the daemon records what workers read outside the work
+folder and flags it, refusing nothing. It logs paths and the reading program only, never a file's contents or a credential.
+
+- `machine/winReadLog.cs`, built with Add-Type into `<appDir>/bin/ffreadlog-<hash>.exe` like the job helper, runs one
+  real-time ETW session a machine, `ffw-readlog`, on Windows' own Kernel-Process (process start and stop) and Kernel-File
+  (event 12, Create) providers. The daemon (Medium) may start it as a member of Administrators or Performance Log Users; a
+  Low worker may not (measured on BEAST: "Access is denied").
+- It follows every process below a live agent host (the daemon sends the hosts every 15 s; the host's own opens are not
+  counted) and reports each file one of them opens outside the allowlist, `readAllowWin` in `machine/readLog.ts`. An open is
+  what Kernel-File sees: a stat, a directory listing and an open for writing count as well as a read.
+- A worker's tool whose shell exited, or one that ran on through a daemon restart, has no living host above it. At start the
+  helper therefore also follows a Low process with no tracked parent, but only one that is a worker's: its environment
+  carries FF_SESSION_ID (read from the process as `machine/leftovers.ts` does), or it runs a program from the work folder (a
+  Git Bash tool shows no environment, w1575). Low alone is not enough: a person's Firefox, Slack, Discord, Signal, Spotify
+  and Steam run Low processes too (found by w6715's review on BEAST), and their paths stay out of the log.
+- Windows hands a dead process's pid out again, and a process keeps naming its dead parent's pid (61 of BEAST's 132
+  processes did, Discord, Slack and Firefox among them, w6723's review). And ETW may lose a stop event, so a followed pid's
+  entry can outlive its process while Windows gives the pid to a person's (w6728's review). So no pid is trusted on its own
+  anywhere in the helper; every followed process is known by its pid and its creation time:
+  - a root: the daemon sends each host as `<pid>:<startedAt>`, the start time its host record gives, and the helper takes
+    the pid only if its process started within the daemon's own window of that time (90 s before to 5 s after, as
+    `machine/hostWatch.ts` checks a host). Else it says `root-refused`, logged as `read log: agent host <pid> not followed`.
+    A host that exits is dropped at its stop event and is never taken back under a reused pid. A read names its host by both
+    numbers, so a reused host pid never names another session;
+  - an event (an open, or a followed process's start of a child) counts only if it is the process's own: stamped by the
+    session's clock within the process's span, from its start event (or the moment it was found running) to its own stop
+    event. Before that stop, a running process with the entry's creation time on the pid makes it so. A pid with no running
+    process, or another one, is never trusted on its own (w6734's review: ETW may lose a stop event, count a loss late, or
+    deliver its per-CPU buffers out of order): the event waits for the process's own stop, matched by the creation time the
+    stop event carries, and counts only if stamped before it. A stop of another process on the pid (the followed one's stop
+    lost, the pid given out again) drops the entry and what waited. The session delivers about a second late, so a short tool
+    has always exited by the time its opens are handled; that wait is what lets them through (w6599's CI);
+  - a child (at its start event, and in the walk when a root is named): followed only when its creation time is at or after
+    its parent's, and the start is its parent's own as above. At a start event the time comes from the event alone: one
+    without it is not followed, since the process on the pid now may be a later holder's;
+  - an insert after the walk's checks: each process is checked again under the lock it is inserted under, so one whose stop
+    was handled between its check and its insert is not inserted (no stop event would ever remove it);
+  - a Low orphan: its creation time is read before and after its checks and must be the same, and a person's process is
+    remembered as not a worker's by pid and creation time, so a worker's process given the pid later is looked at afresh;
+  - every minute, each followed pid whose process is gone or has another creation time is dropped, with what waited, at the
+    second check that finds it so (its stop may still be on its way at the first).
+
+  `ffreadlog --selftest` runs these rules against a made-up process table (a lost stop then a reused pid, a short tool whose
+  opens are handled after it exited, a stop handled before a late open, a later holder's stop in place of the tool's, a
+  process exiting between its check and its insert, a start event without its creation time); the
+  Windows CI job runs it. A host that dies leaves its descendants followed (its orphaned tools are a worker's still, each
+  checked by its own creation time) until they exit; the daemon keeps the host's name a day for their reads.
+- Each report goes to `<appDir>/logs/read-log-<UTC date>.jsonl` (`t`, `session`, `sandbox`, `pid`, `image`, `path`; at most
+  50 MB a day, kept 14 days) and, once a day per worker and folder (a path's first three parts), to daemon.log as
+  `read log: <session> (<sandbox>): <program> read <path>, outside the work folder and not on the allowlist (warn only:
+  nothing was refused)`, at most 300 such lines a day. Its first minute says how many file opens it saw, so a session that
+  sees nothing shows. Past the 300 lines only a count goes on (`read log: <n> more reads outside the work folder on <date>`).
+- The allowlist: the work folder; `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` and `%ProgramData%` (lothsahn's
+  w6599 answer kept ProgramData readable); a drive's root and the folders above the work folder, as paths only. Each entry
+  carries its reason in the code. Profiles (`C:\Users\...`) and Public are not on it: a read there is what the log is for. A
+  new entry comes by a harness PR with its reason (lothsahn: "Workers should have to justify allowlists for files or folders
+  they can access--then have those added to the harness as needed"), never granted ad hoc.
+- daemon.json `readLog`: `warn` (unset: the default) or `off`, which starts no session and stops one an earlier daemon left
+  behind; the way back with nobody at the machine is `ops_worker machine_update read_log off`, or the installer's
+  `--read-log` / `-ReadLog`. A helper that cannot start (no rights, no compiler) logs `read log: off for now, <why>` and is
+  tried again hourly.
+- macOS and Linux are later stages.
+
 ## Owner secrets: gh login, ~/.ssh, browsers, the Keychain (w5548, w5553, w5560)
 
 Before this, a fenced Mac worker read everything in the owner's home outside the root: measured on m5 (2026-11-25), a

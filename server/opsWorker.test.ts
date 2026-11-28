@@ -1153,6 +1153,16 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   }
   assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'off'), ['-LiveRunGuard off']);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'warn'), ['--live-run-guard warn'], 'every OS');
+  // w6599: read log, off or warn and nothing else, Windows only; the link and ssh routes both carry it.
+  for (const bad of ['on', 'enforce', '']) assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', readLog: bad as never }), /read_log: off or warn/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', readLog: 'off' }), /read_log: Windows only, and biscuit is not a Windows PC/);
+  for (const m of ['off', 'warn'] as const) {
+    ops.machineInstall(ben, { machine: 'beast', workId: 'w847', readLog: m });
+    await new Promise((r) => setTimeout(r, 300));
+    const rlWin = store.readTranscript(OPS_ID, 360).filter((e) => e.kind === 'user').at(-1) as { text: string };
+    assert.ok(rlWin.text.includes(`-ReadLog ${m}"'`), rlWin.text);
+  }
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'off'), ['-ReadLog off']);
   // w6412: editor git packages, off, warn or on and nothing else, every OS; the link and ssh routes both carry it.
   for (const bad of ['yes', 'enforce', '']) assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', editorGitPackages: bad as never }), /editor_git_packages: off, warn or on/);
   for (const m of ['off', 'warn', 'on'] as const) {
@@ -1241,6 +1251,15 @@ test('w1596: machine_update of a machine whose daemon updates over its own link:
   const beforeLrg = asked.length;
   assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', liveRunGuard: 'on' as never }), /live_run_guard: off or warn/);
   assert.equal(asked.length, beforeLrg, 'a refused value asks nothing');
+  // w6599: the read log alone is a valid update over the link on Windows; a value off the list, or a non-Windows machine, never goes.
+  for (const m of ['off', 'warn'] as const) {
+    ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', readLog: m });
+    assert.deepEqual(asked.at(-1), { id: 'coosego', flags: { readLog: m } });
+  }
+  const beforeRl = asked.length;
+  assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', readLog: 'on' as never }), /read_log: off or warn/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', readLog: 'off' }), /read_log: Windows only, and penguin is not a Windows PC/);
+  assert.equal(asked.length, beforeRl, 'a refused value asks nothing');
   // w6412: the editor git packages setting alone is a valid update over the link on every OS; a value off the list never goes.
   for (const [id, m] of [['coosego', 'off'], ['penguin', 'warn'], ['coosego', 'on']] as const) {
     ops.machineInstall(ben, { machine: id, workId: 'w847', editorGitPackages: m });

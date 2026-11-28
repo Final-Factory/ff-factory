@@ -17,7 +17,7 @@ import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { tmpDir } from '../server/testTmp.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyToolsDiskLock, toolsDiskLockFlag, applyWinCiFirst, winCiFirstFlag, applyRunnerPriority, runnerPriorityFlag, applyHostRestage, hostRestageFlag, applyLongRuns, longRunsFlag, applyLiveRunGuard, liveRunGuardFlag, applyEditorGitPackages, editorGitPackagesFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applySharedLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, sharedLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
+import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyToolsDiskLock, toolsDiskLockFlag, applyWinCiFirst, winCiFirstFlag, applyRunnerPriority, runnerPriorityFlag, applyHostRestage, hostRestageFlag, applyLongRuns, longRunsFlag, applyLiveRunGuard, liveRunGuardFlag, applyReadLog, readLogFlag, applyEditorGitPackages, editorGitPackagesFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applySharedLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, sharedLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -1158,6 +1158,23 @@ test('w6378: worker update --live-run-guard writes liveRunGuard to daemon.json o
   assert.equal(liveRunGuardFlag(undefined), undefined);
   for (const m of ['off', 'warn']) assert.equal(liveRunGuardFlag(m), m);
   for (const bad of ['on', 'OFF', 'enforce', '']) assert.throws(() => liveRunGuardFlag(bad), /--live-run-guard is off or warn/);
+});
+
+test('w6599: worker update --read-log writes readLog to daemon.json on every OS; unset carries it; anything but off or warn is refused', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-rl-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { readLog?: 'off' | 'warn' }, platform: NodeJS.Platform = 'win32') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('readLog' in written(BEAST_CONFIG, {}), false, 'no key unless asked (absent: warn)');
+  for (const p of ['win32', 'linux', 'darwin'] as const) for (const m of ['off', 'warn'] as const) assert.equal(written(BEAST_CONFIG, { readLog: m }, p).readLog, m, `${p} ${m}`);
+  const had = { ...BEAST_CONFIG, readLog: 'off' };
+  assert.equal(written(had, {}).readLog, 'off', 'unset carries it');
+  assert.equal(written(had, { readLog: 'warn' }).readLog, 'warn', 'the way back replaces it');
+  const cfg = { a: 1 };
+  assert.equal(applyReadLog(cfg, undefined), cfg, 'unset: the very config');
+  assert.deepEqual(applyReadLog(cfg, 'off'), { a: 1, readLog: 'off' });
+  assert.equal(readLogFlag(undefined), undefined);
+  for (const m of ['off', 'warn']) assert.equal(readLogFlag(m), m);
+  for (const bad of ['on', 'OFF', 'enforce', '']) assert.throws(() => readLogFlag(bad), /--read-log is off or warn/);
 });
 
 test('w6412: worker update --editor-git-packages writes editorGitPackages to daemon.json on every OS; unset carries it; anything but off, warn or on is refused', () => {
