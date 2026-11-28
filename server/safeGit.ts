@@ -206,8 +206,10 @@ const QUIET_OPT = new Set(['checkout', 'switch', 'stash apply', 'stash pop']);
  * Calls that look into every submodule whatever any option says (measured with `ignore = none`, git 2.56.1.windows.1):
  * `commit` (with nothing staged, and `--dry-run`), `stash` (push, save, bare, create, and `stash branch`, which takes no
  * `--quiet`), `describe --dirty` and `--broken`, and an autostash (`rebase`, `merge` or `pull` with `--autostash`, or a
- * caller's `-c rebase.autoStash` or `merge.autoStash`). The fence lists the whole index and refuses them in a repository
- * with a submodule (gitlinkCovered).
+ * caller's `-c rebase.autoStash` or `merge.autoStash`). Also a real merge (`merge` or `pull` other than `--ff-only`; w6713:
+ * `merge --no-ff`, `--squash`, `--no-edit` and `pull --no-rebase` ran the filter) and `difftool` and `mergetool`, whose child
+ * git gets no option of the fence's: a `-c submodule.<name>.ignore` would need each name, and a merged .gitmodules can bring
+ * a new one. The fence lists the whole index and refuses them in a repository with a submodule (gitlinkCovered).
  */
 export function wholeIndexCall(args: string[]): boolean {
   const { sub } = splitGlobal(args);
@@ -217,8 +219,11 @@ export function wholeIndexCall(args: string[]): boolean {
   if (name === 'commit') return true;
   if (name === 'stash') return !rest[0] || rest[0].startsWith('-') || /^(push|save|create|branch)$/.test(rest[0]);
   if (name === 'describe') return opts.some((o) => (o.startsWith('--di') && isOpt(o, '--dirty')) || (o.startsWith('--b') && isOpt(o, '--broken')));
+  if (name === 'difftool' || name === 'mergetool') return true;
   if (!/^(rebase|merge|pull)$/.test(name)) return false;
   if (opts.some((o) => o.startsWith('--au') && isOpt(o, '--autostash'))) return true;
+  // `merge --abort` and `--quit` reset to a commit; `--continue` commits (refused above as commit would be).
+  if (name !== 'rebase' && !opts.some((o) => (o.startsWith('--ff-') && isOpt(o, '--ff-only')) || (name === 'merge' && ((o.startsWith('--ab') && isOpt(o, '--abort')) || (o.startsWith('--q') && isOpt(o, '--quit')))))) return true;
   for (let i = 0; i < sub; i++) {
     const a = args[i]!;
     const pair = a === '-c' || a === '--config-env' ? args[i + 1] ?? '' : a.startsWith('--config-env=') ? a.slice(13) : a.startsWith('-c') ? a.slice(2) : '';

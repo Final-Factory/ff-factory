@@ -826,11 +826,11 @@ test('w6630: a call that recurses into submodules by its own option is refused; 
   assert.deepEqual(gitlinkListArgs(['--literal-pathspecs', 'add', '-A']), [...ls, ':/'], 'the listing runs with literal pathspecs off');
   assert.deepEqual(gitlinkListArgs(['mv', '-k', 'sub', 'sub2']), [...ls, 'sub', 'sub2']);
   // w6691: calls that look into every submodule whatever any option says list the whole index.
-  for (const a of [['commit', '-a'], ['commit', '-q', '-m', 'x', '--', 'f'], ['stash'], ['stash', '-q'], ['stash', 'push', '-q'], ['stash', 'save', 'x'], ['stash', 'create'], ['stash', 'branch', 'b'], ['describe', '--dirty'], ['describe', '--always', '--broken=-b'], ['describe', '--dir'], ['rebase', '--autostash', 'main'], ['merge', '--autos', 'x'], ['pull', '--autostash'], ['-c', 'rebase.autoStash=true', 'rebase', 'main'], ['-cmerge.autostash', 'merge', 'x'], ['--config-env=rebase.autostash=V', 'pull']]) {
+  for (const a of [['commit', '-a'], ['commit', '-q', '-m', 'x', '--', 'f'], ['stash'], ['stash', '-q'], ['stash', 'push', '-q'], ['stash', 'save', 'x'], ['stash', 'create'], ['stash', 'branch', 'b'], ['describe', '--dirty'], ['describe', '--always', '--broken=-b'], ['describe', '--dir'], ['rebase', '--autostash', 'main'], ['merge', '--autos', 'x'], ['pull', '--autostash'], ['-c', 'rebase.autoStash=true', 'rebase', 'main'], ['-cmerge.autostash', 'merge', 'x'], ['--config-env=rebase.autostash=V', 'pull'], ['merge', 'x'], ['merge', '--no-ff', '-m', 'x', 'x'], ['merge', '--squash', 'x'], ['merge', '--continue'], ['merge', '--ff', 'x'], ['pull'], ['pull', '--no-rebase', '.', 'x'], ['pull', '--rebase'], ['difftool', '-y'], ['mergetool']]) {
     assert.ok(wholeIndexCall(a), a.join(' '));
     assert.deepEqual(gitlinkListArgs(a), [...ls, ':/'], a.join(' '));
   }
-  for (const a of [['stash', 'list'], ['stash', 'pop'], ['stash', 'show', '-p'], ['describe', '--tags'], ['describe', '--', '--dirty'], ['rebase', 'main'], ['rebase', '--no-autostash', 'main'], ['merge', '--ff-only', '@{u}'], ['-c', 'rebase.autoStash=false', 'rebase', 'main'], ['checkout', 'main'], ['status']]) {
+  for (const a of [['stash', 'list'], ['stash', 'pop'], ['stash', 'show', '-p'], ['describe', '--tags'], ['describe', '--', '--dirty'], ['rebase', 'main'], ['rebase', '--no-autostash', 'main'], ['merge', '--ff-only', '@{u}'], ['merge', '--ff-o', 'x'], ['merge', '--abort'], ['merge', '--quit'], ['pull', '--ff-only'], ['-c', 'rebase.autoStash=false', 'rebase', 'main'], ['checkout', 'main'], ['status']]) {
     assert.ok(!wholeIndexCall(a), a.join(' '));
     assert.equal(gitlinkListArgs(a), undefined, a.join(' '));
   }
@@ -937,7 +937,7 @@ test('w6630: a submodule’s planted uploadpack and filter run on plain git, nev
     assert.equal(fetch.status, 0, fetch.stderr);
     assert.equal(f.ran(), '', 'fence: fetch');
     advance();
-    const pull = fenced('-c', 'user.name=t', '-c', 'user.email=t@users.noreply.github.com', 'pull', '-q', '--no-rebase', 'origin', 'master');
+    const pull = fenced('-c', 'user.name=t', '-c', 'user.email=t@users.noreply.github.com', 'pull', '-q', '--ff-only', 'origin', 'master');
     assert.equal(pull.status, 0, pull.stderr);
     assert.equal(f.ran(), '', 'fence: pull');
     // The submodule at the commit the gitlink names (the pulls moved it; rm compares its HEAD before it looks inside).
@@ -996,6 +996,17 @@ test('w6630: a submodule’s planted uploadpack and filter run on plain git, nev
       forced(...a);
       assert.match(f.ran(), /clean/, `plain git with the forced config: ${a.join(' ')} runs the submodule’s filter`);
     }
+    // w6713: a real merge's child git gets no option of the fence's.
+    git(victim, 'checkout', '-q', '-b', 'side');
+    fs.writeFileSync(path.join(victim, 'side.txt'), 'side\n');
+    git(victim, 'add', 'side.txt');
+    git(victim, ...who, 'commit', '-qm', 'side');
+    git(victim, 'checkout', '-q', 'master');
+    f.ran();
+    forced(...who, 'merge', '--no-ff', '-m', 'x', 'side');
+    assert.match(f.ran(), /clean/, 'plain git with the forced config: merge --no-ff runs the submodule’s filter');
+    git(victim, 'reset', '-q', '--hard', 'HEAD~1');
+    f.ran();
     // Through the fence, the inserted --ignore-submodules=dirty and --quiet stop these.
     for (const a of [['status', '--porcelain'], ['diff'], ['diff-files'], ['diff-index', 'HEAD'], ['checkout', 'master'], ['switch', 'other'], ['checkout', '--no-quiet', 'master']]) {
       const r = fenced(...a);
@@ -1013,7 +1024,7 @@ test('w6630: a submodule’s planted uploadpack and filter run on plain git, nev
     // The calls no option stops are refused in a repository with a submodule, and so are add, rm and mv by any spelling.
     const list = path.join(f.root, 'list.txt');
     fs.writeFileSync(list, 'sub\n');
-    for (const a of [['commit', '-q', '-m', 'x'], ['commit', '--dry-run'], ['stash'], ['stash', 'push', '-q'], ['stash', 'branch', 'xb'], ['describe', '--dirty', '--always'], ['rebase', '--autostash', 'other'], ['merge', '--autostash', 'other'], ['-c', 'rebase.autoStash=true', 'rebase', 'other'], ['--icase-pathspecs', 'add', 'SUB'], ['--literal-pathspecs', 'add', 'sub'], ['add', '--pathspec-fr', list], ['mv', '-n', 'sub', 'sub2']]) {
+    for (const a of [['commit', '-q', '-m', 'x'], ['commit', '--dry-run'], ['stash'], ['stash', 'push', '-q'], ['stash', 'branch', 'xb'], ['describe', '--dirty', '--always'], ['rebase', '--autostash', 'other'], ['merge', '--autostash', 'other'], ['-c', 'rebase.autoStash=true', 'rebase', 'other'], ['--icase-pathspecs', 'add', 'SUB'], ['--literal-pathspecs', 'add', 'sub'], ['add', '--pathspec-fr', list], ['mv', '-n', 'sub', 'sub2'], ['merge', '--no-ff', '-m', 'x', 'side'], ['merge', '--squash', 'side'], ['pull', '--no-rebase', '--no-edit', '.', 'side'], ['difftool', '-y', '-x', 'true']]) {
       const r = fenced(...who, ...a);
       assert.notEqual(r.status, 0, a.join(' '));
       assert.match(r.stderr, /w6630/, a.join(' '));
