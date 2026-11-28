@@ -66,12 +66,17 @@ const where = (f) => {
 };
 let warnedAt = 0;
 let session;
+// When this thread was last held with the main one (the computer slept, the clock jumped): time before it is no freeze, so a
+// freeze is measured from the later of the main loop's last beat and that wake (w6611's review: a 3 s job just after a wake
+// was measured from the beat before the sleep and killed).
+let wokeAt = 0;
+const frozenFor = (now) => now - Math.max(Number(Atomics.load(beat, 0)), wokeAt);
 let ending; // the kill's timer, once the freeze reached exitMs
 // The last look before the kill: a loop that came free meanwhile is left running.
 const end = () => {
   ending = undefined;
-  const gap = Date.now() - Number(Atomics.load(beat, 0));
-  if (gap < afterMs) { out('event loop: came free before it was ended (' + Math.round(gap / 1000) + ' s since its beat): ' + who + ' goes on (w6555)'); return; }
+  const gap = frozenFor(Date.now());
+  if (gap < afterMs) { out('event loop: came free before it was ended (' + Math.round(gap / 1000) + ' s since its beat or a wake): ' + who + ' goes on (w6555)'); return; }
   out('event loop: ending ' + who + ' now (SIGKILL); its supervisor starts a fresh one (w6555)');
   try { process.kill(process.pid, 'SIGKILL'); } catch (e) { out('event loop: could not end ' + who + ': ' + ((e && e.message) || e)); }
 };
@@ -100,7 +105,7 @@ function askStack() {
     try {
       const frames = ((m.params && m.params.callFrames) || []).slice(0, 12).map(where);
       // A pause asked during one long native call lands on the next JavaScript after it: then the loop is free again.
-      const late = Date.now() - Number(Atomics.load(beat, 0)) < afterMs ? ' (read after the freeze ended)' : '';
+      const late = frozenFor(Date.now()) < afterMs ? ' (read after the freeze ended)' : '';
       out('event loop: frozen: ' + who + "'s main thread is in " + (frames.join(' < ') || '(no JavaScript frame)') + late);
     } catch (e) {
       out('event loop: frozen: could not read the main thread\\'s stack: ' + ((e && e.message) || e));
@@ -120,15 +125,15 @@ let lookedAt = Date.now();
 setInterval(() => {
   const now = Date.now();
   // This thread was held too (the computer slept, or the clock jumped): a gap seen now is no freeze of the main loop alone.
-  // Skip this look; the main loop beats again within beatMs if it runs.
+  // Count from now: a freeze is measured from the later of the last beat and this wake.
   const held = now - lookedAt > Math.max(5 * everyMs, 5000) || now < lookedAt;
   lookedAt = now;
-  if (held) { warnedAt = 0; return; }
+  if (held) { wokeAt = now; warnedAt = 0; return; }
   const last = Number(Atomics.load(beat, 0));
-  const gap = now - last;
+  const gap = frozenFor(now);
   if (gap < afterMs) { warnedAt = 0; return; }
   if (ending) return;
-  const since = ' (its last beat ' + new Date(last).toISOString() + '): ' + who + ' answers nothing';
+  const since = ' (its last beat ' + new Date(last).toISOString() + (wokeAt > last ? ', counted from a wake at ' + new Date(wokeAt).toISOString() : '') + '): ' + who + ' answers nothing';
   if (exitMs && gap >= exitMs) {
     out('event loop: frozen for ' + Math.round(gap / 1000) + ' s' + since + '; ending it so its supervisor starts a fresh one (w6555)');
     // At most 5 s for the stack line: a pause that cannot land (one long native call) does not hold the kill.
