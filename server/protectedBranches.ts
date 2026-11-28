@@ -37,6 +37,7 @@ export const PROTECTED_BRANCHES: readonly ProtectedBranch[] = [
   { pattern: /^releases?(?:[/_-]|$)/i, why: 'a release branch (release/<version>, release-<version>, release-next)' },
   { pattern: /^(?:urgent|hotfix|hotfixes|lane|steam)\//i, why: "a release lane's branch (urgent/<version> marks an urgent release's bump; hotfix/ carries pre-1.0 fixes)" },
   { pattern: /^ffbox\/release-/i, why: "FFBox's release lane (its regenerated-files PR of a release, which FFBox closes and deletes itself)" },
+  { pattern: /^demo[-_/]?release/i, why: 'an old demo release lane (demoRelease/16 on the game repo)' },
   { pattern: /^ci\//i, why: 'a CI lane branch (ci/mp-beta-lane, ci/release-*)' },
   { pattern: /^v?\d+(?:\.\d+)+/i, why: 'a version line (0.15, 0.16.1), or a release tag of the same name' },
   { pattern: /^(?:backup|backups|ff-backup|ff-saved|rescue)\//i, why: "a safety copy of someone's work" },
@@ -57,7 +58,10 @@ export function judgeBranchDelete(name: string): string | undefined {
   const fix = 'Feature branches may be deleted; this one stays (server/protectedBranches.ts, w6815). If it truly must go, hand that up to your orchestrator.';
   if (!name || /^(?:head|@)$/i.test(name)) return `Deleting the remote branch "${name}" is refused: name the branch itself, not HEAD. ${fix}`;
   if (/^refs\//i.test(name) && !/^refs\/heads\/./i.test(name)) return `Deleting ${name} is refused: only branches (refs/heads/...) may be deleted, never a tag or another ref. ${fix}`;
-  if (/[$`*?[\]{}~^\\<>|;&'"\s]|\.\.|^-|\/$|\.lock$|@\{/.test(name)) return `Deleting the remote branch "${name}" is refused: the name is not clear (a variable, a glob or a character no branch name has). Write the branch name out. ${fix}`;
+  if (/[$`*?[\]{}~^\\<>|;&'"\s:()%]|\.\.|^-|\/$|\.lock$|@\{/.test(name)) return `Deleting the remote branch "${name}" is refused: the name is not clear (a variable, a glob or a character no branch name has). Write the branch name out. ${fix}`;
+  // git reads a short name through its ref rules (refs/<x>, refs/tags/<x>, refs/heads/<x>, refs/remotes/<x>): `heads/main`
+  // is main and `tags/v1` a tag. Such a name is refused; the full refs/heads/<branch> is always clear.
+  if (/^(?:heads|tags|remotes|notes|pull|changes|meta)\//i.test(name)) return `Deleting "${name}" is refused: git reads it as refs/${name}, which may be another branch or a tag. Write the full name, refs/heads/<branch>. ${fix}`;
   const p = protectedBranch(name);
   return p ? `Deleting the remote branch ${name.replace(/^refs\/heads\//i, '')} is refused: ${p.why}. Master, main and release branches are never deleted from a sandbox. ${fix}` : undefined;
 }

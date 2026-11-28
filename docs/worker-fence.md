@@ -767,11 +767,22 @@ deletion up and an orchestrator had to find a machine with a working gh login (w
   main, develop, pre-1.0, Steam branch names, `release/*`, `release-*`, `urgent/*`, `hotfix/*`, `ffbox/release-*`,
   `ci/*`, version lines such as `0.16.1`, and safety copies under `backup/`, `ff-backup/`, `ff-saved/`, `rescue/`;
   the file says where each comes from), and any name that is not clearly a branch: HEAD, a tag or other ref outside
-  `refs/heads/`, a variable or glob. Force pushes, `+refspec`, `--mirror`/`--all`/`--prune`, other ref rewrites
-  through the API (PATCH, POST, protection, merges, rulesets) and pushes to master stay refused as before.
+  `refs/heads/`, a variable or glob, and git's short ref names (`heads/main` is main, `tags/v1` a tag). Force pushes,
+  `+refspec`, `--mirror`/`--all`/`--branches`/`--prune`, other ref rewrites through the API (PATCH, POST, protection,
+  merges, rulesets, the GraphQL ref mutations), `gh release delete --cleanup-tag`, a push refspec set with
+  `git -c remote.<r>.push=` and pushes to master stay refused.
+- **Tags**: `git push origin --delete <name>` deletes a TAG when the remote has a tag of that name and no branch (the
+  game repo's `mode2-manual-*` tags, ffu's `play`). So for a plain name the guard reads the remote first (`git ls-remote`,
+  10 s at most) and lets the delete through only when the name is a branch there and nothing else. A remote it cannot
+  read refuses a plain name; the full name, `git push origin --delete refs/heads/<branch>`, never reaches a tag and needs
+  no read.
+- **Options as git reads them**: git takes any unique prefix of a long option, so `--de`, `--dele` are `--delete` and
+  `--mirr`, `--pru`, `--forc` are read as what they abbreviate. In a short cluster `-o` takes the rest as its value, so
+  `-od` is a push option, not `-d` (w6817's review found each of these, and the tag hole, in the first version).
 - **Audit**: each delete the guard lets through writes one line to the daemon's log before the command runs:
   `w6815 remote branch delete allowed: session=<id> sandbox=<name> route=<git push|gh api> repo=<github.com/owner/repo>
-  branch=<name> sha=<40 hex|unknown>`. The sha is read with `git ls-remote` (10 s at most); an unreadable sha is logged
+  branch=<name> sha=<40 hex|unknown>`. The sha is the one the tag check read, or read with `git ls-remote` (10 s at most,
+  all the command's deletes at once); an unreadable sha is logged
   as unknown and never refuses the delete. A deleted branch can be made again at that sha from any clone that has the
   commit: `git push origin <sha>:refs/heads/<branch>`.
 - **Server side**: GitHub's own rulesets refuse deleting the game repo's master, develop and pre-1.0 ("Protect master and
