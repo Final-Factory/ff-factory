@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { DAEMON_ENDING_MARKER } from '../machine/freezeWatch.ts';
 
 /**
  * The Windows half of server/machineDeploy.ts (docs/machines.md, "Windows machines"): the PowerShell scripts
@@ -438,6 +439,9 @@ if ($r.Code -ne 0) { throw "npm ci failed ($($r.Code)): $($r.Out)" }
  * logs\daemon.log and daemon.err.log; before each start the last run's are moved to daemon.log.<UTC stamp> (w2038), which
  * the daemon gzips and prunes (machine/logRetention.ts).
  */
+/** w6784: a daemon that wrote its ending marker and is still running this long after is logged as stuck mid-exit. */
+export const SUPERVISOR_STUCK_AFTER_S = 120;
+
 export function supervisorScript(node: string, flag: boolean, service?: WinService): string {
   const flags = [...(flag ? ['--experimental-strip-types'] : []), '--disable-warning=ExperimentalWarning'].join(' ');
   return `# FF Factory machine daemon supervisor (docs/machines.md), started at logon by the ${taskName(service)} task.
@@ -454,6 +458,12 @@ $daemon = Join-Path $app 'machine\\daemon.ts'
 $argv = ${psq(flags)} + ' "' + $daemon + '" "' + (Join-Path $F 'daemon.json') + '"'
 $log = Join-Path $logs 'supervisor.log'
 $delay = 10
+# w6784: the daemon writes this ({pid, at, why}; machine/freezeWatch.ts DAEMON_ENDING_MARKER) just before the freeze watch ends
+# it and at every exit. A daemon that wrote it and is still not gone $stuckAfter s later is stuck mid-exit (BEAST, 2026-11-28
+# 07:41Z: hours after its SIGKILL, with this supervisor waiting on it the whole time). The wait is in steps so it can say so.
+$marker = Join-Path $logs '${DAEMON_ENDING_MARKER}'
+$stuckAfter = ${SUPERVISOR_STUCK_AFTER_S}
+$waitStepMs = 5000
 while ($true) {
   # Each run's output is kept under the time it closed (w2038); the daemon gzips and prunes them (machine/logRetention.ts).
   $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd'T'HHmmssfff'Z'")
@@ -467,11 +477,25 @@ while ($true) {
     }
   }
   $started = Get-Date
+  Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
   try {
     $proc = Start-Process -FilePath $node -ArgumentList $argv -WorkingDirectory $app -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logs 'daemon.log') -RedirectStandardError (Join-Path $logs 'daemon.err.log')
     $null = $proc.Handle
     "$(Get-Date -Format s) started the daemon, pid $($proc.Id)" | Out-File $log -Append -Encoding utf8
-    $proc.WaitForExit()
+    # w6784: wait in steps; a daemon that said it ends and is still there is logged once (warn only: lothsahn's lockout rule).
+    $stuckSaid = $false
+    while (-not $proc.WaitForExit($waitStepMs)) {
+      if ($stuckSaid -or -not (Test-Path -LiteralPath $marker)) { continue }
+      try {
+        $m = Get-Content -LiteralPath $marker -Raw -ErrorAction Stop | ConvertFrom-Json
+        $for = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $marker).LastWriteTimeUtc).TotalSeconds
+        if ([int]$m.pid -eq $proc.Id -and $for -ge $stuckAfter) {
+          "$(Get-Date -Format s) the daemon, pid $($proc.Id), said it ends ($($m.why)) $([int]$for) s ago and has still not exited: it is stuck mid-exit; this supervisor goes on waiting for it (w6784, warn only)" | Out-File $log -Append -Encoding utf8
+          $stuckSaid = $true
+        }
+      } catch { }
+    }
+    if ($stuckSaid) { "$(Get-Date -Format s) the daemon, pid $($proc.Id), has exited after all" | Out-File $log -Append -Encoding utf8 }
     # 75 (machine/daemon.ts DAEMON_YIELD_EXIT): a newer daemon of this machine took over, so this supervisor ends too (w1918).
     if ($proc.ExitCode -eq 75) { "$(Get-Date -Format s) the daemon ended for a newer one of this machine; this supervisor ends" | Out-File $log -Append -Encoding utf8; break }
     $why = "exited with code $($proc.ExitCode)"
@@ -722,9 +746,24 @@ export function stopScript(agents: boolean, appDir?: string, service?: WinServic
 export function controlScript(action: 'start' | 'stop' | 'restart', appDir?: string, service?: WinService): string {
   return `${head({ appDir, service })}
 ${action === 'stop' ? "'stopped=' + (Stop-FFDaemon -Agents)" : action === 'restart' ? "'stopped=' + (Stop-FFDaemon)" : ''}
+${action === 'start' ? startState(taskName(service)) : ''}
 ${action !== 'stop' ? "if (Test-FFLoggedOn) { Start-FFDaemon; 'started=True' } else { 'started=False' }" : ''}
 `;
 }
+
+/**
+ * w6784: before a start, the task's state and the supervisor's last daemon. Start-ScheduledTask on a task that is already
+ * running does nothing (one instance), and BEAST's start at 2026-11-28 08:20Z answered "started" while its supervisor sat on a
+ * daemon stuck mid-exit. Get-Process reads no WMI, which was what hung there.
+ */
+const startState = (task: string) => `$ErrorActionPreference = 'Continue'
+'state=' + (Get-ScheduledTask -TaskName '${task}' -ErrorAction SilentlyContinue).State
+$sup = Join-Path $F 'logs\\supervisor.log'
+if (Test-Path -LiteralPath $sup) {
+  $last = Get-Content -LiteralPath $sup -Tail 200 -ErrorAction SilentlyContinue | Select-String 'started the daemon, pid (\\d+)' | Select-Object -Last 1
+  if ($last) { $dp = [int]$last.Matches[0].Groups[1].Value; 'daemonPid=' + $dp + ' alive=' + [bool](Get-Process -Id $dp -ErrorAction SilentlyContinue) }
+}
+$ErrorActionPreference = 'Stop'`;
 
 /** Stop the daemon and its agents and delete its task; its files stay in its folder. */
 export function uninstallScript(appDir?: string, service?: WinService): string {

@@ -11,6 +11,7 @@
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import { Worker } from 'node:worker_threads';
+import { probeBegin } from './probeGuard.ts';
 
 /** The thread's code, plain JavaScript so it runs from the source tree and from the installed app alike. */
 const THREAD = `
@@ -71,6 +72,8 @@ export interface ThreadExecOptions {
   windowsHide?: boolean;
   encoding?: BufferEncoding;
   signal?: AbortSignal;
+  /** w6784: the probe guard's kind for a timed program (server/probeGuard.ts); default: its program, arguments and folder. */
+  probe?: string;
 }
 
 export type ExecCallback = (err: (Error & { code?: number | string; signal?: string | null; killed?: boolean }) | null, stdout: string, stderr: string) => void;
@@ -87,6 +90,8 @@ const pending = new Map<number, ExecCallback>();
 const pids = new Map<number, number>();
 /** w6639: detached starts waiting for their pid, by call id. A thread that dies answers them an error; their hosts are left be. */
 const launches = new Map<number, (err: Error | null, pid: number) => void>();
+/** w6784: each pending program's pid goes to its probe guard ticket too, by call id. */
+const starts = new Map<number, (pid: number) => void>();
 let deaths: number[] = [];
 let say: (line: string) => void = (l) => console.warn(l);
 
@@ -158,6 +163,7 @@ function thread(): Worker | undefined {
       }
       if (m.started !== undefined) {
         if (m.pid && pending.has(m.started)) pids.set(m.started, m.pid);
+        if (m.pid) starts.get(m.started)?.(m.pid);
         return;
       }
       const cb = pending.get(m.id);
@@ -185,16 +191,51 @@ function thread(): Worker | undefined {
  * with a null byte, ERR_INVALID_ARG_VALUE), the thread answers that error through the callback instead (run() then answers
  * code -1, as its "never throws" promises). A thread that dies ends its running programs and answers them code -1.
  */
-export function execFileOffThread(cmd: string, args: string[], opts: ThreadExecOptions, cb: ExecCallback): void {
-  const w = enabled ? thread() : undefined;
-  if (!w) {
-    execFile(cmd, args, { ...opts, encoding: opts.encoding ?? 'utf8' }, (err, stdout, stderr) => cb(err as Parameters<ExecCallback>[0], String(stdout), String(stderr)));
+export function execFileOffThread(cmd: string, args: string[], opts: ThreadExecOptions, outer: ExecCallback): void {
+  const { probe, ...execOpts } = opts;
+  // w6784: a timed program is a probe of a kind; while one of its kind lingers past its kill, the guard warns (or refuses).
+  let answered = false;
+  const cb: ExecCallback = (err, stdout, stderr) => {
+    if (answered) return;
+    answered = true;
+    outer(err, stdout, stderr);
+  };
+  const guard = probeBegin({
+    cmd,
+    args,
+    cwd: execOpts.cwd,
+    timeoutMs: execOpts.timeout,
+    probe,
+    onLinger: () => cb(Object.assign(new Error(`${cmd}: still running past its ${Math.round((execOpts.timeout ?? 0) / 1000)} s timeout's kill (w6784's probe guard)`), { code: undefined, signal: 'SIGTERM', killed: true }), '', ''),
+  });
+  if (guard.refused !== undefined) {
+    const err = Object.assign(new Error(`${cmd}: ${guard.refused}`), { code: -1, signal: null, killed: false });
+    queueMicrotask(() => cb(err, '', err.message));
     return;
   }
-  const { signal, ...rest } = opts;
+  const ticket = guard.ticket;
+  const w = enabled ? thread() : undefined;
+  if (!w) {
+    let child: ReturnType<typeof execFile>;
+    try {
+      child = execFile(cmd, args, { ...execOpts, encoding: execOpts.encoding ?? 'utf8' }, (err, stdout, stderr) => {
+        ticket.done();
+        cb(err as Parameters<ExecCallback>[0], String(stdout), String(stderr));
+      });
+    } catch (e) {
+      ticket.done();
+      throw e;
+    }
+    ticket.pid(child.pid);
+    return;
+  }
+  const { signal, ...rest } = execOpts;
   const id = nextId++;
   let settled = false;
+  starts.set(id, (pid) => ticket.pid(pid));
   const finish: ExecCallback = (err, stdout, stderr) => {
+    ticket.done();
+    starts.delete(id);
     if (settled) return;
     settled = true;
     signal?.removeEventListener('abort', abort);

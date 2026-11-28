@@ -29,8 +29,9 @@ import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCAT
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
 import { StallProfiler } from '../server/stallProfile.ts';
-import { freezeWatchSettings, startFreezeWatch, type FreezeWatch } from './freezeWatch.ts';
+import { DAEMON_ENDING_MARKER, freezeWatchSettings, startFreezeWatch, type FreezeWatch } from './freezeWatch.ts';
 import { execFileOffThread, useSpawnThread } from '../server/spawnThread.ts';
+import { useProbeGuard } from '../server/probeGuard.ts';
 import { warmScopeProbes } from './linuxScope.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
 import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnHeld, readFenceProbeTargets, readRulesForNewRun, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
@@ -2451,9 +2452,21 @@ export class Daemon {
     this.loopWatch = new LoopWatch({ log: (l) => log(l), who: 'the daemon', stallLogMs: DAEMON_STALL_LOG_MS }).start();
     // w6555: BEAST's loop was held 891 s on 2026-11-27 (w6546) and its log said nothing until it ended; this thread says it during.
     const fw = freezeWatchSettings(this.cfg.freezeWatch);
+    // w6784: run-daemon.ps1 reads this marker to tell a daemon stuck mid-exit (BEAST, 2026-11-28: still there hours after the
+    // freeze watch's kill) from one at work; written just before the kill, and at every exit the process gets to run.
+    const endingMarker = process.platform === 'win32' ? path.join(appDirOfConfig(this.cfg), 'logs', DAEMON_ENDING_MARKER) : undefined;
+    if (endingMarker) {
+      process.once('exit', (code) => {
+        try {
+          fs.writeFileSync(endingMarker, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), why: `exit code ${code}` }));
+        } catch {
+          // The supervisor then waits as it did before w6784.
+        }
+      });
+    }
     if (fw && process.env.FF_FREEZE_WATCH !== 'off') {
       try {
-        this.freezeWatch = startFreezeWatch({ afterMs: fw.afterMin * 60_000, repeatMs: fw.repeatMin * 60_000, exitMs: fw.exitMin === false || process.env.FF_FREEZE_WATCH === 'log' ? 0 : fw.exitMin * 60_000, onError: (e) => log(`freeze watch: its thread failed: ${e.message}`) });
+        this.freezeWatch = startFreezeWatch({ afterMs: fw.afterMin * 60_000, repeatMs: fw.repeatMin * 60_000, exitMs: fw.exitMin === false || process.env.FF_FREEZE_WATCH === 'log' ? 0 : fw.exitMin * 60_000, markerFile: endingMarker, onError: (e) => log(`freeze watch: its thread failed: ${e.message}`) });
       } catch (e) {
         log(`freeze watch: not started: ${(e as Error).message}`);
       }
@@ -6029,6 +6042,8 @@ if (isMainModule(import.meta.filename)) {
   // w6077: programs start from a thread of their own, not the loop (server/spawnThread.ts): starting one PowerShell held BEAST's
   // loop up to 35.5 s. FF_SPAWN_THREAD=off (daemon.json "env") starts them on the loop again; a thread that keeps dying does too.
   useSpawnThread(process.env.FF_SPAWN_THREAD !== 'off', (line) => log(line));
+  // w6784: a probe kind whose last one is stuck past its kill (a WMI hang) is not piled up on; FF_PROBE_GUARD=off|warn|enforce.
+  log(`probe guard: ${useProbeGuard(process.env.FF_PROBE_GUARD, (line) => log(line))} (w6784)`);
   // A worker root (w513): agents and the scripts they run find the player slots (and the nightly history) in it.
   // w5501: a CARGO_HOME outside the root (the person's ~/.cargo on C:, where a Low worker's `cargo fetch` was refused) moves
   // to <root>/cache/cargo, seeded in the background from the old one, which is only read; one inside the root stays.

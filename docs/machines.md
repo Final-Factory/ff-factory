@@ -72,6 +72,37 @@ dropped, and its Mac answers ssh, the portal redeploys it by itself (as `add_mac
 every 30 minutes and never while its agents are running. So after a restart, give daemons a minute
 before redeploying by hand.
 
+**A daemon stuck mid-exit (w6784).** A Windows process ended by TerminateProcess can stay in the kernel half-exited, with no
+user code running and its handle never signalled: on 2026-11-28 BEAST's daemon was frozen 181 s at 07:41:20Z, the freeze
+watch ended it at 07:41:25Z, and pid 16100 was still there hours later (two threads), with `run-daemon.ps1` waiting on it and
+so starting nothing, about 15 WMI and perf-counter PowerShells hung beside it, and `machine_daemon start` answering
+"started". What now happens, warn-only first (lothsahn's lockout rule; the enforcing stage is a separate change):
+- The daemon writes `logs\daemon-ending.json` (`{pid, at, why}`, `machine/freezeWatch.ts` `DAEMON_ENDING_MARKER`) just
+  before the freeze watch's SIGKILL and at every exit it runs. The freeze watch's thread says
+  `event loop: the daemon (pid N) is still running N s after its SIGKILL; trying it again` every 10 s if it is still there to
+  say it.
+- `run-daemon.ps1` removes that file before each start and waits for the daemon in 5 s steps instead of one unbounded
+  `WaitForExit()`. When the file names the running pid and is `SUPERVISOR_STUCK_AFTER_S` (120) s old, it writes once to
+  `logs\supervisor.log`: `the daemon, pid N, said it ends (why) N s ago and has still not exited: it is stuck mid-exit; this
+  supervisor goes on waiting for it (w6784, warn only)`, then `has exited after all` if it does.
+- `machine_daemon start` on Windows reads the task's state and the supervisor's last daemon first. A task already running
+  answers `the FFFactoryDaemon task was already running, so this start changed nothing; its supervisor's last daemon is pid N,
+  still running|gone` (Task Scheduler runs one instance), and with no daemon connected it adds that its supervisor or daemon
+  is stuck.
+- A fresh daemon beside a stuck one would not yield to it: the newer-twin handshake (`machine/unitySlots.ts`, w1918) yields
+  only to a twin with a later start whose `arbiter.json` is fresh (`ARBITER_FRESH_MS`), and a stuck process writes nothing;
+  daemonRpc and the live port listen on port 0 (OS-picked), so nothing to bind twice.
+
+**The probe guard (w6784, `server/probeGuard.ts`).** Every program run with a timeout through `execFileOffThread`
+(`server/spawnThread.ts`, so `run()` too) or `runOffThread` (`server/hostProbe.ts`) is a probe of a kind: its `probe` name,
+else its program, arguments and folder. One whose answer has not come 10 s after its timeout (execFile answers only once it
+has exited, so it is still there past its kill) lingers, and the daemon log says `probe guard: <probe> (pid N), started ...,
+has not ended ... it lingers`. While one of a kind lingers, `FF_PROBE_GUARD` (in the daemon's environment) decides what a new
+one of that kind does: `warn` (the default now) starts it and says once per 10 minutes per kind that it would not be under
+enforce; `enforce` answers its caller at once with code -1 and why, lets one retry through every 15 minutes while fewer
+than 3 of it linger, and answers the caller of a probe that lingers as timed out; `off` tracks nothing. The daemon's start
+line `probe guard: <mode>` says which is in force.
+
 - **Auth.** A 256-bit token per machine; the portal keeps only its SHA-256 (state.json) and compares
   in constant time. `/machine` is on the public Funnel URL, so a bad token is logged and throttled.
 - **The daemon link is tailnet-only** (w5575, finding 3 of the w5450 network audit; `server/machineLinkGate.ts`). Every
@@ -972,7 +1003,8 @@ Capacity block's "Next ..." lines.
   a gone worker is replaced by a fresh worker where the work fits (its pin kept, placed as `start_agent` places it: its
   workflows push, Live view, player build or timed run), its prompt leading with the note and its handover saying it
   was restarted; a stopped worker whose computer is here (back before a move found room, or its wake refused at the
-  agent limit) is woken again where it is with the note, once (w6774). A start that fails or finds no room, or a wake
+  agent limit) is woken again where it is with the note, once (w6774), unless its request's gate holds its resumes (the
+  gate's own resume wakes it then) or a message already waits for it (w6782). A start that fails or finds no room, or a wake
   refused, is tried again after 10 min, and a `start_agent` and FF Factory's own start see each other's (`startUnderWay`). Its next turn or a new worker on the request ends it.
   `lostCheckIns` (set_app_config, owner-only, read live) is `"on"` (unset) or `"warn"`, the recovery switch that only
   shows Stalled and tells the dispatcher. Since w6768, deleting a sandbox no longer removes the workers that released it.

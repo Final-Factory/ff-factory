@@ -88,7 +88,7 @@ test('a freeze that reaches exitMs ends the process, after its stack is in the l
     `import fs from 'node:fs';
 import { startFreezeWatch } from ${JSON.stringify(watch)};
 const fd = fs.openSync(${JSON.stringify(log)}, 'a');
-startFreezeWatch({ afterMs: 1000, repeatMs: 60_000, exitMs: 2000, fd, beatMs: 50, everyMs: 50 });
+startFreezeWatch({ afterMs: 1000, repeatMs: 60_000, exitMs: 2000, fd, beatMs: 50, everyMs: 50, markerFile: ${JSON.stringify(path.join(dir, 'daemon-ending.json'))} });
 function holdTheLoopFor(ms) { const end = Date.now() + ms; let n = 0; while (Date.now() < end) n++; return n; }
 setTimeout(() => { holdTheLoopFor(30_000); fs.writeSync(fd, 'NOT ENDED\\n'); process.exit(0); }, 300);
 `,
@@ -110,6 +110,12 @@ setTimeout(() => { holdTheLoopFor(30_000); fs.writeSync(fd, 'NOT ENDED\\n'); pro
   const stack = lines.findIndex((l, i) => i > ending && /main thread is in holdTheLoopFor \(/.test(l));
   assert.ok(stack > ending, `the stack after it: ${text}`);
   assert.ok(lines.findIndex((l) => l.includes('event loop: ending the daemon now (SIGKILL)')) > stack, `the kill line, last: ${text}`);
+  // w6784: the marker the supervisor reads to tell a process stuck mid-exit after this kill, written before it.
+  const marker = JSON.parse(fs.readFileSync(path.join(dir, 'daemon-ending.json'), 'utf8')) as { pid: number; at: string; why: string };
+  assert.equal(marker.pid, p.pid);
+  assert.match(marker.why, /^freeze watch: SIGKILL after a \d+ s freeze$/);
+  assert.ok(Math.abs(Date.parse(marker.at) - Date.now()) < 30_000, marker.at);
+  assert.ok(!text.includes('still running'), text);
 });
 
 // w6611's review: after a sleep (here SIGSTOP/SIGCONT, which holds both threads), a short busy job on wake was measured from

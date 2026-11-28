@@ -82,11 +82,17 @@ test('w6336: a reconnect resends only what changed while the page was away, and 
   expect(again.work?.map((w) => w.id)).toContain(edited);
   expect(again.work?.map((w) => w.id)).not.toContain(kept);
   expect(again.partsKept?.length).toBeGreaterThan(0);
-  expect(first[1].length).toBeLessThan(first[0].length);
+  // w6782: other tests share this server and change requests meanwhile, so the reconnect's size is not compared with the
+  // first load's (it failed at 18211 against 10729 bytes); it resends fewer requests than a fresh load holds now.
+  const fresh = await appState(page.request);
+  expect(again.work?.length ?? 0).toBeLessThan(fresh.work?.length ?? 0);
   await expect.poll(() => page.evaluate(() => (window as unknown as { __sent: string[] }).__sent.filter((d) => d.includes('"type":"ready"')).length)).toBe(2);
 
   // The same as a fresh load: the page's requests, in order, match the server's whole state.
-  const rows = async () => (await panel.locator('[data-testid^="work-w"]').evaluateAll((els) => els.map((e) => e.getAttribute('data-testid')))).filter((t, i, a) => a.indexOf(t) === i);
+  // w6782: only the requests the server held before the rows were read: another test's request filed meanwhile (w35 in
+  // run 46153529039) reaches the reloaded page but not the list read before it.
+  const known = new Set(((await appState(page.request)).work ?? []).map((w) => `work-${w.id}`));
+  const rows = async () => (await panel.locator('[data-testid^="work-w"]').evaluateAll((els) => els.map((e) => e.getAttribute('data-testid')))).filter((t, i, a) => a.indexOf(t) === i && known.has(t!));
   const afterReconnect = await rows();
   await page.reload();
   await go(page, '#/dispatcher');

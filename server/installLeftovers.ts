@@ -119,11 +119,14 @@ export interface InstallLeftoverSettings {
   ffuSlotReleasedKeepHours: number;
   /**
    * What the rule ffu-runner-target does with an idle FFU runner's cargo target (`_work/<entry>/target` and
-   * `_work/<entry>/<child>/target`, w6291): 'off' touches nothing, 'warn' (the default) plans nothing and lists what 'on' would
+   * `_work/<entry>/<child>/target`, w6291): 'off' (the default) touches nothing, 'warn' plans nothing and lists what 'on' would
    * take, with the units it would have swept that a later build used again counted (`runnerWarnFile`), 'on' takes it.
    * lothsahn's lockout rule (docs/worker-fence.md "Modes, off by default"): warn-only first, enforcement flips the default in
    * a separate PR after measured zero misses. 'off' is meant as the recovery route that needs no person; a value that is not
-   * one of the three falls back to 'warn'. Not wired yet: installLeftoverSettings(raw) parses it, but machine/daemon.ts reads
+   * one of the three falls back to the default. Off by default since w6291's decision (lothsahn, 2026-11-28: "Drop FF Factory's
+   * sweep; the CI's own cap is enough."): ffu's tools/ci-runners/keep_target.sh trims the runner's target/ at every job's end
+   * (units unused 3 days, a 20 GB cap, cargo clean under 30 GB free), and in warn this rule listed nothing on LothDesktop: CI
+   * makes target/ before cargo does, so it has no CACHEDIR.TAG and isCargoTarget skips it. Not wired yet: installLeftoverSettings(raw) parses it, but machine/daemon.ts reads
    * no daemon.json key into it and passes planInstallLeftovers no `settings`, so today the default is what runs.
    */
   runnerTargetMode: 'off' | 'warn' | 'on';
@@ -175,7 +178,7 @@ export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
   ffuSlotIdleDays: 7,
   ffuSlotKeepHours: 48,
   ffuSlotReleasedKeepHours: 1,
-  runnerTargetMode: 'warn',
+  runnerTargetMode: 'off',
   runnerFirstMode: 'warn',
   runnerTargetKeepHours: 48,
   runnerTargetCapGB: 24,
