@@ -243,10 +243,16 @@ task if that is still Running, starts the service, and waits up to 2 minutes for
 and each result records the account, groups and privileges that run had (`whoami`).
 It runs with only the rights the repair needs: as LOCAL SERVICE with the task's own SID (`ProcessTokenSidType
 Unrestricted`) and no privilege but `SeChangeNotifyPrivilege`. The installer grants that SID one ACE on `refsdedupsvc`
-(`LCSWRPWPLO`: query status, start, stop) and write on its own results folder, and nothing else. It saves the service's
-security descriptor as it was first found in `refsdedupsvc.sddl.orig`. Installed and updated like the other helper tasks
+(`LCRPWP`: query status, start, stop) and write on its own results folder, and nothing else. It saves the service's
+security descriptor as it was first found in `refsdedupsvc.sddl.orig`. That copy is never restored from: a Windows update can
+change the descriptor later, so restoring the copy by hand would undo that update's change; to take the grant away, use `-Uninstall`.
+Installed and updated like the other helper tasks
 (`devdrive.ps1 ensure`, `install-privileged-helpers.ps1 -Actions deduprepair`). The app's user may start it but not change it.
-`-DedupRepairMode check` installs it to find and log only. `-Uninstall` removes the task and the ACE.
+`-DedupRepairMode check` installs it to find and log only. `-Uninstall` removes the task and the ACE, and reads the descriptor
+back to confirm the ACE is gone. Neither is a lasting off switch: the next `devdrive.ps1 ensure` or elevated worker update
+registers the task again in repair mode.
+A read the repair cannot make fails loudly (`ok=false`): an event log it may not read, or a volume task whose state
+`schtasks /query` refuses it (`unreadable`), is never taken as "nothing to repair" or "repaired".
 
 The full log is `C:\ProgramData\ffsb-helpers\results\refs-dedup-trial.log`. To undo:
 `Clear-ReFSDedupSchedule -Volume V:` then `Disable-ReFSDedup -Volume V:`. Data already shared stays shared (sourced).

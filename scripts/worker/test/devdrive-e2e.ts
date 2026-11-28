@@ -147,6 +147,11 @@ for ($i = 0; $i -lt 60 -and -not (Test-Path $j); $i++) { Start-Sleep -Seconds 2 
   check(!!repo.result && repo.result.ok === true, 'the dedup repair task runs and writes its result', rep);
   check(/^S-1-5-87-/.test(repo.sid ?? '') && who.includes(`(${repo.sid})`), 'it runs with the task SID the installer granted', `${repo.sid} / ${who}`);
   check(/user nt authority\\local service/i.test(who) && /privileges: SeChangeNotifyPrivilege \w+$/.test(who), 'as LOCAL SERVICE with only SeChangeNotifyPrivilege', who);
+  // Its one service right (w6623): exactly query, start and stop on refsdedupsvc, where this Windows has the service.
+  const hasSvc = ps(`[bool](Get-Service refsdedupsvc -ErrorAction SilentlyContinue)`).stdout.trim() === 'True';
+  const svcSddl = () => ps(`"$(sc.exe sdshow refsdedupsvc)".Trim()`).stdout.trim();
+  if (hasSvc) check(svcSddl().includes(`(A;;LCRPWP;;;${repo.sid})`), 'refsdedupsvc grants the task SID query, start and stop (LCRPWP) only', svcSddl());
+  else console.log('note: this Windows has no refsdedupsvc; the service right is not checked');
   const boot = ps(`(Get-ScheduledTask -TaskName ffsb-helper-mount).Triggers | ForEach-Object { $_.CimClass.CimClassName }`).stdout.trim();
   check(/BootTrigger/.test(boot), 'the mount task also runs at boot', boot);
 
@@ -215,6 +220,7 @@ for ($i = 0; $i -lt 60 -and -not (Test-Path $j); $i++) { Start-Sleep -Seconds 2 
   const rem = run(['-Action', 'remove', '-Root', root]);
   check(rem.code === 0 && !fs.existsSync(vhdx) && !attached(), 'remove detaches and deletes the VHDX');
   check(ps(`@(Get-ScheduledTask -TaskName 'ffsb-helper-*' -ErrorAction SilentlyContinue).Count`).stdout.trim() === '0', 'and takes the tasks away');
+  if (hasSvc && repo.sid) check(!svcSddl().includes(`;;;${repo.sid})`), 'and the repair task\'s right on refsdedupsvc', svcSddl());
 
   // 6. A run cut off while formatting (w1993, desktop-coosego): the VHDX is there, attached, with a lettered partition that has
   //    no file system, and no devdrive.json. The next run formats that partition instead of reusing a drive it cannot use.

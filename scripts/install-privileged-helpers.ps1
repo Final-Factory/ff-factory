@@ -16,7 +16,7 @@
 # -Actions deduprepair (w6597) registers ffsb-helper-deduprepair, which is NOT a SYSTEM task: it runs
 # refs-dedup-repair.ps1 nightly at 01:30 (before the daily ReFS dedup job) as LOCAL SERVICE with its own task SID
 # (ProcessTokenSidType Unrestricted) and only SeChangeNotifyPrivilege. That SID gets query, start and stop on the
-# refsdedupsvc service (one ACE in its DACL, LCSWRPWPLO) and write on results\dedup-repair; nothing else. -Uninstall
+# refsdedupsvc service (one ACE in its DACL, LCRPWP: query status, start, stop) and write on results\dedup-repair; nothing else. -Uninstall
 # removes the task and that ACE.
 param(
   [string]$Vhdx = 'C:\ffsb-devdrive.vhdx',
@@ -61,7 +61,7 @@ $User = $who.name
 $dir = Join-Path $env:ProgramData 'ffsb-helpers'
 # The dedup repair task's own SID (w6597): derived from the task's name, so it is the same before and after registering.
 $RepairTask = 'ffsb-helper-deduprepair'
-$RepairAccess = 'LCSWRPWPLO'   # SERVICE_QUERY_STATUS, ENUMERATE_DEPENDENTS, START, STOP, INTERROGATE
+$RepairAccess = 'LCRPWP'   # SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_STOP: what sc query, start and stop need, no more
 function Get-TaskSid([string]$name) {
   # NT TASK\<name> where Windows resolves it; else computed the way service SIDs are (S-1-5-80 there): SHA-1 of the
   # upper-case name in UTF-16LE as five 32-bit numbers. (schtasks /showsid printed only its usage on windows-latest, elevated.)
@@ -69,7 +69,11 @@ function Get-TaskSid([string]$name) {
   $b = [Security.Cryptography.SHA1]::Create().ComputeHash([Text.Encoding]::Unicode.GetBytes($name.ToUpperInvariant()))
   'S-1-5-87-' + ((0..4 | ForEach-Object { [BitConverter]::ToUInt32($b, $_ * 4) }) -join '-')
 }
-function Get-DedupSvcSddl { (sc.exe sdshow refsdedupsvc | Where-Object { $_ -match '^D:' } | Select-Object -First 1).Trim() }
+# '' where this Windows has no refsdedupsvc (w6623 B1: a null here broke -Uninstall and devdrive.ps1 remove).
+function Get-DedupSvcSddl {
+  if (-not (Get-Service refsdedupsvc -ErrorAction SilentlyContinue)) { return '' }
+  "$(sc.exe sdshow refsdedupsvc | Where-Object { $_ -match '^D:' } | Select-Object -First 1)".Trim()
+}
 function Set-DedupSvcSddl([string]$sddl) {
   $o = sc.exe sdset refsdedupsvc $sddl 2>&1
   if ($LASTEXITCODE -ne 0) { throw "sc sdset refsdedupsvc failed: $o" }
@@ -80,8 +84,12 @@ function Remove-DedupRepairAce {
   if ($tsid -notmatch '^S-1-5-87-') { return }
   $cur = Get-DedupSvcSddl
   if (-not $cur) { return }
-  $new = $cur -replace [regex]::Escape("(A;;$RepairAccess;;;$tsid)"), ''
-  if ($new -ne $cur) { Set-DedupSvcSddl $new; "removed $RepairTask's ACE from refsdedupsvc ($tsid)" }
+  # Every ACE for the task SID, whatever mask Windows prints it with (w6623 M6), then read back to be sure.
+  $new = [regex]::Replace($cur, '\(A;;[^;]*;;;' + [regex]::Escape($tsid) + '\)', '')
+  if ($new -eq $cur) { return }
+  Set-DedupSvcSddl $new
+  if ((Get-DedupSvcSddl) -match [regex]::Escape(";;;$tsid)")) { throw "refsdedupsvc still grants $tsid after sc sdset" }
+  "removed $RepairTask's ACE from refsdedupsvc ($tsid)"
 }
 $results = Join-Path $dir 'results'
 $actions = if ($Actions.Count) { @($Actions | ForEach-Object { $_ -split ',' } | Where-Object { $_ }) } else { @('mount', 'trim', 'compact', 'detach', 'reboot') + $(if ($PagefileGB -ge 4) { 'pagefile' } else { @() }) }
@@ -126,13 +134,14 @@ function Register-DedupRepair([string]$appSid) {
   $t = $svc.GetFolder('\').GetTask($RepairTask)
   $sd = $t.GetSecurityDescriptor(4)
   if ($sd -notmatch [regex]::Escape(";;;$appSid)")) { $t.SetSecurityDescriptor("$sd(A;;GRGX;;;$appSid)", 0) }
-  $cur = if (Get-Service refsdedupsvc -ErrorAction SilentlyContinue) { Get-DedupSvcSddl } else { '' }
+  $cur = Get-DedupSvcSddl
   if (-not $cur) { return "registered $RepairTask (task SID $tsid, -Mode $DedupRepairMode, daily 01:30); this Windows has no refsdedupsvc, so it has nothing to repair and no service right was granted" }
   if ($cur -notmatch [regex]::Escape(";;;$tsid)")) {
     $orig = Join-Path $dir 'refsdedupsvc.sddl.orig'
     if (-not (Test-Path $orig)) { Set-Content -Encoding ascii $orig $cur }
     $i = $cur.IndexOf('S:'); $new = if ($i -ge 0) { $cur.Insert($i, "(A;;$RepairAccess;;;$tsid)") } else { "$cur(A;;$RepairAccess;;;$tsid)" }
     Set-DedupSvcSddl $new
+    if ((Get-DedupSvcSddl) -notmatch [regex]::Escape("(A;;$RepairAccess;;;$tsid)")) { throw "refsdedupsvc does not show the ACE for $tsid after sc sdset" }
   }
   "registered $RepairTask (runs as LOCAL SERVICE with task SID $tsid, -Mode $DedupRepairMode, daily 01:30; refsdedupsvc grants it $RepairAccess; $User may start it)"
 }

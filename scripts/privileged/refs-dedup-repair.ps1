@@ -47,12 +47,18 @@ function MountPoints($e) {
 function Events([string]$logName, [int[]]$ids, [int]$max, [scriptblock]$where) {
   $f = @{ LogName = $logName; Id = $ids }
   if ($AsOf -ne [datetime]::MinValue) { $f.EndTime = $AsOf }
-  @(Get-WinEvent -FilterHashtable $f -MaxEvents $max -ErrorAction SilentlyContinue | Where-Object $where)
+  # No matching event is an answer; any other error (access denied, a missing log) is not, and fails the run (w6623 M1).
+  $err = $null
+  $ev = @(Get-WinEvent -FilterHashtable $f -MaxEvents $max -ErrorAction SilentlyContinue -ErrorVariable err | Where-Object $where)
+  $bad = @($err | Where-Object { "$($_.FullyQualifiedErrorId)" -notmatch 'NoMatchingEventsFound' })
+  if ($bad.Count) { throw "cannot read $($logName): $($bad[0].Exception.Message)" }
+  $ev
 }
 function Newest6([string]$mp) { Events $Log 6 20 { (MountPoints $_) -contains $mp } | Select-Object -First 1 }
 function TaskStatus([string]$tn) {
   $o = & $schtasks /query /tn $tn /fo csv /nh 2>&1
-  if ($LASTEXITCODE -ne 0) { return 'missing' }
+  # Only "cannot find" is missing; a refusal (access denied as LOCAL SERVICE) is unreadable, never taken as healthy (w6623 H2).
+  if ($LASTEXITCODE -ne 0) { if ("$o" -match 'cannot find') { return 'missing' }; return "unreadable ($("$o".Trim()))" }
   $f = ("$($o | Select-Object -Last 1)" -split '","')
   return $f[-1].Trim('"')
 }
@@ -97,6 +103,7 @@ try {
   if ($task -eq 'Running' -and $lastStart -lt (Get-Date).AddHours(-$StuckHours)) {
     $r.reasons += "stuck: $tn Running, last job start $($lastStart.ToUniversalTime().ToString('s'))Z"
   }
+  if (-not $r.reasons.Count -and $task -like 'unreadable*') { $r.ok = $false; $r.state = "healthy by the event logs, but the volume task's state is $task, so a stuck task cannot be seen"; Save }
   if (-not $r.reasons.Count) { $r.state = "healthy (service $(ServiceState), task $task)"; Save }
   if ($Mode -eq 'check') { $r.state = 'broken (check only: nothing changed)'; $r.ok = $false; Save }
 
@@ -107,7 +114,8 @@ try {
     $r.did += "sc stop $Service (exit $LASTEXITCODE)"
     if (-not (WaitService 'STOPPED' 60)) { $r.did += "still $(ServiceState) after 60 s" }
   }
-  if ((TaskStatus $tn) -eq 'Running') {
+  $ts = TaskStatus $tn
+  if ($ts -eq 'Running' -or $ts -like 'unreadable*') {
     $o = & $schtasks /end /tn $tn 2>&1
     $r.did += "schtasks /end $tn (exit $LASTEXITCODE$(if ($LASTEXITCODE) { ": $("$o".Trim())" }))"
   }
@@ -120,7 +128,7 @@ try {
     if ($n -and $n.TimeCreated -ge $t0) { $seen = $n } else { Start-Sleep -Seconds 2 }
   }
   $task = TaskStatus $tn
-  if ($seen -and $task -ne 'Running') {
+  if ($seen -and $task -ne 'Running' -and $task -notlike 'unreadable*') {
     $r.state = "repaired: the service watches $mp again (event 6 at $($seen.TimeCreated.ToUniversalTime().ToString('s'))Z), task $task"
   } else {
     $r.ok = $false
