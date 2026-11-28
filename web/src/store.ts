@@ -5,14 +5,22 @@ import { noteServedBuild } from './freshness';
 import { initNotifications, onNotice } from './notify';
 import { noteMachineStats } from './util';
 import { SOCKET_FAILURE_CHECK_MS, SOCKET_STATE_REFRESH_MS } from '../../shared/socketPolicy';
-import { mergeSessions, sessionsHave } from '../../shared/pageSessions';
-import { fillKeptParts, partsHave } from '../../shared/pageParts';
+import { sessionsHave } from '../../shared/pageSessions';
+import { partsHave } from '../../shared/pageParts';
+import { applyState, bootFrom, bootQuery, cacheRecord, PAGE_CACHE_READ_WAIT_MS, PAGE_CACHE_SAVE_EVERY_MS, type PageBoot } from '../../shared/pageCache';
+import { BUILD_META } from '../../shared/freshness';
+import { clearPageCache, readPageCache, writePageCache } from './pageCache';
+
+/** w6763: when this script began, in ms since the page began loading (the ready report says it). */
+const SCRIPT_AT = performance.now();
 
 export type AuthState = 'unknown' | 'needed' | 'ok';
 
 export interface StoreState {
   auth: AuthState;
   app: AppState | null;
+  /** w6763: `app` is the copy saved at this time (Date.now()), drawn while the first live state is on its way; null once live. */
+  shell: number | null;
   ws: WsStatus;
   /** Persisted transcript per session id, ordered by seq, de-duplicated. */
   transcripts: Record<string, TranscriptEvent[]>;
@@ -71,6 +79,7 @@ export interface Toast {
 let state: StoreState = {
   auth: 'unknown',
   app: null,
+  shell: null,
   ws: 'closed',
   transcripts: {},
   streaming: {},
@@ -405,6 +414,8 @@ function startSocket() {
     },
     have: (gapMs) => sessionsHave(state.app ?? undefined, gapMs),
     parts: () => partsHave(state.app),
+    boot: () => (pageBoot ? bootQuery(pageBoot) : undefined),
+    timing: () => ({ script: SCRIPT_AT, ...(shellDrawnAt !== undefined ? { shell: shellDrawnAt } : {}) }),
     onFailure: async () => {
       try {
         // Bounded: a path that hangs (w5318) must not hold the next attempt. w6336: a page whose state is fresh only asks
@@ -428,7 +439,8 @@ function stopSocket() {
 
 setUnauthorizedHandler(() => {
   stopSocket();
-  set({ auth: 'needed' });
+  forgetPageCache();
+  set({ auth: 'needed', shell: null });
 });
 
 /**
@@ -437,21 +449,70 @@ setUnauthorizedHandler(() => {
  */
 function gotState(next: AppState) {
   if (state.auth === 'needed') return;
-  // w6336: the parts a reconnect left out as unchanged come from the page's own copy (shared/pageParts.ts).
-  const app = fillKeptParts(state.app, next);
-  if (!app || (app.sessionsDelta && !state.app)) {
+  // w6336: the parts a reconnect left out as unchanged come from the page's own copy (shared/pageParts.ts); w5907: a
+  // delta lays the changed sessions on the page's own, and the older ones views fetched stay. w6763: a first connect's
+  // delta lands on the saved copy (shared/pageCache.ts), drawn or not.
+  const base = state.shell === null && state.app ? state.app : (pageBoot?.base ?? state.app);
+  const got = applyState(base, next, fetchedSessions);
+  if (!got) {
     // Only what changed, and nothing to lay it on (cannot happen: the page sends its rev and hashes only with a state): fetch it all.
+    pageBoot = undefined;
     void api.state(SOCKET_FAILURE_CHECK_MS).then(gotState, () => {});
     return;
   }
-  const first = state.auth !== 'ok';
+  pageBoot = undefined;
   stateAt = Date.now();
-  // w5907: a delta (a reconnect) lays the changed sessions on the page's own; either way the older ones views fetched stay.
-  const { sessions, missing } = mergeSessions(state.app?.sessions, app, fetchedSessions);
-  set({ app: { ...app, sessions, sessionsDelta: undefined }, auth: 'ok' });
-  if (missing.length) void fetchSessions(missing, false);
-  if (first) void initNotifications();
+  set({ app: got.app, auth: 'ok', shell: null });
+  if (got.missing.length) void fetchSessions(got.missing, false);
+  if (!notificationsStarted) {
+    notificationsStarted = true;
+    void initNotifications();
+  }
+  savePageSoon();
 }
+
+let notificationsStarted = false;
+
+// ---------- the saved copy (w6763) ----------
+
+/** The saved copy this page booted with, until its first live state has landed on it. */
+let pageBoot: PageBoot | undefined;
+/** When the saved copy was on screen (performance.now()), for the ready report. */
+let shellDrawnAt: number | undefined;
+const pageBuild = document.querySelector<HTMLMetaElement>(`meta[name="${BUILD_META}"]`)?.content || undefined;
+let savedAt = 0;
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
+let unsaved = false;
+
+/** Save the live state: at once when the copy is older than PAGE_CACHE_SAVE_EVERY_MS, else then. A hidden tab waits for its next look. */
+function savePageSoon() {
+  unsaved = true;
+  if (saveTimer || document.visibilityState === 'hidden') return;
+  saveTimer = setTimeout(savePageNow, Math.max(0, savedAt + PAGE_CACHE_SAVE_EVERY_MS - Date.now()));
+}
+
+function savePageNow() {
+  clearTimeout(saveTimer);
+  saveTimer = undefined;
+  if (!unsaved || state.auth !== 'ok' || state.shell !== null || !state.app) return;
+  const rec = cacheRecord(state.app, pageBuild, Date.now());
+  if (!rec) return;
+  unsaved = false;
+  savedAt = rec.savedAt;
+  writePageCache(rec);
+}
+
+function forgetPageCache() {
+  pageBoot = undefined;
+  unsaved = false;
+  clearTimeout(saveTimer);
+  saveTimer = undefined;
+  clearPageCache();
+}
+
+// A tab being hidden or closed saves what it shows now (the next load then lays the least on it); one coming back saves as it changes.
+document.addEventListener('visibilitychange', () => (document.visibilityState === 'hidden' ? savePageNow() : unsaved && savePageSoon()));
+addEventListener('pagehide', savePageNow);
 
 /** Older sessions views fetched by id (wantSession): kept across new states until the page reloads. */
 const fetchedSessions = new Set<string>();
@@ -508,13 +569,22 @@ export async function boot() {
   // fetch /api/state first as well: two copies before the page was connected, 5-10 s over Funnel. Now the socket's is
   // the one. A failed attempt fetches the state (onFailure: signed out shows the login), and so does an attempt that
   // has not opened after BOOT_FETCH_AFTER_MS; an open socket is already sending it.
+  // w6763: the saved copy first (tens of ms): drawn at once when it is this build's, and either way the first socket
+  // sends its rev and hashes, so the first state is only what changed since it was saved.
+  if (!state.app && state.auth === 'unknown') {
+    pageBoot = bootFrom(await readPageCache(PAGE_CACHE_READ_WAIT_MS), pageBuild, Date.now());
+    if (pageBoot?.show && !state.app && state.auth === 'unknown') {
+      set({ app: pageBoot.base, auth: 'ok', shell: pageBoot.savedAt });
+      requestAnimationFrame(() => setTimeout(() => (shellDrawnAt ??= performance.now()), 0));
+    }
+  }
   stopSocket();
   startSocket();
   await new Promise((r) => setTimeout(r, BOOT_FETCH_AFTER_MS));
-  if (state.app || state.auth !== 'unknown' || state.ws === 'open') return;
+  if ((state.app && state.shell === null) || (state.auth !== 'unknown' && state.shell === null) || state.ws === 'open') return;
   try {
     const app = await api.state(SOCKET_FAILURE_CHECK_MS);
-    if (!state.app) gotState(app);
+    if (!state.app || state.shell !== null) gotState(app);
   } catch (e) {
     // Signed out: the unauthorized handler showed the login. Unreachable: the socket loop keeps trying.
     if (!(e instanceof UnauthorizedError)) toastError(e);
@@ -525,7 +595,8 @@ export async function logout() {
   try {
     await api.logout();
   } finally {
-    set({ auth: 'needed', transcripts: {}, loaded: {}, streaming: {} });
+    forgetPageCache();
+    set({ auth: 'needed', shell: null, transcripts: {}, loaded: {}, streaming: {} });
   }
 }
 

@@ -341,6 +341,13 @@ export interface SocketHandlers {
   have?: (gapMs: number) => string | undefined;
   /** w6336: the hashes of the parts the page holds (shared/pageParts.ts partsHave), so a reconnect resends only what changed. */
   parts?: () => string | undefined;
+  /**
+   * w6763: what a page's first socket sends from its saved copy (shared/pageCache.ts bootQuery): the copy's rev, its
+   * parts' hashes and whose it is, so a fresh load gets only what changed since the copy was saved.
+   */
+  boot?: () => { have?: string; parts?: string; u: string } | undefined;
+  /** w6763: for the ready report, when the saved copy was on screen and when the page's script began (ms since load). */
+  timing?: () => { shell?: number; script?: number };
 }
 
 /** Heard nothing (not even the server's ping) for this long: the socket is dead, even if it still reads open. */
@@ -374,10 +381,12 @@ export function connectSocket(h: SocketHandlers): () => void {
     if (lastCode !== undefined) q.set('code', String(lastCode));
     if (lostAt) q.set('gap', String(Date.now() - lostAt));
     if (tries) q.set('tries', String(tries));
-    const have = everOpened && lostAt ? h.have?.(Date.now() - lostAt) : undefined;
+    const boot = everOpened ? undefined : h.boot?.();
+    const have = everOpened && lostAt ? h.have?.(Date.now() - lostAt) : boot?.have;
     if (have) q.set('have', have);
-    const parts = everOpened ? h.parts?.() : undefined;
+    const parts = everOpened ? h.parts?.() : boot?.parts;
     if (parts) q.set('parts', parts);
+    if (boot && (have || parts)) q.set('u', boot.u);
     return `${base}?${q}`;
   };
 
@@ -464,7 +473,7 @@ export function connectSocket(h: SocketHandlers): () => void {
         const now = performance.now();
         const render = now - inAt - t.parse;
         try {
-          sock.send(JSON.stringify({ type: 'ready', ...t, render, ...(firstConnect ? { load: now } : {}) }));
+          sock.send(JSON.stringify({ type: 'ready', ...t, render, ...(firstConnect ? { load: now, ...h.timing?.() } : {}) }));
         } catch {
           // Closing as it was sent: the next open says it.
         }
