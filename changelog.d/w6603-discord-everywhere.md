@@ -1,0 +1,1 @@
+- Every worker machine now gets the ff-discord plugin with ff-agents and ff-speckit at each update (`worker.ts tools` passes `--plugin ff-discord` to registerAgents.sh), and a machine without it fails the tools step, so every machine of an OS loads the same plugins (w6603).

@@ -9,6 +9,7 @@ import { agentGitDir, agentGitPathDir } from '../server/agentGit.ts';
 import { agentNodeExe, agentNodePathDir } from '../server/agentNode.ts';
 import { featureFlags, versionOf, type MachineBaseline } from '../shared/machineBaseline.ts';
 import { pythonExe } from './benchQueue.ts';
+import { installHelpersOf } from './installSsh.ts';
 
 export type ProbeRun = (cmd: string, args: string[], o: { timeoutMs: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
 
@@ -55,5 +56,5 @@ export async function probeBaseline(o: { run: ProbeRun; cfg: Record<string, unkn
       return [name, /ENOENT|not found|not recognized/i.test(why) || (r.code === -1 && !why) ? 'missing' : `failed (exit ${r.code})`] as const;
     }),
   );
-  return { tools: { daemonNode: versionOf(process.version), ...Object.fromEntries(entries) }, flags: featureFlags(o.cfg, { root: o.root, home: o.home }) };
+  return { tools: { daemonNode: versionOf(process.version), ...Object.fromEntries(entries) }, flags: { ...featureFlags(o.cfg, { root: o.root, home: o.home }), ...installHelpersOf(o.root) } };
 }
