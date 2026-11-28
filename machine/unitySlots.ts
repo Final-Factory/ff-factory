@@ -748,6 +748,33 @@ function writeAtomic(file: string, data: string) {
   }
 }
 
+/**
+ * writeAtomic off the loop (w6695): the same file, written whole the same way. In the arbiter's look one write held BEAST's
+ * daemon 14.7 s (2026-11-28 04:28Z, a busy disk).
+ */
+async function writeAtomicAsync(file: string, data: string) {
+  const tmp = `${file}.${process.pid}.${randomBytes(3).toString('hex')}.tmp`;
+  try {
+    await fs.promises.writeFile(tmp, data);
+  } catch (e) {
+    await fs.promises.rm(tmp, { force: true }).catch(() => undefined);
+    throw e;
+  }
+  for (let i = 0; ; i++) {
+    try {
+      await fs.promises.rename(tmp, file);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (i >= 20 || !(code === 'EPERM' || code === 'EBUSY' || code === 'EACCES')) {
+        await fs.promises.rm(tmp, { force: true }).catch(() => undefined);
+        throw e;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
 function readJson<T>(file: string): T | undefined {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
@@ -939,7 +966,7 @@ export class UnitySlots {
     const byId = new Map(reqs.map((r) => [r.id, r]));
     this.logJumps(a, byId);
     for (const id of a.grant) {
-      writeAtomic(grantFile(this.d.dir, id), JSON.stringify({ id, grantedAt: new Date(now).toISOString() }));
+      await writeAtomicAsync(grantFile(this.d.dir, id), JSON.stringify({ id, grantedAt: new Date(now).toISOString() }));
       const r = byId.get(id)!;
       r.grantedAt = now;
       this.d.log?.(`unity slots: granted ${r.count} to "${r.label}" (${r.holder})`);
@@ -951,7 +978,7 @@ export class UnitySlots {
       }
     }
     for (const x of a.deny) {
-      writeAtomic(denyFile(this.d.dir, x.id), JSON.stringify({ id: x.id, why: x.why, at: new Date(now).toISOString() }));
+      await writeAtomicAsync(denyFile(this.d.dir, x.id), JSON.stringify({ id: x.id, why: x.why, at: new Date(now).toISOString() }));
       const r = byId.get(x.id)!;
       r.denied = x.why;
       const text = `refused "${r.label}" (${r.holder}, ${r.count} slot(s)): ${x.why}`;
@@ -977,7 +1004,7 @@ export class UnitySlots {
       this.d.onEvent?.(`another process (pid ${cur!.pid}${cur!.machine ? `, machine "${cur!.machine}"` : ''}${cur!.startedAt ? `, started ${cur!.startedAt}` : ''}) is answering this machine's Unity slots mailbox ${this.d.dir} too, so launches may be granted past the limit. Stop it: a second daemon on the same home folder, or a test's daemon left running.`);
     }
     try {
-      writeAtomic(arbiterFile(this.d.dir), JSON.stringify(this.arbiterFile(), null, 1));
+      await writeAtomicAsync(arbiterFile(this.d.dir), JSON.stringify(this.arbiterFile(), null, 1));
     } catch (e) {
       // The next look writes it again; clients count it as gone only after a minute without one.
       this.d.log?.(`unity slots: could not write ${arbiterFile(this.d.dir)}: ${(e as Error).message}`);
@@ -1326,12 +1353,13 @@ export function slotRpcHandlers(dir: string, o: { now?: () => number; filed?: ()
       o.filed?.();
       return { id, holder: body.holder };
     },
-    'slots/touch': (c, b) => {
+    // w6695: the touch off the loop (it came right after a 6.9 s block on BEAST, 2026-11-28 04:28Z).
+    'slots/touch': async (c, b) => {
       const { id, f } = own(c, b);
       if (f) {
         const t = new Date(now());
         try {
-          fs.utimesSync(reqFile(dir, id), t, t);
+          await fs.promises.utimes(reqFile(dir, id), t, t);
         } catch {
           // released meanwhile
         }

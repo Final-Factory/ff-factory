@@ -132,6 +132,7 @@ export class LineTail {
    * timer, w6639): closed off the loop, where one close held BEAST's daemon 56.6 s (2026-11-28 00:54Z); nothing waits on it.
    */
   close(later = false) {
+    this.openGen++;
     clearTimeout(this.closer);
     this.closer = undefined;
     const fd = this.fd;
@@ -150,8 +151,16 @@ export class LineTail {
   /** Where the line onLine is handling now ends (its newline included), as a byte offset (w6548). */
   lineEnd = 0;
 
-  /** Read what was appended since the last call. */
-  poll() {
+  /**
+   * Read what was appended since the last call. `openOffLoop` (w6695, the daemon's poll timer): when the kept handle has
+   * to be opened again, open it off the loop and read on the next poll, as reopening it held BEAST's daemon 6.9 s and 7.9 s
+   * (2026-11-28 04:28Z). Calls that must read now (adopting a host, one that has gone) open it here as before.
+   */
+  poll(openOffLoop = false) {
+    if (openOffLoop && this.fd === undefined && this.keepOpenMs > 0) {
+      this.openLater();
+      return;
+    }
     let fd = this.fd;
     let own = false;
     this.depth++;
@@ -194,6 +203,34 @@ export class LineTail {
 
   /** w6639: handles closed off the loop that have not closed yet (a folder removal on Windows fails while one is open). */
   closing = 0;
+
+  /** w6695: an open under way off the loop; close() since it began (openGen moved on) closes what it opens. */
+  private opening = false;
+  private openGen = 0;
+
+  private openLater() {
+    if (this.opening) return;
+    this.opening = true;
+    // Counted as a handle still closing: a folder removal meanwhile retries (start()) instead of failing on it.
+    this.closing++;
+    const gen = this.openGen;
+    fs.open(this.file, 'r', (err, fd) => {
+      this.opening = false;
+      this.closing--;
+      if (err) {
+        if (err.code !== 'ENOENT') console.log(new Date().toISOString(), `reading ${this.file}: ${err.message}`);
+        return;
+      }
+      // Let go of meanwhile, or a poll that had to read at once opened it itself.
+      if (gen !== this.openGen || this.fd !== undefined) {
+        this.closeLater(fd);
+        return;
+      }
+      this.fd = fd;
+      this.closer = setTimeout(() => this.close(true), this.keepOpenMs);
+      this.closer.unref?.();
+    });
+  }
 
   /** w6639: close a handle with no one waiting on it, off the loop (libuv's thread pool). */
   private closeLater(fd: number) {
@@ -467,6 +504,14 @@ export class HostedSession implements SessionHandle {
    * 2026-11-27), and which start of the host it is for: a write for an earlier start never counts as saved.
    */
   private offsetWrite?: Promise<void>;
+  /**
+   * w6695: commands for the host not yet appended to in.jsonl, and the append under way, off the loop and in order. One
+   * appendFileSync of a stop held BEAST's daemon 59.2 s (2026-11-28 04:38Z, "link stop").
+   */
+  private cmdQueue: string[] = [];
+  private cmdWrite?: Promise<void>;
+  /** The daemon is going (detach): an append that finishes later starts no new host. */
+  private detached = false;
   private offsetGen = 0;
   /**
    * How far into out.jsonl the signals forwarded to the portal go (w6548), kept in daemon.signalled at each one. Signals
@@ -605,8 +650,9 @@ export class HostedSession implements SessionHandle {
       ...(attachments?.length ? { attachments } : {}),
     } as const;
     let other: string | undefined;
-    if (this.stoppingNow || this.waiting.length) {
-      // Its old host's tree is still being stopped (w799): the new host starts once it is gone, with this message.
+    if (this.stoppingNow || this.waiting.length || (!this.running && this.commandsPending)) {
+      // Its old host's tree is still being stopped (w799): the new host starts once it is gone, with this message. Or the
+      // old host's last commands are still being appended (w6695): the new host's folder is made once they are.
       this.waiting.push(cmd);
     } else if (this.running && !this.liveNow && (other = this.otherThanHost())) {
       // Its agent ended (a usage limit, a stop to move it) and its host is closing, while this message's run differs from
@@ -703,10 +749,21 @@ export class HostedSession implements SessionHandle {
 
   /** The daemon is going (a restart, an update): stop reading, leave the host running for the next daemon. */
   detach() {
+    this.detached = true;
     clearInterval(this.timer);
     this.tail?.close();
     this.timer = undefined;
     this.saveOffsetNow();
+    // w6695: the process exits right after, so commands not yet handed to an append are appended now, as before.
+    if (this.cmdQueue.length) {
+      const text = this.cmdQueue.join('');
+      this.cmdQueue = [];
+      try {
+        fs.appendFileSync(this.files.in, text);
+      } catch (e) {
+        this.deps.log(`agent host ${this.info.id}: could not write a command to ${this.files.in}: ${(e as Error).message}`);
+      }
+    }
   }
 
   /** Removed for good: once its host has closed, its folder goes. */
@@ -742,7 +799,7 @@ export class HostedSession implements SessionHandle {
     this.n = 0;
     this.savedOffset = 0;
     this.signalledAt = 0;
-    this.sends = [this.command(first) as Extract<HostCommand, { op: 'send' }>];
+    this.sends = [this.commandNow(first) as Extract<HostCommand, { op: 'send' }>];
     const start: HostStart = { hostProtocol: HOST_PROTOCOL, info: { ...this.info, pendingPermissions: [] }, seq: this.seq, spec, editorUp: this.deps.editorUp(), ...(this.deps.capsMode ? { capsMode: this.deps.capsMode() } : {}) };
     this.running = true;
     this.launchedAt = Date.now();
@@ -797,23 +854,63 @@ export class HostedSession implements SessionHandle {
     return true;
   }
 
+  /** w6695: a command for the host, appended to in.jsonl off the loop, after every one before it. */
   private command(c: DistributiveOmit<HostCommand, 'n'>): HostCommand {
+    const cmd = { ...c, n: ++this.n } as HostCommand;
+    this.cmdQueue.push(JSON.stringify(cmd) + '\n');
+    this.writeCommands();
+    return cmd;
+  }
+
+  /** The first command of a new host, appended now (start() launches the host right after; nothing is queued then). */
+  private commandNow(c: DistributiveOmit<HostCommand, 'n'>): HostCommand {
     const cmd = { ...c, n: ++this.n } as HostCommand;
     fs.appendFileSync(this.files.in, JSON.stringify(cmd) + '\n');
     return cmd;
+  }
+
+  /** Commands queued or being appended (a new host waits for them, and its folder is not removed under them). */
+  private get commandsPending() {
+    return !!this.cmdWrite || this.cmdQueue.length > 0;
+  }
+
+  private writeCommands() {
+    if (this.cmdWrite || !this.cmdQueue.length) return;
+    const text = this.cmdQueue.join('');
+    this.cmdQueue = [];
+    this.cmdWrite = fs.promises
+      .appendFile(this.files.in, text)
+      .catch((e: Error) => this.deps.log(`agent host ${this.info.id}: could not write a command to ${this.files.in}: ${e.message}`))
+      .finally(() => {
+        this.cmdWrite = undefined;
+        if (this.cmdQueue.length) this.writeCommands();
+        // A message that waited for these (send() while they were pending) starts its new host now.
+        else if (this.waiting.length && !this.stoppingNow && !this.running && !this.detached) this.startWaiting();
+      });
+  }
+
+  /** w6695: wait until every queued command is appended. */
+  private async commandsWritten() {
+    while (this.cmdWrite) await this.cmdWrite;
+  }
+
+  /** w6695: resolves once every command given so far is in in.jsonl (tests read it then). */
+  flushed(): Promise<void> {
+    return this.commandsWritten();
   }
 
   private follow(offset: number) {
     clearInterval(this.timer);
     this.tail?.close();
     this.tail = new LineTail(this.files.out, (line) => this.onLine(line), offset, TAIL_KEEP_OPEN_MS);
-    this.timer = setInterval(() => this.poll(), POLL_MS);
+    this.timer = setInterval(() => this.poll(true), POLL_MS);
     this.timer.unref?.();
   }
 
-  private poll() {
+  /** `timer` (w6695): the poll timer's, whose tail may open its file off the loop; adopt's reads at once. */
+  private poll(timer = false) {
     if (!this.tail) return;
-    this.tail.poll();
+    this.tail.poll(timer);
     this.saveOffset();
     // A host that died without closing (a crash, the machine's power): what it recorded is forwarded above. Looked at
     // every 2 s. One that has not written host.json yet is still starting, for up to START_MS.
@@ -1217,6 +1314,8 @@ export class HostedSession implements SessionHandle {
       }
       // The poll's offset write ends first (w6486): its open file would keep the folder on Windows.
       await this.offsetWrite;
+      // So are its last commands (w6695): an append still under way would keep the folder on Windows.
+      await this.commandsWritten();
       const err = await removeHostDir(this.files.dir);
       if (err) this.deps.log(`agent host ${id}: could not remove ${this.files.dir}: ${err}`);
     };
@@ -1232,6 +1331,8 @@ export class HostedSession implements SessionHandle {
 
   /** Messages that came while its old host was being stopped: a new host carries them, in order. */
   private startWaiting() {
+    // w6695: once the old host's last commands are appended (writeCommands calls this again).
+    if (this.commandsPending) return;
     const [first, ...rest] = this.waiting;
     this.waiting = [];
     if (!first || this.disposed || this.running) return;
