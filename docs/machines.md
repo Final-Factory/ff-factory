@@ -1907,8 +1907,9 @@ functionality needed"), it takes one named operation and nothing else:
    (`tNNNNNNNN/info.json`, `granted`, `bench.lock/owner`), held by the daemon's own process: a play-only machine has no checkout
    or python for `bench_queue.py`, so the bench row and `readBenchLock` show it like any other ticket. Each leg is the game
    repo's `scripts/bench/probe_ab_win.sh` leg with its fixed arguments (`legArgs`: solo, the save, the perf probe after the
-   settle, quit after the dwell). Before a leg it waits up to 2 minutes for the rest of the machine to drop below 25% CPU, and
-   it samples the CPU every 2 s during the leg. A leg that runs past its bound is ended. A leg during which a person used the
+   settle, quit after the dwell, and vsync and the frame cap held off through `-ffFeelProbe -ffFeelVsync 0 -ffFeelFps -1` as
+   probe_ab_win.sh does unless CAPPED=1, w6744; a variant that passes its own `-ffFeelVsync 1` measures capped).
+   Before a leg it waits up to 2 minutes for the rest of the machine to drop below 25% CPU, and it samples the CPU every 2 s during the leg. A leg that runs past its bound is ended. A leg during which a person used the
    computer (the tray's last input) carries a note. The legs run in probe_ab_win.sh's order, flipped on even rounds. The daemon's
    own clean-up waits while a run plays.
 3. **The logs come back** as one `timed-<run>.tar.gz` (ustar, gzipped) in probe_ab_win.sh's layout

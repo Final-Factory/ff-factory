@@ -102,6 +102,13 @@ test('the legs are probe_ab_win.sh\'s: its arguments, and the order flipped on e
   assert.equal(at('-ffAutomationAutoQuit'), 'true');
   assert.equal(at('-logFile'), 'V:/out/player.log');
   assert.equal(a[a.length - 1], '-ffX');
+  // w6744: vsync and the frame cap off, as probe_ab_win.sh's legs (a 60 Hz screen otherwise reads 16.7 ms on every arm),
+  // before the variant's args so its own -ffFeelVsync wins; the variant may still ask for it.
+  assert.ok(a.includes('-ffFeelProbe'));
+  assert.equal(at('-ffFeelVsync'), '0');
+  assert.equal(at('-ffFeelFps'), '-1');
+  assert.ok(a.indexOf('-ffFeelVsync') < a.indexOf('-ffX'));
+  assert.equal(timedArgsProblem(['-ffFeelVsync', '1']), undefined);
   assert.deepEqual(legArgs(TIMED_DEFAULTS, { name: 'igpu', args: ['-force-device-index', '1'] }, 1, 's', 'l').slice(-2), ['-force-device-index', '1']);
   assert.deepEqual(
     legOrder(['base', 'fix'], 2).map((l) => `${l.variant}${l.round}`),
