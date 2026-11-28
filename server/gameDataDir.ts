@@ -98,12 +98,25 @@ const covers = (checked: readonly string[], h: string) => {
 /**
  * w6680: a 0.50.x.y version written in parentheses right after a sha that was read, "dc4643b4c2 (0.50.0.120)", is that
  * commit's version, not another build: w6678's legacy_data said "run A is a pre-1.0 player at dc4643b4c2 (0.50.0.120)".
- * Only that shape; "ac80d7b0 is 0.50.0.47" or "Steam 0.50.0.47" still name a build no commit is.
+ * Only that shape; "ac80d7b0 is 0.50.0.47" or "Steam 0.50.0.47" still name a build no commit is. w6686 (w6682's review of
+ * PR #1543): the bracket must close right after the version, so "dc4643b4c2 (0.50.0.47 installed)" names a build; and a
+ * published, installed, Steam, release or shipped word up to two words before the sha ("the published dc4643b4c2
+ * (0.50.0.47)") makes it a build too. `at` and `end` bound the version (VERSION_WORD, a leading "v" included).
  */
-const versionOfChecked = (said: string, at: number, checked: readonly string[]): boolean => {
-  const m = /\b([0-9a-f]{7,40})\s*\(\s*v?$/i.exec(said.slice(Math.max(0, at - 60), at));
-  return !!m && isSha(m[1]) && covers(checked, m[1]);
+const versionOfChecked = (said: string, at: number, end: number, checked: readonly string[]): boolean => {
+  if (!/^\s*\)/.test(said.slice(end, end + 20))) return false;
+  const before = said.slice(Math.max(0, at - 120), at);
+  const m = /\b([0-9a-f]{7,40})\s*\(\s*$/i.exec(before);
+  if (!m || !isSha(m[1]) || !covers(checked, m[1])) return false;
+  return !INSTALLED_WORD_BEFORE.test(before.slice(0, m.index));
 };
+/** w6686: a word that makes the sha after it a build players run, with at most two words between them. */
+const INSTALLED_WORD_BEFORE = /\b(?:published|installed|steam|releases?|released|shipped)\b\W*(?:[\w.-]+\W+){0,2}$/i;
+/**
+ * A 0.50.x.y version as otherPlayerIn reads one. w6686: a leading "v" counts ("v0.50.0.47"); before it, `\b0\.50` could not
+ * match after the "v", so such a version was no version at all.
+ */
+const VERSION_WORD = /(?:\bv|\b)0\.50\.\d+\.\d+\b/gi;
 
 /**
  * w6235 (w6192's review of PR #1402): the check reads only the pair's `commit`, but a pair run can run more than one player
@@ -118,7 +131,7 @@ export function otherPlayerIn(said: string, commit: string, where = 'legacy_data
   const c = commit.toLowerCase();
   const read = checked.length ? checked : [commit];
   const sha = (said.match(SHA_WORD) ?? []).find((h) => isSha(h) && !covers(read, h) && !(h.toLowerCase().startsWith(c) || c.startsWith(h.toLowerCase())));
-  const version = [...said.matchAll(/\b0\.50\.\d+\.\d+\b/g)].find((m) => !versionOfChecked(said, m.index, read))?.[0];
+  const version = [...said.matchAll(VERSION_WORD)].find((m) => !versionOfChecked(said, m.index, m.index + m[0].length, read))?.[0];
   const installed = sha || version ? undefined : installedBuildIn(said);
   if (!sha && !version && !installed) return undefined;
   const named = sha ? `commit ${sha.slice(0, 10)}` : version ? `build ${version}` : `a build no commit is ("${clip(installed!.replace(/\s+/g, ' '), 60)}")`;
