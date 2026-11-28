@@ -7,6 +7,7 @@ import path from 'node:path';
 import type { PermissionMode, ProjectView } from '../shared/types.ts';
 import { CLEANUP_SOFT_GB_DEFAULT } from '../shared/types.ts';
 import type { MinPriority } from '../shared/capacity.ts';
+import type { ExclusionMode } from './placement.ts';
 import { checkObject, dataRecoveries, readJsonDurable, writeFileDurable } from './durable.ts';
 import { staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
 import { checkPoolConfig, type PoolConfig } from './tokenPool.ts';
@@ -683,9 +684,11 @@ export interface Config {
    * clears, machine ids in order; unset: beast (placement.ts DEFAULT_BUILD). Set with placement.build. `minPriority` (w1643):
    * machine id to the lowest priority of work it takes (high: high and urgent only; urgent: urgent only; a computer left out takes
    * all work). Set with placement.minPriority. `spillAtPercent` (w2054): the load past which new work spills down the list
-   * (placement.ts SPILL_AT_PCT, 50 when unset). Set with placement.spillAtPercent.
+   * (placement.ts SPILL_AT_PCT, 50 when unset). Set with placement.spillAtPercent. `exclusions` (w6754): what FF Factory
+   * does with a machine exclusion that cites no live reason (server/exclusionAudit.ts): warn (log it, the default), enforce
+   * (drop it and re-queue) or off. Set with placement.exclusions.
    */
-  placement?: { prefer?: string[]; avoid?: Record<string, string>; hold?: Record<string, string>; holdExcept?: Record<string, string[]>; live?: string[]; build?: string[]; minPriority?: Record<string, MinPriority>; spillAtPercent?: number };
+  placement?: { prefer?: string[]; avoid?: Record<string, string>; hold?: Record<string, string>; holdExcept?: Record<string, string[]>; live?: string[]; build?: string[]; minPriority?: Record<string, MinPriority>; spillAtPercent?: number; exclusions?: ExclusionMode };
   /** Paths no sandbox agent may write to or mention in a shell command (e.g. the live co-op checkout). */
   protectedPaths: string[];
   limits: {

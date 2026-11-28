@@ -1152,7 +1152,7 @@ export class Agents {
       identity,
       options: this.orchestratorOptions,
       places: () => ({ machines: machines.list() }),
-      exclusionFacts: () => ({ crashHolds: liveCrashHoldList(this.store.work.values()), prefs: this.placement(), computers: this.places() }),
+      exclusionFacts: () => ({ crashHolds: liveCrashHoldList(this.store.work.values()), prefs: this.placement(), config: this.cfg.placement ?? {}, computers: this.places() }),
       recentCommits: () => this.recentCommits,
       room: () => this.roomNow(),
       roomFacts: () => this.roomFacts(),

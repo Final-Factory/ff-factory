@@ -8,7 +8,7 @@ import { vaultContext } from './vault.ts';
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
 import { writeFileDurable } from './durable.ts';
-import { placeId } from './placement.ts';
+import { EXCLUSION_MODES, placeId, type ExclusionMode } from './placement.ts';
 import { MIN_PRIORITIES, type MinPriority } from '../shared/capacity.ts';
 import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
 import { MAX_ATTACHMENTS_RANGE } from '../shared/attachments.ts';
@@ -169,6 +169,9 @@ export const SETTABLE_KEYS = [
   'placement.minPriority',
   // The load, %, past which new work spills down the placement list (w2054, docs/machines.md "Placing work"); unset: 50.
   'placement.spillAtPercent',
+  // What the minute audit does with a machine exclusion that cites no live reason (w6754, docs/machines.md "Placing work"):
+  // warn (the default: it logs), enforce (it drops it and re-queues the request) or off.
+  'placement.exclusions',
   // When the orchestrators compact their conversations by themselves (w535, server/autoCompact.ts): the context in
   // tokens, and a turn's cost in USD. 0 turns either trigger off.
   'orchestrator.compactAtTokens',
@@ -880,6 +883,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       return checkDevRequests(value);
     case 'intake.reviewers':
       return checkReviewers(value, users ?? []);
+    case 'placement.exclusions': {
+      const v = typeof value === 'string' ? value.trim().toLowerCase() : value;
+      if (EXCLUSION_MODES.includes(v as ExclusionMode)) return v === 'warn' ? undefined : v;
+      throw new Error(`${key} is one of ${EXCLUSION_MODES.join(', ')}: what FF Factory does with a machine exclusion that cites no live crash hold, machine hold, config rule, capability or person's words (w6754): warn logs it on the request (the default), enforce drops it and re-queues the request, off does nothing`);
+    }
     case 'placement.spillAtPercent': {
       const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
       if (typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 100) return n;
@@ -1221,9 +1229,9 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     else t[field] = v as number;
     cfg.timing = Object.keys(t).length ? t : undefined;
   }
-  else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold' || key === 'placement.live' || key === 'placement.build' || key === 'placement.minPriority' || key === 'placement.spillAtPercent') {
+  else if (key === 'placement.prefer' || key === 'placement.avoid' || key === 'placement.hold' || key === 'placement.live' || key === 'placement.build' || key === 'placement.minPriority' || key === 'placement.spillAtPercent' || key === 'placement.exclusions') {
     const p = { ...cfg.placement };
-    const field = key === 'placement.spillAtPercent' ? 'spillAtPercent' : key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : key === 'placement.live' ? 'live' : key === 'placement.build' ? 'build' : key === 'placement.minPriority' ? 'minPriority' : 'hold';
+    const field = key === 'placement.exclusions' ? 'exclusions' : key === 'placement.spillAtPercent' ? 'spillAtPercent' : key === 'placement.prefer' ? 'prefer' : key === 'placement.avoid' ? 'avoid' : key === 'placement.live' ? 'live' : key === 'placement.build' ? 'build' : key === 'placement.minPriority' ? 'minPriority' : 'hold';
     const split = field === 'hold' ? splitHold(v) : undefined;
     if (v === undefined) delete p[field];
     else (p as Record<string, unknown>)[field] = split ? split.hold : v;

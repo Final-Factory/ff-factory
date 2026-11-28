@@ -3090,18 +3090,31 @@ LothDesktop and Beast, not just when BEAST is full").
   brief to brief and into request_pair (`avoid: ["beast"]`), after the one real crash hold (2026-11-26 18:39Z) had cleared
   16 minutes after it was set (w6685). Each minute the blocker watch (`Orchestrators.auditExclusions`,
   `server/exclusionAudit.ts`) judges a pair run's `avoid` before its legs start, a machine pin, and a Queued request's
-  `needs` (every online computer it leaves out). A machine stays out only for: a live crash hold (any open request's,
-  not cleared), a hold, pause, drain or offline state, a config `placement.avoid` or `placement.hold` key, a capability
-  (a Mac for a run with a client, w3697; no players; no timed runs for a timed run; Medium integrity for a pre-w5297
-  player), or a person's words (a `pin_words` pin, the request's or its parent's constraints, a person's note).
+  `needs` (every computer it leaves out, offline ones included). A machine stays out only for: a live crash hold of the
+  request itself or of the request its pair run is for (w6754; another request's hold is not a reason), a hold, pause,
+  drain or offline state (a machine hold; a build's or a person's game's hold is a machine hold, and only a key config
+  holds is `config`), a config `placement.avoid` or `placement.hold` key, a capability (a Mac for a run with a client,
+  w3697; no players; no timed runs for a timed run; Medium integrity for a pre-w5297 player), a computer where a leg of
+  the run a retry replaces failed (`WorkPair.failedOn`, set by the server only, w2041), a pin on the machine the work is
+  about (its title or brief names it, not as one to avoid) or a pin its worker set with timed_place, or a person's words
+  (a `pin_words` pin, the request's or its parent's constraints, a person's note). Needs that only repeat the request's
+  pin are not judged again.
   - **Stage 1, warn-only** (lothsahn's lockout rule): an exclusion with none of these gets one line on its request,
     `w6687 warn-only, nothing dropped: enforcing would drop <machine> from <its pair avoid | its pin | its queue needs>:
     ...`, once per change (a cleared crash hold it was kept for says so), and the same line in the portal journal as
-    `[w6687 exclusions]`. Nothing is dropped or re-queued; the enforce stage is a separate change.
+    `[w6687 exclusions]`. Nothing is dropped or re-queued. A line is not written again after a restart (the request's
+    log already holds it) or when a computer drops off and comes back (w6754).
+  - **Stage 2, config `placement.exclusions`** (w6754): `warn` (the default, stage 1's lines), `enforce` or `off` (no
+    audit). Under `enforce` the audit drops an avoid with no live reason (`w6754 enforced: dropped <machine> from its
+    pair avoid: ...`) or widens a Queued request's needs with the computer, and the room flag in the same minute starts
+    it; request_pair applies no avoid without a reason and its answer says which and why; decide_work queue refuses
+    needs that leave out a computer no reason names. A pin is only ever logged, even under enforce. Every fence, the Mac
+    multiplayer-client guard and Ben's m5 hold on game players stay as they are: none of them is an exclusion here.
+    Turning `enforce` on is lothsahn's switch.
   - request_pair's `avoid_why` is kept beside each avoided machine (`WorkPair.avoidWhy`) and shown in the line; it is
     never itself a reason. The capacity block carries `Crash holds now (w3740, the live list ...)`, so the dispatcher
     reads holds from the live list and nowhere else.
-  - Tests: `server/w6687ExclusionAudit.test.ts`.
+  - Tests: `server/w6687ExclusionAudit.test.ts`, `server/w6754ExclusionEnforce.test.ts`.
 - **The numbers are judgments**: 85% RAM (BEAST at 86% was overloaded, LothDesktop at 47% had room; one more editor
   takes 8-12 GB, about 15% of 64 GB) and the 10-point margin (one agent of ten slots, or about 6 GB of 64). Live agents
   count, not only mid-turn ones, because an idle agent's process holds its memory too (docs/orchestrators.md, "Agent

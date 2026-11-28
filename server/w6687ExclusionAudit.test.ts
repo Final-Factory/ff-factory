@@ -39,17 +39,17 @@ const work = (id: string, extra: Partial<WorkItem> = {}): WorkItem => ({
   ...extra,
 });
 
-/** w6168, whose worker was cut off when BEAST went down at 18:39Z: the request that carries the crash hold. */
+/** w6673, the request the pair runs are for, whose crash hold on BEAST was set at 18:39Z (w6754: only its own pair runs keep off BEAST for it). */
 const holder = (cleared?: string): WorkItem =>
-  work('w6168', { title: 'barge no-destination audit', status: 'active', crashHolds: [{ machine: 'beast', at: T, worker: 'c7bb04a5', why: 'running player pid 400216', ...(cleared ? { cleared, clearedBy: 'the worker ran on' } : {}) }] });
+  work('w6673', { title: 'barge no-destination audit', status: 'active', crashHolds: [{ machine: 'beast', at: T, worker: 'c7bb04a5', why: 'running player pid 400216', ...(cleared ? { cleared, clearedBy: 'the worker ran on' } : {}) }] });
 
-const facts = (open: WorkItem[], prefs: PlacementPrefs = {}, computers = COMPUTERS): ExclusionFacts => ({ crashHolds: liveCrashHoldList(open), prefs, computers });
+const facts = (open: WorkItem[], prefs: PlacementPrefs = {}, computers = COMPUTERS): ExclusionFacts => ({ crashHolds: liveCrashHoldList(open), prefs, config: prefs, computers });
 
 test('w6687: an avoid of BEAST is kept while its crash hold is live, and enforcing would drop it once the hold clears', () => {
   const pair = work('w6678', { pair: { legs: 2, for: 'w6673', avoid: ['beast'] } });
   const live = auditExclusions(pair, facts([holder()]));
   assert.deepEqual(live.map((v) => [v.machine, v.keep, v.kind]), [['beast', true, 'crash-hold']]);
-  assert.match(live[0].reason, /w6168's crash hold on beast \(18:39Z\)/);
+  assert.match(live[0].reason, /w6673's crash hold on beast \(18:39Z\)/);
   const cleared = auditExclusions(pair, facts([holder('2026-11-26T18:55:00.000Z')]));
   assert.deepEqual(cleared.map((v) => [v.machine, v.keep]), [['beast', false]]);
   // A closed request's hold is no live hold either.
@@ -111,18 +111,18 @@ test('w6687 warn-only: the minute audit logs once what enforcing would drop, re-
   for (const w of [hold, pair, stale, config]) store.putWork(w);
   const prefs: PlacementPrefs = { avoid: { lothdesktop: 'lothsahn plays there evenings' } };
   (o as unknown as { d: { exclusionFacts: () => ExclusionFacts } }).d.exclusionFacts = () => facts([...store.work.values()], prefs, [...COMPUTERS, pc('biscuit')]);
-  // While w6168's crash hold is live, BEAST's avoid stands; only the avoid of biscuit (no live reason) is logged.
+  // While w6673's crash hold is live, BEAST's avoid stands; only the avoid of biscuit (no live reason) is logged.
   assert.deepEqual(o.auditExclusions(), ['w6700']);
   assert.match(JSON.stringify(store.work.get("w6700")!.log.at(-1)), /w6687 warn-only, nothing dropped: enforcing would drop biscuit from its pair avoid: .*it cited: \\"brief says crash hold/);
   // Once per change: the next minute logs nothing new.
   assert.deepEqual(o.auditExclusions(), []);
   // The hold clears: w6678's avoid now cites nothing live, and its log says the hold it was kept for cleared.
-  const h = store.work.get('w6168')!;
+  const h = store.work.get('w6673')!;
   h.crashHolds = h.crashHolds!.map((x) => ({ ...x, cleared: '2026-11-26T18:55:00.000Z', clearedBy: 'lothsahn' }));
   store.putWork(h);
   assert.deepEqual(o.auditExclusions(), ['w6678']);
   const line = JSON.stringify(store.work.get('w6678')!.log.at(-1));
-  assert.match(line, /drop beast from its pair avoid: w6168's crash hold on beast \(18:39Z\) has cleared, so enforcing would re-queue it for beast/);
+  assert.match(line, /drop beast from its pair avoid: w6673's crash hold on beast \(18:39Z\) has cleared, so enforcing would re-queue it for beast/);
   // Warn-only: every avoid list is as it was, and the config rule's exclusion was never logged.
   assert.deepEqual(store.work.get('w6678')!.pair!.avoid, ['beast']);
   assert.deepEqual(store.work.get('w6700')!.pair!.avoid, ['biscuit']);
@@ -130,6 +130,6 @@ test('w6687 warn-only: the minute audit logs once what enforcing would drop, re-
 });
 
 test('w6687: the dispatcher\'s crash-hold line comes from the live list, so a cleared hold is gone from it', () => {
-  assert.match(crashHoldsLine(liveCrashHoldList([holder()])), /: beast for w6168 \(since 18:39Z\)\./);
+  assert.match(crashHoldsLine(liveCrashHoldList([holder()])), /: beast for w6673 \(since 18:39Z\)\./);
   assert.match(crashHoldsLine(liveCrashHoldList([holder('2026-11-26T18:55:00.000Z')])), /the live list; [^)]*\): none\./);
 });
