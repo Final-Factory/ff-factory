@@ -305,7 +305,7 @@ test('ownerLabelTargets (w5749): every other machine and OS looks at nothing on 
   ])
     assert.deepEqual(ownerLabelTargets({ ...o, home: w.join('C:', 'Users', 'L'), env: {}, exists }), { label: [], left: [] });
   assert.equal(calls, 0);
-  assert.ok(OWNER_LABEL_ON_SYSTEM_DRIVE.has('lothdesktop') && OWNER_LABEL_ON_SYSTEM_DRIVE.size === 1);
+  assert.deepEqual([...OWNER_LABEL_ON_SYSTEM_DRIVE].sort(), ['beast', 'lothdesktop']);
 });
 
 test('ghLoginStorage (w5749): keyring, file or none, from gh auth status', () => {
@@ -337,7 +337,7 @@ test('sayOwnerLabels (w5749): warn says what on would label, the gh move, and wh
 });
 
 // w6569 (lothsahn, 2026-11-27: "File it: move BEAST's gh login out of Credential Manager, as w5749 did on LothDesktop").
-test('ownerLabelTargets (w6569): BEAST plans the gh folder only, held at warn; ~/.ssh and browsers are never looked at', () => {
+test('ownerLabelTargets (w6569): BEAST plans the gh folder only, enforced; ~/.ssh and browsers are never looked at', () => {
   const home = w.join('C:', 'Users', 'rydin');
   const env = { APPDATA: w.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: w.join(home, 'AppData', 'Local') };
   const gh = w.join(env.APPDATA, 'GitHub CLI');
@@ -347,9 +347,10 @@ test('ownerLabelTargets (w6569): BEAST plans the gh folder only, held at warn; ~
   assert.deepEqual(plan.label, [{ path: gh, sddl: NO_READ_UP.dir }]);
   assert.deepEqual(plan.left.map((l) => l.path), [ssh]);
   assert.match(plan.left[0].why, /gh login move only, w6569/);
-  assert.equal(plan.warnOnly, true);
+  assert.equal(plan.warnOnly, undefined);
+  assert.equal(ownerLabelMode('on', plan), 'on');
   assert.deepEqual(looked, [gh], 'only the gh folder is checked on its system drive');
-  assert.ok(OWNER_LABEL_WARN_ONLY.has('beast') && OWNER_LABEL_GH_ONLY.has('beast') && !OWNER_LABEL_ON_SYSTEM_DRIVE.has('beast'));
+  assert.ok(!OWNER_LABEL_WARN_ONLY.has('beast') && OWNER_LABEL_GH_ONLY.has('beast') && OWNER_LABEL_ON_SYSTEM_DRIVE.has('beast'));
 });
 
 test('ownerLabelMode (w6569): on is held at warn on a warn-only machine; off, warn and LothDesktop keep the fence mode', () => {

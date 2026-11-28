@@ -372,8 +372,10 @@ export function sayOwnerRules(mode: string, platform: NodeJS.Platform, owner: re
  * labelNoReadUp) and its owner secrets open to Low workers, as before. Measured on LothDesktop (2026-11-25, a Low worker):
  * `GH_CONFIG_DIR="%APPDATA%\GitHub CLI" gh auth status` said "Logged in to github.com account Lothsahn (keyring)", and
  * ~/.ssh listed its keys.
+ * w6569's enforce stage adds BEAST (lothsahn, 2026-11-27: "File it: move BEAST's gh login out of Credential Manager, as
+ * w5749 did on LothDesktop"), with its plan the gh folder alone (OWNER_LABEL_GH_ONLY).
  */
-export const OWNER_LABEL_ON_SYSTEM_DRIVE: ReadonlySet<string> = new Set(['lothdesktop']);
+export const OWNER_LABEL_ON_SYSTEM_DRIVE: ReadonlySet<string> = new Set(['lothdesktop', 'beast']);
 
 /**
  * w6569 (lothsahn, 2026-11-27: "File it: move BEAST's gh login out of Credential Manager, as w5749 did on LothDesktop";
@@ -384,7 +386,7 @@ export const OWNER_LABEL_ON_SYSTEM_DRIVE: ReadonlySet<string> = new Set(['lothde
  * BEAST (w5932, and again by w6569 on 2026-11-27): GH_CONFIG_DIR at an empty folder with a token-less hosts.yml naming
  * bryding, no GH_TOKEN: `gh auth status` said "Logged in to github.com account bryding (keyring)" and `gh api user` 200.
  */
-export const OWNER_LABEL_WARN_ONLY: ReadonlySet<string> = new Set(['beast']);
+export const OWNER_LABEL_WARN_ONLY: ReadonlySet<string> = new Set<string>();
 
 /**
  * w6569: the machines whose plan is the gh login alone: the go there was for "the gh login move itself", so ~/.ssh is left
