@@ -576,7 +576,8 @@ so it is the one place a Steam can start the way a person's double-click starts 
   `SteamPath\steam.exe`), which must be an absolute path to a `steam.exe` that exists. The `steam_start` message carries
   `id` and a short `why` and nothing else: a path, arguments or any other field is refused. Steam gets no arguments.
 - **When it refuses.** Unless the daemon runs at Medium (never Low, never High or System) in a session other than 0, and
-  Windows' own `quser` shows that session as the daemon's own user's, logged in. Anything it cannot read refuses too.
+  Windows' own `quser` shows that session as the daemon's own user's, logged in (active, or its remote desktop
+  disconnected). Windows' tools run by their System32 paths. Anything it cannot read refuses too.
 - **Already running:** it does nothing and says so.
 - **How it starts it.** It hands the exe to the user's Explorer in that session (`explorer.exe <steam.exe>`), so Steam starts
   outside the daemon's scheduled-task job, as the shell starts a program. If no Explorer runs there (it had crashed on BEAST,
@@ -591,7 +592,9 @@ so it is the one place a Steam can start the way a person's double-click starts 
 
 **Self-healing.** Before the players broker starts a player on a Windows PC (`players/launch`: every players run and pair
 run), the daemon checks Steam. Installed but not running, it starts it as above and waits up to 45 s, inside the game
-repo's 120 s broker wait. One start runs at a time (a person's call and launches share it). A try that leaves Steam not
+repo's 120 s broker wait. The check runs before the broker's queue and its `players/` write mark, so a Steam wait
+holds up no other sandbox's install or launch. One start runs at a time: a launch that finds one under way (a person's,
+or another launch's) waits for it at most 45 s and spends no try; only the launch that began a start counts its failure. A try that leaves Steam not
 running refuses that launch with a clear error; the next automatic try waits 2, then 10, then 30 minutes, and there are at
 most 4 in 6 hours, until Steam is seen running again or a person starts it. A launch that cannot try (no desktop user,
 Steam not installed, backing off, at the cap) starts the player as before. The daemon log has a line for every try.

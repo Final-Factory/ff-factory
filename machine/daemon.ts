@@ -154,7 +154,7 @@ import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './fire
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
 import { SteamStarter, realSteamStartDeps, steamStartMsgProblem, type SteamStartDeps } from './steamStart.ts';
-import { DaemonRpc, legacyRpcInfoFile, loadRpcKey, makeToken, rpcInfoFile, rpcKeyFile, RPC_ENV, TOKEN_ENV, type RpcHandler } from './daemonRpc.ts';
+import { DaemonRpc, RpcRefused, legacyRpcInfoFile, loadRpcKey, makeToken, rpcInfoFile, rpcKeyFile, RPC_ENV, TOKEN_ENV, type RpcHandler } from './daemonRpc.ts';
 import { BenchProxy } from './benchProxy.ts';
 import { MEDIUM_AGENT_VAR, fixUserPath, planMediumCaches, planMediumFolders, type MediumCaches, type MediumCachesMode, type MediumFolders, type MediumFoldersMode } from './mediumFolders.ts';
 import { UvCachePruner, applyMediumUvToolDir, findUv, mediumUvCacheDir, mediumUvCacheFor, runQuiet, runQuietEnv, sandboxUvEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
@@ -4203,19 +4203,27 @@ export class Daemon {
       removeTree: async (dir) => {
         await this.sharedWrite(() => removeTree(dir), [dir]);
       },
-      launch: async (l) => {
-        // w6727: self-healing; a Windows launch finds Steam not running and starts it first, bounded (machine/steamStart.ts).
-        const steam = await this.steamStarter()?.beforePlayer(`${l.session} in ${l.sandbox}`);
-        if (steam && 'refused' in steam) return { refused: steam.refused };
-        return launcher(l);
-      },
+      launch: launcher,
       // w6549: a lease whose pid a later process took is dead (one Win32_Process or ps query per check of a slot).
       startedAt: (pids) => processStartTimes(pids),
       // w5615: under "on" workers cannot write players: the copy is staged in the caller's own cache folder, then locked in.
       ...(this.sharedLock === 'on' ? { stageDir: (sb: string) => slotCacheDir(root, sb), lockIn: (dst: string) => this.lockShared(dst) } : {}),
       log: (l) => log(l),
     });
-    return Object.fromEntries(Object.entries(handlers).map(([k, h]): [string, RpcHandler] => [k, (c, b) => this.sharedWrite(() => h(c, b), [path.join(root, 'players')])]));
+    return Object.fromEntries(
+      Object.entries(handlers).map(([k, h]): [string, RpcHandler] => [
+        k,
+        async (c, b) => {
+          // w6727 self-healing: a Windows launch finds Steam not running and starts it first, bounded (machine/steamStart.ts).
+          // Before the broker's one queue and the players/ write mark (w6732), so a Steam wait holds up no other sandbox.
+          if (k === 'players/launch') {
+            const steam = await this.steamStarter()?.beforePlayer(`${c.session}${c.sandbox ? ` in ${c.sandbox}` : ''}`);
+            if (steam && 'refused' in steam) throw new RpcRefused(`players/launch: ${steam.refused}`, 503);
+          }
+          return this.sharedWrite(() => h(c, b), [path.join(root, 'players')]);
+        },
+      ]),
+    );
   }
 
   /** The daemon's Steam starter (w6727): Windows only, and only with the probe (tests leave it out). */

@@ -21,6 +21,8 @@ const EXE = 'c:\\program files (x86)\\steam\\steam.exe';
 const EXPLORER = 'C:\\Windows\\explorer.exe';
 const WHOAMI = 'C:\\Windows\\System32\\whoami.exe';
 const QUSER = 'C:\\Windows\\System32\\quser.exe';
+const REG = 'C:\\Windows\\System32\\reg.exe';
+const TASKLIST = 'C:\\Windows\\System32\\tasklist.exe';
 
 interface World {
   installed: boolean;
@@ -68,7 +70,9 @@ function world(over: Partial<World> = {}) {
     log: (l) => void logs.push(l),
     read: () => undefined,
     exists: (f) => w.installed && [EXE, `${w.steamPath}/steam.exe`].map((x) => x.toLowerCase().replace(/\//g, '\\')).includes(f.toLowerCase().replace(/\//g, '\\')),
-    run: async (cmd, args) => {
+    run: async (full, args) => {
+      // Windows' own tools come by full path (steamStart.ts) or by name (steamClient.ts): both answer here.
+      const cmd = ({ [REG]: 'reg', [TASKLIST]: 'tasklist' } as Record<string, string>)[full] ?? full;
       calls.push([cmd, ...args]);
       const a = args.join(' ');
       if (cmd === 'reg') {
@@ -276,4 +280,34 @@ test('w6727: launches and a person\'s start at the same time share one start', a
   assert.deepEqual([a, b], [{ ok: true }, { ok: true }]);
   assert.ok(m.state === 'started' || m.state === 'already', m.said);
   assert.equal(x.launches.length, 1);
+});
+
+test('w6732 review: a launch that joins a start under way (a person\'s) waits at most AUTO_WAIT_MS', async () => {
+  const x = world({ onLaunch: 'nothing' });
+  const s = new SteamStarter(x.d);
+  const t0 = x.now();
+  const manual = s.manual('a person');
+  let autoAt = 0;
+  const auto = s.beforePlayer('s1 in sb1').then((r) => ((autoAt = x.now()), r));
+  const [, a] = await Promise.all([manual, auto]);
+  assert.deepEqual(a, { ok: true }, 'the player starts without waiting longer');
+  assert.ok(autoAt - t0 < MANUAL_WAIT_MS, `the launch waited ${autoAt - t0} ms`);
+  assert.ok(x.logs.some((l) => /under way did not finish in 45 s/.test(l)));
+});
+
+test('w6732 review: launches that share one failed start spend one try and count one failure', async () => {
+  const x = world({ onLaunch: 'nothing' });
+  const s = new SteamStarter(x.d);
+  const [a, b] = await Promise.all([s.beforePlayer('s1 in sb1'), s.beforePlayer('s2 in sb2')]);
+  assert.ok('refused' in a || 'refused' in b, 'the launch that began the start is refused clearly');
+  const st = s as unknown as { autoFailures: number; autoTries: number[]; autoNextAt: number };
+  assert.equal(st.autoFailures, 1);
+  assert.equal(st.autoTries.length, 1);
+  assert.ok(x.launches.length <= 2, `hand-offs: ${x.launches.length} (one start, handed off again once at most)`);
+  assert.ok(st.autoNextAt - x.now() <= AUTO_BACKOFF_MS[0], 'the next try is the first backoff step');
+});
+
+test('w6732 review: a directly started Steam gets no credential-like variables', () => {
+  const kept = steamEnv({ AWS_ACCESS_KEY_ID: 'a', STABILITY_KEY: 'b', SSH_PRIVATE_KEY: 'c', DISCORD_BOT_PAT: 'd', OPENAI_API_KEY: 'e', FF_DAEMON_TOKEN: 'f', KEYBOARD_LAYOUT: 'k', PATH: 'p' });
+  assert.deepEqual(Object.keys(kept).sort(), ['KEYBOARD_LAYOUT', 'PATH']);
 });

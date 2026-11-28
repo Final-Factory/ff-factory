@@ -67,7 +67,7 @@ export const realSteamStartDeps = (log: (line: string) => void): SteamStartDeps 
 export function steamEnv(e: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(e)) {
-    if (v !== undefined && !/^(FF|FFW|FFSB|CLAUDE|ANTHROPIC|GH|GITHUB|NODE)_|TOKEN|SECRET|PASSW|CREDENTIAL|API_?KEY|AUTH/i.test(k)) out[k] = v;
+    if (v !== undefined && !/^(FF|FFW|FFSB|CLAUDE|ANTHROPIC|GH|GITHUB|NODE|AWS)_|TOKEN|SECRET|PASSW|CREDENTIAL|_?KEY(_|$)|PRIVATE|_PAT$|AUTH/i.test(k)) out[k] = v;
   }
   return out;
 }
@@ -92,6 +92,8 @@ export function steamStartMsgProblem(msg: Record<string, unknown>): string | und
 }
 
 const RUN = { timeoutMs: 15_000 };
+/** Windows' own tools by their full paths (never whatever PATH names first). */
+const sys32 = (d: Pick<SteamStartDeps, 'systemRoot'>, exe: string) => path.win32.join(d.systemRoot, 'System32', exe);
 /** How long the person's operation waits for Steam to come up and sign in (the portal waits 4 min for the answer). */
 export const MANUAL_WAIT_MS = 120_000;
 /** How long a player launch waits for it: inside the broker's 120 s, with the Low launch after it (up to 60 s). */
@@ -112,8 +114,8 @@ export function csvFields(line: string): string[] {
 const rows = (out: string) => out.split(/\r?\n/).filter((l) => l.startsWith('"')).map(csvFields);
 
 /** Steam's installed client exe from its own install record, or why there is none. Never a caller's path. */
-export async function resolveSteamExe(d: Pick<SteamStartDeps, 'run' | 'exists'>): Promise<{ exe: string } | { missing: string }> {
-  const r = await d.run('reg', ['query', 'HKCU\\Software\\Valve\\Steam'], RUN);
+export async function resolveSteamExe(d: Pick<SteamStartDeps, 'run' | 'exists' | 'systemRoot'>): Promise<{ exe: string } | { missing: string }> {
+  const r = await d.run(sys32(d, 'reg.exe'), ['query', 'HKCU\\Software\\Valve\\Steam'], RUN);
   if (r.code !== 0) return { missing: 'Steam is not installed for this user (no HKCU\\Software\\Valve\\Steam)' };
   const fromExe = regValue(r.stdout, 'SteamExe');
   const fromPath = regValue(r.stdout, 'SteamPath');
@@ -127,12 +129,12 @@ export async function resolveSteamExe(d: Pick<SteamStartDeps, 'run' | 'exists'>)
 }
 
 /** Whether steam.exe runs (any session). */
-export async function steamRunning(d: Pick<SteamStartDeps, 'run'>): Promise<boolean> {
-  const t = await d.run('tasklist', ['/FI', 'IMAGENAME eq steam.exe', '/NH', '/FO', 'CSV'], RUN);
+export async function steamRunning(d: Pick<SteamStartDeps, 'run' | 'systemRoot'>): Promise<boolean> {
+  const t = await d.run(sys32(d, 'tasklist.exe'), ['/FI', 'IMAGENAME eq steam.exe', '/NH', '/FO', 'CSV'], RUN);
   return /^"steam\.exe"/im.test(t.stdout);
 }
 
-/** quser's rows: user, session id and state (Active, Disc). */
+/** quser's rows: user, session id and state (Active, or Disc: logged in, its remote desktop disconnected). */
 export function quserRows(out: string): { user: string; id: number; state: string }[] {
   const found: { user: string; id: number; state: string }[] = [];
   for (const l of out.split(/\r?\n/)) {
@@ -149,30 +151,30 @@ export function quserRows(out: string): { user: string; id: number; state: strin
  */
 export async function desktopCheck(d: Pick<SteamStartDeps, 'run' | 'pid' | 'user' | 'systemRoot'>): Promise<{ session: number; locked: boolean; shell: boolean } | { refused: string }> {
   // Windows' own whoami and quser by their full paths: Git for Windows puts a coreutils whoami on PATH that knows no /groups.
-  const who = await d.run(path.win32.join(d.systemRoot, 'System32', 'whoami.exe'), ['/groups', '/fo', 'csv', '/nh'], RUN);
+  const who = await d.run(sys32(d, 'whoami.exe'), ['/groups', '/fo', 'csv', '/nh'], RUN);
   const level = /Mandatory Label\\([A-Za-z ]+?) Mandatory Level/.exec(who.stdout)?.[1];
   if (!level) return { refused: "the daemon's integrity level could not be read (whoami /groups), so Steam is not started" };
   if (level === 'Low') return { refused: 'the daemon runs at Low integrity, where Steam stops at its "registry not writable" dialog; Steam is started only at Medium' };
   if (level !== 'Medium') return { refused: `the daemon runs at ${level} integrity; Steam is started only at Medium, as the desktop user, never elevated` };
-  const me = rows((await d.run('tasklist', ['/FI', `PID eq ${d.pid}`, '/NH', '/FO', 'CSV'], RUN)).stdout)[0];
+  const me = rows((await d.run(sys32(d, 'tasklist.exe'), ['/FI', `PID eq ${d.pid}`, '/NH', '/FO', 'CSV'], RUN)).stdout)[0];
   const session = me ? Number(me[3]) : NaN;
   if (!Number.isInteger(session)) return { refused: "the daemon's own session could not be read (tasklist), so Steam is not started" };
   if (session === 0) return { refused: 'the daemon runs in session 0 (a service session), not on a desktop: no user is logged in on the desktop for it' };
   const mine = (u: string | undefined) => !!u && u.toLowerCase().split('\\').pop() === d.user.toLowerCase();
   // quser answers 1 with "No User exists" when nobody is logged in: its rows decide, not its exit code.
-  const users = quserRows((await d.run(path.win32.join(d.systemRoot, 'System32', 'quser.exe'), [], RUN)).stdout).filter((u) => u.id === session);
+  const users = quserRows((await d.run(sys32(d, 'quser.exe'), [], RUN)).stdout).filter((u) => u.id === session);
   if (!users.length) return { refused: `no user is logged in on this computer's desktop (quser shows no logged-in session ${session}); Steam is started only in a logged-in desktop session` };
   if (!users.some((u) => mine(u.user))) return { refused: `the desktop in session ${session} is not ${d.user}'s; Steam is started only for the daemon's own logged-in user` };
-  const shells = rows((await d.run('tasklist', ['/V', '/FI', 'IMAGENAME eq explorer.exe', '/FI', `SESSION eq ${session}`, '/NH', '/FO', 'CSV'], RUN)).stdout);
-  const lock = await d.run('tasklist', ['/FI', 'IMAGENAME eq LogonUI.exe', '/FI', `SESSION eq ${session}`, '/NH', '/FO', 'CSV'], RUN);
+  const shells = rows((await d.run(sys32(d, 'tasklist.exe'), ['/V', '/FI', 'IMAGENAME eq explorer.exe', '/FI', `SESSION eq ${session}`, '/NH', '/FO', 'CSV'], RUN)).stdout);
+  const lock = await d.run(sys32(d, 'tasklist.exe'), ['/FI', 'IMAGENAME eq LogonUI.exe', '/FI', `SESSION eq ${session}`, '/NH', '/FO', 'CSV'], RUN);
   return { session, locked: /^"LogonUI\.exe"/im.test(lock.stdout), shell: shells.some((r) => mine(r[6])) };
 }
 
 /** Window titles of Steam and its crash reporter that are up (a dialog shows here), for the answer; never clicked. */
-export async function steamWindows(d: Pick<SteamStartDeps, 'run'>): Promise<string[]> {
+export async function steamWindows(d: Pick<SteamStartDeps, 'run' | 'systemRoot'>): Promise<string[]> {
   const out: string[] = [];
   for (const image of ['steam.exe', 'steamerrorreporter.exe']) {
-    const t = await d.run('tasklist', ['/V', '/FI', `IMAGENAME eq ${image}`, '/NH', '/FO', 'CSV'], RUN);
+    const t = await d.run(sys32(d, 'tasklist.exe'), ['/V', '/FI', `IMAGENAME eq ${image}`, '/NH', '/FO', 'CSV'], RUN);
     for (const r of rows(t.stdout)) {
       const title = (r[8] ?? '').trim();
       if (image === 'steamerrorreporter.exe') out.push(`Steam's crash reporter is up${title && title !== 'N/A' ? ` ("${title.slice(0, 80)}")` : ''}`);
@@ -188,7 +190,8 @@ const clientWords = (c: SteamClient) =>
 
 /**
  * Start Steam once, as described at the top. Never throws: a failure is a result. `waitMs` bounds the wait for it to come
- * up and sign in; every step is bounded (each command 15 s), so the whole call ends within waitMs plus a minute.
+ * up and sign in. Every command is bounded (15 s, then killed): up to 8 run before the wait starts and a few after it, so
+ * the whole call ends within waitMs plus about three minutes in the worst case (each command hanging to its limit).
  */
 export async function startSteam(d: SteamStartDeps, o: { waitMs: number; why: string }): Promise<SteamStartResult> {
   try {
@@ -286,29 +289,30 @@ export class SteamStarter {
   async beforePlayer(who: string): Promise<{ ok: true } | { refused: string }> {
     try {
       if (this.d.platform !== 'win32') return { ok: true };
-      let pushed = false;
       if (!this.inFlight) {
         const exe = await resolveSteamExe(this.d);
         if ('missing' in exe) return { ok: true };
         if (await steamRunning(this.d)) return (this.healthy(), { ok: true });
-        const now = this.d.now().getTime();
-        this.autoTries = this.autoTries.filter((t) => now - t < AUTO_WINDOW_MS);
-        if (this.autoTries.length >= AUTO_MAX) {
-          this.d.log(`steam start (players launch for ${who}): Steam is not running, but ${AUTO_MAX} automatic tries in ${AUTO_WINDOW_MS / 3_600_000} h failed; no more until Steam is seen running or a person starts it (ops_worker steam_start); the player starts without it`);
-          return { ok: true };
-        }
-        if (now < this.autoNextAt) {
-          this.d.log(`steam start (players launch for ${who}): Steam is not running; the last automatic try failed, the next is after ${new Date(this.autoNextAt).toISOString().slice(11, 16)}Z; the player starts without it`);
-          return { ok: true };
-        }
-        this.autoTries.push(now);
-        pushed = true;
       }
+      // A start already under way (a person's, or another launch's, begun while this one read): join it, bounded, and
+      // count nothing; only the caller that began a start spends a try and moves the backoff on (w6732).
+      if (this.inFlight) return await this.join(who);
+      const now = this.d.now().getTime();
+      this.autoTries = this.autoTries.filter((t) => now - t < AUTO_WINDOW_MS);
+      if (this.autoTries.length >= AUTO_MAX) {
+        this.d.log(`steam start (players launch for ${who}): Steam is not running, but ${AUTO_MAX} automatic tries in ${AUTO_WINDOW_MS / 3_600_000} h failed; no more until Steam is seen running or a person starts it (ops_worker steam_start); the player starts without it`);
+        return { ok: true };
+      }
+      if (now < this.autoNextAt) {
+        this.d.log(`steam start (players launch for ${who}): Steam is not running; the last automatic try failed, the next is after ${new Date(this.autoNextAt).toISOString().slice(11, 16)}Z; the player starts without it`);
+        return { ok: true };
+      }
+      this.autoTries.push(now);
       const n = this.autoTries.length;
       const r = await this.once(AUTO_WAIT_MS, `players launch for ${who}, automatic try ${n} of ${AUTO_MAX} in ${AUTO_WINDOW_MS / 3_600_000} h`);
       if (r.state === 'refused') {
         // Nothing was started (no desktop user, not Medium): no try spent, checked again in a few minutes, the player as before.
-        if (pushed) this.autoTries.pop();
+        this.autoTries.pop();
         this.autoNextAt = Math.max(this.autoNextAt, this.d.now().getTime() + AUTO_BACKOFF_MS[0]);
         return { ok: true };
       }
@@ -322,5 +326,18 @@ export class SteamStarter {
       this.d.log(`steam start (players launch for ${who}): the check failed (${(e as Error).message}); the player starts as before`);
       return { ok: true };
     }
+  }
+
+  /** A launch that finds a start under way waits for it at most AUTO_WAIT_MS (a person's start waits longer), counting nothing. */
+  private async join(who: string): Promise<{ ok: true } | { refused: string }> {
+    const running = this.inFlight;
+    if (!running) return { ok: true };
+    const r = await Promise.race([running, this.d.sleep(AUTO_WAIT_MS).then(() => undefined)]);
+    if (!r) {
+      this.d.log(`steam start (players launch for ${who}): a Steam start under way did not finish in ${AUTO_WAIT_MS / 1000} s; the player starts without waiting longer`);
+      return { ok: true };
+    }
+    if (r.state !== 'failed') return { ok: true };
+    return { refused: `Steam is not running on this computer and the daemon's start of it, under way when this launch came, failed: ${r.said}` };
   }
 }

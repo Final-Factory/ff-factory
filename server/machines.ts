@@ -2632,6 +2632,12 @@ export class MachineManager {
       this.transcribeCalls.delete(cid);
       c.reject(new Error(`${id} went offline`));
     }
+    for (const [cid, c] of this.steamStartCalls) {
+      if (c.machine !== id) continue;
+      clearTimeout(c.timer);
+      this.steamStartCalls.delete(cid);
+      c.reject(new Error(`${id} went offline before it answered the Steam start; whether Steam started is unknown (list_machines shows its Steam)`));
+    }
     if (this.stats.delete(id)) emit({ type: 'machine_stats', id, stats: null });
     const m = this.store.machines.get(id);
     if (m) {
@@ -3646,7 +3652,7 @@ export class MachineManager {
     return this.canSteamUpload(machineId) && !!this.hellos.get(machineId)?.steamInstall;
   }
 
-  private readonly steamStartCalls = new Map<string, { resolve: (text: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+  private readonly steamStartCalls = new Map<string, { machine: string; resolve: (text: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
 
   /** Whether a machine's daemon is online and starts its Steam client on a person's ask (w6727: its hello offered `steamStart`). */
   canSteamStart(machineId: string): boolean {
@@ -3666,7 +3672,7 @@ export class MachineManager {
         this.steamStartCalls.delete(id);
         reject(new Error(`machine ${machineId} did not answer the Steam start in ${Math.round(timeoutMs / 1000)} s`));
       }, timeoutMs);
-      this.steamStartCalls.set(id, { resolve, reject, timer });
+      this.steamStartCalls.set(id, { machine: machineId, resolve, reject, timer });
       try {
         this.post(machineId, { type: 'steam_start', id, why: why.slice(0, 300) });
       } catch (e) {
