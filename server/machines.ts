@@ -1,4 +1,5 @@
 import { noteBench, recentPlayers, type PlayerSeen } from './crashHolds.ts';
+import { sanitizeBaseline } from '../shared/machineBaseline.ts';
 import { MACHINE_ID, dropStagedToken, enrolledMachines, issueMachineToken, machineTokensFile, promoteStagedToken, readMachineTokens, revokeMachineToken, stageMachineToken, stagedKey, tokenSha } from './machineTokens.ts';
 import { JoinCodes, checkJoinLimits, joinRefusal, machineJoinsFile, type JoinLimits } from './machineJoin.ts';
 import fs from 'node:fs';
@@ -2737,7 +2738,9 @@ export class MachineManager {
         else if (/^(daemon (speaks|outdated)|update available)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
         // Only a platform this portal knows: a newer daemon's unknown one keeps the record's.
         const platform = msg.info?.platform && ['darwin', 'win32', 'linux'].includes(msg.info.platform) ? msg.info.platform : m.platform;
-        Object.assign(m, { info: msg.info, home: msg.home || m.home, platform, daemonStopped: undefined, relocatedTo: undefined, awaitingInstall: undefined });
+        // w6603: its baseline kept only as short strings.
+        const baseline = sanitizeBaseline((msg.info as { baseline?: unknown } | undefined)?.baseline);
+        Object.assign(m, { info: msg.info ? { ...msg.info, baseline } : msg.info, home: msg.home || m.home, platform, daemonStopped: undefined, relocatedTo: undefined, awaitingInstall: undefined });
         // A worker root install (w513): its folders; a pool folder that changed goes back to it at once.
         const repool = msg.layout ? adoptLayout(m, msg.layout) : leaveRoot(m);
         this.store.putMachine(m);

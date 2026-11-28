@@ -116,7 +116,7 @@ export interface WinCiFirstResult {
   above: number;
   /** w6217: of `above`, agents' tools whose tree lost its link to the host (lowered with the rest when enforcing). */
   orphans?: number;
-  /** w6596: of `above`, game players (finalfactory.exe) and what they started: step 2 keeps them out of the tools. */
+  /** w6596: game players (finalfactory.exe) and what they started above the setting's priority: kept, not in `above`. */
   players?: number;
   /** Processes this tick lowered, and raised back. */
   lowered?: number;
@@ -265,8 +265,8 @@ const imageOf = (p: WinProc | undefined) => p?.name || (p?.cmd ?? '?').trim().re
 /**
  * w6596: a Final Factory game player, by its image (finalfactory.exe; FinalFactory, FinalFactory.app's binary, on a Mac),
  * never a command that only names it. At Idle beside a CI job its main loop starves and its HangWatchdog reports HANG
- * (LothDesktop, 2026-11-26 20:26-20:39Z, a broker pair's host). Step 1 (warn) only names the players it lowers; step 2
- * keeps them and what they start out of the tools, as Unity editors are.
+ * (LothDesktop, 2026-11-26 20:26-20:39Z, a broker pair's host), so a player and what it starts are no tools: they keep
+ * their own priority, as Unity editors do.
  */
 export const isGamePlayer = (p: WinProc | undefined) => !!p && /^finalfactory(\.exe)?$/i.test(imageOf(p));
 /** A process listing can be this old when it is answered (machine/sandboxes.ts realPoolDeps caches it for 5 s). */
@@ -680,22 +680,35 @@ export class WinCiFirst {
       ...census.workers.map((w) => w.root),
     ]);
     const orphaned = orphanFind.tools;
+    // w6596: a game player, or a process below one, is no tool: it keeps its own priority, as a Unity editor does (at Idle
+    // beside a job a player's main loop starves and its HangWatchdog says HANG). The walk up goes only to a parent that
+    // started no later than its child (w6600 review: a parent's pid reused by a player must not make a tool a player's).
+    const playerOf = (pid: number): number | undefined => {
+      const seen = new Set<number>();
+      for (let x: number | undefined = pid; x !== undefined && procOf.has(x) && !seen.has(x); ) {
+        seen.add(x);
+        if (isGamePlayer(procOf.get(x))) return x;
+        const pp: number = procOf.get(x)!.ppid;
+        const ps = started.get(pp);
+        const st = started.get(x);
+        if (ps !== undefined && st !== undefined && ps > st + 1_000) return undefined;
+        x = pp;
+      }
+      return undefined;
+    };
+    const kept = new Map<number, number>(); // game players and what they started, out of the tools: pid -> its host
+    for (const m of [tools, orphaned])
+      for (const [pid, host] of [...m]) {
+        if (playerOf(pid) === undefined) continue;
+        kept.set(pid, host);
+        m.delete(pid);
+      }
     const orphanAbove = [...orphaned.keys()].filter((pid) => {
       const p = this.d.priorityOf(pid);
       return p !== undefined && p < s.priority;
     });
     for (const [pid, host] of orphaned) tools.set(pid, host);
-    // w6596: a tool that is a game player or runs below one (step 1 names them; they are still lowered with the rest)
-    const playerOf = (pid: number): number | undefined => {
-      const seen = new Set<number>();
-      for (let x: number | undefined = pid; x !== undefined && procOf.has(x) && !seen.has(x); x = procOf.get(x)!.ppid) {
-        seen.add(x);
-        if (isGamePlayer(procOf.get(x))) return x;
-      }
-      return undefined;
-    };
-    const playerTools = [...tools.keys()].filter((pid) => {
-      if (playerOf(pid) === undefined) return false;
+    const playerTools = [...kept.keys()].filter((pid) => {
       const p = this.d.priorityOf(pid);
       return p !== undefined && p < s.priority;
     });
@@ -742,6 +755,31 @@ export class WinCiFirst {
       }
     }
     if (enforcing) this.lowHosts = low;
+    // w6596 (w6608 review): a game player below Normal goes back up beside the job: one this rule lowered before (step 1)
+    // to what its record says it was, and one that inherited a lowered tool's class (Windows starts a child at its
+    // parent's Idle or BelowNormal) to Normal. Only the player itself; the record entry goes once it is raised.
+    const normal = os.constants.priority.PRIORITY_NORMAL;
+    const raisedPlayers: string[] = [];
+    if (lowering && !unwritten) {
+      let recChanged = false;
+      for (const pid of kept.keys()) {
+        const f = byPid.get(pid);
+        if (!isGamePlayer(procOf.get(pid)) || f?.startedAt === undefined || f.startedAt > cutoff) continue;
+        const p = this.d.priorityOf(pid);
+        if (p === undefined || p <= normal) continue;
+        const k = keyOf(f);
+        const to = this.lowered[k]?.prev ?? normal;
+        if (p <= to || !this.d.setPriority!(pid, to)) continue;
+        raisedPlayers.push(`${pid} ${imageOf(procOf.get(pid))} ${priorityName(p)} to ${priorityName(to)}${this.lowered[k] ? ' (lowered here before)' : ' (inherited)'}`);
+        if (this.lowered[k]) {
+          delete this.lowered[k];
+          recChanged = true;
+        }
+      }
+      if (recChanged) this.save();
+      if (raisedPlayers.length)
+        this.d.log(`ci first: raised ${raisedPlayers.length} game player(s) beside the CI job(s), so their main loop is not starved (w6596): ${raisedPlayers.slice(0, 8).join(', ')}${raisedPlayers.length > 8 ? ', ...' : ''}`);
+    }
     if (unwritten) {
       if (!wasFailing) this.d.log(`ci first: lowered none of ${cands.length} process(es), since the record of what would be lowered could not be written`);
     } else if (loweredNow.length || lowerFailed) {
@@ -781,14 +819,12 @@ export class WinCiFirst {
     for (const k of [...this.playersSaid]) if (!liveKeys.has(k)) this.playersSaid.delete(k);
     for (const pid of newPlayers) this.playersSaid.add(keyOf(byPid.get(pid)!));
     if (newPlayers.length) {
-      const lowSet = new Set(loweredNow.map((l) => l.pid));
       const names = newPlayers.map((pid) => {
         const pl = playerOf(pid)!;
-        return `${pid} ${imageOf(procOf.get(pid))}${pl !== pid ? ` (under player ${pl})` : ''} (${sessionOf.get(tools.get(pid)!) ?? '?'})${lowSet.has(pid) ? ' lowered' : ''}`;
+        return `${pid} ${imageOf(procOf.get(pid))}${pl !== pid ? ` (under player ${pl})` : ''} (${sessionOf.get(kept.get(pid)!) ?? '?'})`;
       });
-      const what = !enforcing ? 'enforcing would lower them (warn only)' : held ? "not lowered while a bench or a person's turn holds this machine" : 'lowered with the rest for now';
       this.d.log(
-        `ci first: ${newPlayers.length} game player process(es) run above ${priorityName(s.priority)} beside the CI job(s) among the agents' tools; ${what}; step 2 of w6596 keeps game players at their own priority, as Unity editors are: ${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}`,
+        `ci first: kept ${newPlayers.length} game player process(es) at their own priority beside the CI job(s), as Unity editors are, not lowered to ${priorityName(s.priority)} with the agents' tools (w6596): ${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}`,
       );
     }
     const res: WinCiFirstResult = { jobs: census.workers.length, above, orphans: orphanAbove.length, players: playerTools.length, lowered: loweredNow.length, raised };
