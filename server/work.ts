@@ -711,7 +711,11 @@ export function handoverNote(w: Pick<WorkItem, 'id'>, h: Handover): string {
   }
   if (h.handedBack) {
     const b = h.handedBack;
-    lines.push(`${b.to ? (b.how.includes('w2046') ? 'Moved (w2046)' : 'Moved (w1600)') : 'Handed back (w1532)'}: ${w.id} was taken off worker ${b.session} on ${b.from} at ${b.at.slice(0, 16).replace('T', ' ')} UTC, because ${b.to ? `it moves to ${b.to}: ${b.why}` : `that machine is ${b.why}`} (${b.how}). ${b.branch ? `Continue from its branch ${b.branch}: check that your sandbox (or clone) is on it with its pushed commits (git status, git log -3), and fetch and check it out if not, before you change anything.` : 'Its branch is unknown: find its pushed work by the request id (git branch -r, its PRs) before you start over.'} Its worker's note: ${b.note}${b.saved ? ` (${b.saved})` : ''}. Read its log with read_work ${w.id}.`);
+    // w6774 (review w6773, nit 5): a fresh worker for a worker that is gone (w6768) says so, not "taken off ... on (removed)".
+    const head = b.to && b.how.includes('w6768') && b.from.startsWith('(removed)')
+      ? `Restarted (w6768): ${w.id}'s worker ${b.session} no longer exists, so at ${b.at.slice(0, 16).replace('T', ' ')} UTC FF Factory started this new worker on ${b.to}: ${b.why} (${b.how}).`
+      : `${b.to ? (b.how.includes('w2046') ? 'Moved (w2046)' : 'Moved (w1600)') : 'Handed back (w1532)'}: ${w.id} was taken off worker ${b.session} on ${b.from} at ${b.at.slice(0, 16).replace('T', ' ')} UTC, because ${b.to ? `it moves to ${b.to}: ${b.why}` : `that machine is ${b.why}`} (${b.how}).`;
+    lines.push(`${head} ${b.branch ? `Continue from its branch ${b.branch}: check that your sandbox (or clone) is on it with its pushed commits (git status, git log -3), and fetch and check it out if not, before you change anything.` : 'Its branch is unknown: find its pushed work by the request id (git branch -r, its PRs) before you start over.'} Its worker's note: ${b.note}${b.saved ? ` (${b.saved})` : ''}. Read its log with read_work ${w.id}.`);
     if (b.message) lines.push(`The message that was waiting for it when it was handed back, now yours:\n~~~text\n${b.message}\n~~~`);
   }
   if (h.related.length) {
