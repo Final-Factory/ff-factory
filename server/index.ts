@@ -127,7 +127,7 @@ import { configureAgentAccount } from './agentAccount.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './dataGuard.ts';
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
-import { CpuSampler, probePool, timeNextDeflate } from './connectTiming.ts';
+import { CpuSampler, PAGE_DEFLATE, probePool, timeNextDeflate } from './connectTiming.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
 import { costMark, costSince } from './placeCost.ts';
 import { pageAllStats } from './ffuSlotsView.ts';
@@ -2772,11 +2772,11 @@ const server = http.createServer(async (req, res) => {
 
 // Big messages (the full state a page gets when it connects, megabytes at thousands of sessions) go compressed;
 // the stream of small events does not pay for zlib. No context takeover: no zlib memory kept per page between messages.
-/** Page messages under this go out uncompressed (ws's perMessageDeflate threshold). */
-const PAGE_DEFLATE_THRESHOLD = 16 * 1024;
+/** Page messages under this go out uncompressed (ws's perMessageDeflate threshold; zlib's buffer: PAGE_DEFLATE, w6762). */
+const PAGE_DEFLATE_THRESHOLD = PAGE_DEFLATE.threshold;
 /** w6762: samples the VM's CPU at each page connect's open and hand-off (connectTiming.ts). */
 const cpuSampler = new CpuSampler();
-const wss = new WebSocketServer({ noServer: true, maxPayload: PAGE_MAX_PAYLOAD, perMessageDeflate: { threshold: PAGE_DEFLATE_THRESHOLD, serverNoContextTakeover: true, clientNoContextTakeover: true } });
+const wss = new WebSocketServer({ noServer: true, maxPayload: PAGE_MAX_PAYLOAD, perMessageDeflate: { ...PAGE_DEFLATE, zlibDeflateOptions: { ...PAGE_DEFLATE.zlibDeflateOptions } } });
 /** Every page's socket, with the login it signed in as (notices meant for one person go to their pages only). */
 const clients = new Map<WebSocket, string>();
 /**

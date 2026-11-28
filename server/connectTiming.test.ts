@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { WebSocket, WebSocketServer } from 'ws';
-import { CpuSampler, probePool, timeNextDeflate } from './connectTiming.ts';
+import { CpuSampler, PAGE_DEFLATE, probePool, timeNextDeflate } from './connectTiming.ts';
 import { PageSockets, clocksOf, handoffOf, pageAtOf, readyOf } from './pageSockets.ts';
 
 test('w6762: the first deflate on a socket is timed, split into queue and run, and ws is put back as it was', async () => {
@@ -85,4 +85,26 @@ test('w6762: the page clock in the URL and the ready message, and the lines that
   assert.equal(lines.length, 1, 'a fast hand-off has no sent line');
   p.ready(ws, JSON.stringify({ type: 'ready', open: 3140, state: 1160, parse: 20, render: 30, openEpoch: 1764300003140, stateEpoch: 1764300003300 }));
   assert.match(lines[1], /; clocks: upgrade in 3100ms after the page began, open seen 40ms after it, in\+back 3140ms, state sent 0ms after it, at the page 200ms after that \(deflate queued 2ms, ran 900ms in 11 chunks 1024KB to 160KB; kernel 150ms; pool lag 420ms, loop turn 30ms; cpu\{node 99%\}\)$/);
+});
+
+test('w6762: the page socket deflates a big first state in a few pool jobs, not one per 16 KB', async () => {
+  const wss = new WebSocketServer({ port: 0, host: '127.0.0.1', perMessageDeflate: { ...PAGE_DEFLATE, zlibDeflateOptions: { ...PAGE_DEFLATE.zlibDeflateOptions } } });
+  await new Promise<void>((r) => wss.once('listening', () => r()));
+  const port = (wss.address() as { port: number }).port;
+  // Varied enough to deflate to ~1 MB from 4 MB: 60+ chunks at zlib's 16 KB default.
+  const body = JSON.stringify({ type: 'state', rows: Array.from({ length: 40_000 }, (_, i) => ({ id: `w${i}`, h: (i * 2654435761).toString(36), title: `request ${i} of many ${(i * 40503) % 9973}`, n: i % 97 })) });
+  const got = new Promise<ReturnType<typeof timeNextDeflate>>((resolve) => {
+    wss.once('connection', (ws) => {
+      const t = timeNextDeflate(ws);
+      ws.send(body, () => resolve(t));
+    });
+  });
+  const client = new WebSocket(`ws://127.0.0.1:${port}`, { perMessageDeflate: true });
+  const received = new Promise<string>((r) => client.once('message', (d) => r(d.toString())));
+  const t = await got;
+  assert.equal(await received, body, 'the page still gets the message whole');
+  assert.ok(t.outBytes! > 256 * 1024, `deflated to ${t.outBytes}`);
+  assert.ok(t.chunks! <= Math.ceil(t.outBytes! / (256 * 1024)) + 1, `${t.chunks} chunks for ${t.outBytes} bytes`);
+  client.close();
+  await new Promise<void>((r) => wss.close(() => r()));
 });

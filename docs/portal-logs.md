@@ -267,7 +267,7 @@ those seconds went, measured, not guessed:
   (Funnel or tailscaled, before the portal saw the request); a big `at the page` is the way out after the kernel.
 - In parentheses, on the slow sent line (1 s or more) or else on the ready line: `deflate queued <ms>, ran <ms> in <n>
   chunks <in>KB to <out>KB` (ws's permessage-deflate of the first state: its zlib limiter, then zlib on libuv's thread
-  pool, one pool job and one loop turn per 16 KB of output; `not deflated` under the 16 KB threshold), `kernel <ms>` (from
+  pool, one pool job and one loop turn per output buffer, 16 KB until w6762 made it 256 KB (`PAGE_DEFLATE`, server/connectTiming.ts) after the first readings showed 77 chunks of a 22 s handoff; `not deflated` under the 16 KB threshold), `kernel <ms>` (from
   the deflate's end to the write callback: a full socket buffer, tailscaled reading slowly), `pool lag <ms>, loop turn <ms>`
   (a no-op fs.stat and a setImmediate at the open: the first minus the second is the wait for a free pool thread), and
   `cpu{vm <n>% of <c> cores, steal <n>%, node <n>%, tailscaled <n>%}` over that connect's own seconds (/proc; a process's
