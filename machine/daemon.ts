@@ -31,6 +31,7 @@ import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts'
 import { StallProfiler } from '../server/stallProfile.ts';
 import { freezeWatchSettings, startFreezeWatch, type FreezeWatch } from './freezeWatch.ts';
 import { execFileOffThread, useSpawnThread } from '../server/spawnThread.ts';
+import { useProbeGuard } from '../server/probeGuard.ts';
 import { warmScopeProbes } from './linuxScope.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
 import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnHeld, readFenceProbeTargets, readRulesForNewRun, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
@@ -6029,6 +6030,8 @@ if (isMainModule(import.meta.filename)) {
   // w6077: programs start from a thread of their own, not the loop (server/spawnThread.ts): starting one PowerShell held BEAST's
   // loop up to 35.5 s. FF_SPAWN_THREAD=off (daemon.json "env") starts them on the loop again; a thread that keeps dying does too.
   useSpawnThread(process.env.FF_SPAWN_THREAD !== 'off', (line) => log(line));
+  // w6784: a probe kind whose last one is stuck past its kill (a WMI hang) is not piled up on; FF_PROBE_GUARD=off|warn|enforce.
+  log(`probe guard: ${useProbeGuard(process.env.FF_PROBE_GUARD, (line) => log(line))} (w6784)`);
   // A worker root (w513): agents and the scripts they run find the player slots (and the nightly history) in it.
   // w5501: a CARGO_HOME outside the root (the person's ~/.cargo on C:, where a Low worker's `cargo fetch` was refused) moves
   // to <root>/cache/cargo, seeded in the background from the old one, which is only read; one inside the root stays.
