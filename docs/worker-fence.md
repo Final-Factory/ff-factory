@@ -489,16 +489,21 @@ folder and flags it, refusing nothing. It logs paths and the reading program onl
     `machine/hostWatch.ts` checks a host). Else it says `root-refused`, logged as `read log: agent host <pid> not followed`.
     A host that exits is dropped at its stop event and is never taken back under a reused pid. A read names its host by both
     numbers, so a reused host pid never names another session;
-  - a child (at its start event, and in the walk when a root is named): followed only when its creation time (from the event,
-    or the process) is at or after its parent's, and only after the parent's pid is checked to still be the process followed;
-  - an open: before it is reported, the pid's process must have the entry's creation time. A pid with no process to check (it
-    has just exited, its stop on the way) counts only if the session lost no events since the entry was recorded: the stream
-    is whole then, and its events come in order, so no later holder of the pid can have started yet;
+  - a child (at its start event, and in the walk when a root is named): followed only when its creation time is at or after
+    its parent's, and only after the parent's pid is checked to still be the process followed. At a start event the time
+    comes from the event alone: one without it is not followed, since the process on the pid now may be a later holder's;
+  - an open: before it is reported, the pid's process must be running and have the entry's creation time. A pid with no
+    running process is never trusted (w6734's review): ETW may lose a stop event, count a loss late, or deliver its per-CPU
+    buffers out of order, so the stream cannot say the pid has no later holder. An exited tool's last few opens, still on
+    their way, go unlogged; this log only warns;
+  - an insert after the walk's checks: each process is checked again under the lock it is inserted under, so one whose stop
+    was handled between its check and its insert is not inserted (no stop event would ever remove it);
   - a Low orphan: its creation time is read before and after its checks and must be the same, and a person's process is
     remembered as not a worker's by pid and creation time, so a worker's process given the pid later is looked at afresh;
   - every minute, each followed pid whose process is gone or has another creation time is dropped.
 
-  `ffreadlog --selftest` runs these rules against a made-up process table (a lost stop then a reused pid among them); the
+  `ffreadlog --selftest` runs these rules against a made-up process table (a lost stop then a reused pid, a loss counted late, a
+  process exiting between its check and its insert, a start event without its creation time); the
   Windows CI job runs it. A host that dies leaves its descendants followed (its orphaned tools are a worker's still, each
   checked by its own creation time) until they exit; the daemon keeps the host's name a day for their reads.
 - Each report goes to `<appDir>/logs/read-log-<UTC date>.jsonl` (`t`, `session`, `sandbox`, `pid`, `image`, `path`; at most

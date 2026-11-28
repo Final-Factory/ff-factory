@@ -105,7 +105,6 @@ static class FfReadLog
         public uint Root;    // its agent host's pid (a root's own entry: itself), or 0 for a worker's orphan
         public long RootAt;  // the start time (Unix ms) the daemon gave with that root, so the daemon names the right session
         public long Start;   // its creation time (FILETIME ticks), never 0: a process whose start cannot be read is not followed
-        public long Lost;    // the session's lost-event count when it was recorded
         public string Image;
     }
 
@@ -139,6 +138,8 @@ static class FfReadLog
     static Func<uint, string, bool> IsWorkersFn = IsWorkers;
     static Func<List<KeyValuePair<uint, uint>>> SnapshotFn = Snapshot;
     static Func<long> LostFn = () => 0;
+    // the self-test's hook between a process's last check outside the lock and its insert (a stop event handled meanwhile)
+    static Action<uint> GapFn;
     static List<string> Captured; // the self-test's stdout
 
     static int Main(string[] args)
@@ -169,7 +170,7 @@ static class FfReadLog
         if (rc == 0) rc = EnableTraceEx2(session, ref kf, EVENT_CONTROL_CODE_ENABLE_PROVIDER, 4, 0x80, 0, 0, IntPtr.Zero);
         if (rc != 0) { ControlTraceW(session, null, props, EVENT_TRACE_CONTROL_STOP); Say("{\"event\":\"error\",\"why\":\"EnableTraceEx2 failed: " + Why(rc) + "\"}"); return 1; }
 
-        // the session's lost events and buffers so far, read when a followed pid cannot be checked against its process
+        // the session's lost events and buffers so far, for the minute's stat line
         IntPtr query = NewProperties(name);
         object queryGate = new object();
         LostFn = () =>
@@ -304,14 +305,13 @@ static class FfReadLog
         }
     }
 
-    // Is this entry still the process that holds its pid? Yes when the pid's process started when the entry says. When the pid
-    // has no process the helper can open (it exited and its stop event is still on its way), yes only if the session lost no
-    // events since the entry was recorded: then the stream is whole, and its events come in order, so no later holder of the pid
-    // can have started yet. The entry is dropped on a no.
+    // Is this entry still the process that holds its pid? Only when the pid's process is running and started when the entry
+    // says. A pid with no running process is never trusted (w6734's review): ETW may lose its stop event, deliver the per-CPU
+    // buffers out of order, or count a loss after the entry was made, so nothing in the stream says the pid has no later holder.
+    // The price is an exited tool's last few opens, still on their way; this log warns only. The entry is dropped on a no.
     static bool Current(uint pid, Entry e)
     {
-        long now = StartOfFn(pid);
-        bool ok = now == e.Start || (now == 0 && LostFn() == e.Lost);
+        bool ok = StartOfFn(pid) == e.Start;
         if (!ok) lock (Gate) { Entry t; if (Tracked.TryGetValue(pid, out t) && t == e) { Tracked.Remove(pid); Roots.Remove(pid); } }
         return ok;
     }
@@ -322,9 +322,9 @@ static class FfReadLog
     {
         Entry p;
         lock (Gate) if (!Tracked.TryGetValue(parent, out p)) return;
-        if (created == 0) created = StartOfFn(child);
+        // w6734 B4: the creation time from the event only; the live process on the child's pid may be a later holder's
         if (created == 0 || created < p.Start || !Current(parent, p)) return;
-        Entry c = new Entry { Root = p.Root, RootAt = p.RootAt, Start = created, Lost = LostFn(), Image = image };
+        Entry c = new Entry { Root = p.Root, RootAt = p.RootAt, Start = created, Image = image };
         lock (Gate) Tracked[child] = c;
     }
 
@@ -391,7 +391,7 @@ static class FfReadLog
             if (st != 0 && ms <= r.Value + 5000 && ms >= r.Value - 90000) { starts[r.Key] = st; given[r.Key] = r.Value; }
             else if (RefusedRoots.Add(r.Key + ":" + r.Value)) Say("{\"event\":\"root-refused\",\"root\":\"" + r.Key + "\",\"why\":\"" + (st == 0 ? "no such process" : "its process started at another time than its host") + "\"}");
         }
-        long lost = LostFn();
+        if (GapFn != null) foreach (uint r in starts.Keys) GapFn(r);
         lock (Gate)
         {
             foreach (uint r in new List<uint>(Roots))
@@ -403,9 +403,11 @@ static class FfReadLog
             }
             foreach (KeyValuePair<uint, long> r in starts)
             {
-                if (Roots.Contains(r.Key)) continue;
+                // checked again under the lock (w6734 B2): a host whose stop was handled since its check above is not inserted,
+                // where no stop event would ever remove it
+                if (Roots.Contains(r.Key) || StartOfFn(r.Key) != r.Value) continue;
                 Roots.Add(r.Key);
-                Tracked[r.Key] = new Entry { Root = r.Key, RootAt = given[r.Key], Start = r.Value, Lost = lost, Image = "" };
+                Tracked[r.Key] = new Entry { Root = r.Key, RootAt = given[r.Key], Start = r.Value, Image = "" };
                 fresh.Add(r.Key);
             }
         }
@@ -463,12 +465,12 @@ static class FfReadLog
                     long cs = StartOfFn(c);
                     if (cs == 0 || cs < pe.Start) continue;
                     string image = ImageOfFn(c);
-                    if (StartOfFn(c) != cs) continue;
-                    long lost = LostFn();
+                    if (GapFn != null) GapFn(c);
                     lock (Gate)
                     {
-                        if (Tracked.ContainsKey(c)) continue;
-                        Tracked[c] = new Entry { Root = root, RootAt = pe.RootAt, Start = cs, Lost = lost, Image = image };
+                        // checked again under the lock (w6734 B2), as each insert below
+                        if (Tracked.ContainsKey(c) || StartOfFn(c) != cs) continue;
+                        Tracked[c] = new Entry { Root = pe.Root, RootAt = pe.RootAt, Start = cs, Image = image };
                     }
                     q.Enqueue(c);
                 }
@@ -485,24 +487,25 @@ static class FfReadLog
             if (!IsLowFn(pid)) continue;
             string image = ImageOfFn(pid);
             bool worker = IsWorkersFn(pid, image);
-            if (StartOfFn(pid) != s1) continue;
+            if (GapFn != null) GapFn(pid);
             if (!worker)
             {
-                lock (Gate) NotWorker[pid] = s1;
+                if (StartOfFn(pid) == s1) lock (Gate) NotWorker[pid] = s1;
                 continue;
             }
-            long lost = LostFn();
             lock (Gate)
             {
-                if (Tracked.ContainsKey(pid)) continue;
-                Tracked[pid] = new Entry { Root = 0, Start = s1, Lost = lost, Image = image };
+                if (Tracked.ContainsKey(pid) || StartOfFn(pid) != s1) continue;
+                Tracked[pid] = new Entry { Root = 0, Start = s1, Image = image };
             }
         }
     }
 
     [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr h, out long created, out long exited, out long kernel, out long user);
+    [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
 
-    // A process's creation time (FILETIME ticks), or 0 when it is gone or cannot be opened.
+    // A running process's creation time (FILETIME ticks), or 0 when it is gone, has exited (a process another program still
+    // holds a handle to opens after its exit) or cannot be opened.
     static long StartOf(uint pid)
     {
         IntPtr h = OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
@@ -510,13 +513,15 @@ static class FfReadLog
         try
         {
             long c, x, k, u;
+            uint code;
+            if (!GetExitCodeProcess(h, out code) || code != 259) return 0; // STILL_ACTIVE
             return GetProcessTimes(h, out c, out x, out k, out u) ? c : 0;
         }
         finally { CloseHandle(h); }
     }
 
     // Each minute: a followed pid whose process is gone, or whose pid now names another process (a stop event ETW lost), is
-    // dropped. Gone means gone here (no lost-event grace): a stop on its way is for a process that has exited anyway.
+    // dropped.
     static void DropStale()
     {
         List<KeyValuePair<uint, Entry>> all;
@@ -588,31 +593,34 @@ static class FfReadLog
         check(!said("secret.txt"), "a person's process holding a lost worker's pid is not reported");
         check(!Tracked.ContainsKey(200), "the stale entry is dropped on the first open checked");
         // and the app's child is not followed through the old entry either
-        Tracked[200] = new Entry { Root = 100, Start = T + 10, Lost = 0, Image = "x" }; // the stale entry again
+        Tracked[200] = new Entry { Root = 100, Start = T + 10, Image = "x" }; // the stale entry again
         OnStart(201, 200, T + 600, "C:\\apps\\child.exe");
         check(!Tracked.ContainsKey(201), "a person's child, started under a reused pid, is not followed");
         check(!Tracked.ContainsKey(200), "the reused parent's entry is dropped at its child's start");
         // and the minute check drops a stale entry nobody touched
-        Tracked[200] = new Entry { Root = 100, Start = T + 10, Lost = 0, Image = "x" };
+        Tracked[200] = new Entry { Root = 100, Start = T + 10, Image = "x" };
         DropStale();
         check(!Tracked.ContainsKey(200), "the minute check drops an entry whose pid holds another process");
 
-        // an exited worker child whose stop is on its way, with no events lost since: its reads already in the stream count
-        lost = 1;
+        // w6734 B1': a worker's short tool (300) starts and exits; its stop is lost before its start is handled; a person's
+        // launcher takes pid 300, starts the person's app and exits. No pid without a running process is trusted, so neither the
+        // launcher's open nor its app is taken for the worker's
         run(300, 100, T + 700);
-        OnStart(300, 100, T + 700, "C:\\ffw\\tools\\git\\usr\\bin\\cat.exe");
+        OnStart(300, 100, T + 700, "C:\\ffw\\tools\\git\\usr\\bin\\git.exe");
         check(Tracked.ContainsKey(300), "a host's new child is followed at its start event");
+        lost = 5;
         exit(300);
-        OnOpen(300, "C:\\Users\\me\\late.txt");
-        check(said("late.txt"), "an exited child's last read is reported while the stream lost nothing since");
-        Tracked[300].Start = T + 700;
-        lost = 2;
-        OnOpen(300, "C:\\Users\\me\\later.txt");
-        check(!said("later.txt"), "after a loss, a pid with no process to check is not trusted");
+        OnOpen(300, "C:\\Users\\me\\launcher.txt");
+        check(!said("launcher.txt"), "B1': an open by a pid with no running process is not reported");
+        Tracked[300] = new Entry { Root = 100, RootAt = ms(T), Start = T + 700, Image = "git.exe" }; // the entry again
+        run(302, 300, T + 800);
+        OnStart(302, 300, T + 800, "C:\\apps\\app.exe");
+        check(!Tracked.ContainsKey(302), "B1': a child of a pid with no running process is not followed");
 
-        // a child whose start time cannot be read (the event carries none and it is gone) is not followed
+        // w6734 B4: a start event without a creation time is not followed, even when a process now holds the child's pid
+        run(301, 100, T + 900);
         OnStart(301, 100, 0, "x");
-        check(!Tracked.ContainsKey(301), "a process with no creation time is not followed");
+        check(!Tracked.ContainsKey(301), "B4: a child whose start event has no creation time is not followed");
 
         // Seed: an orphan that names the host's pid but started before the host (a person's app whose updater held the pid)
         Command("roots");
@@ -651,6 +659,24 @@ static class FfReadLog
         run(131, 4, T + 3001);
         Command("roots 130:" + ms(T + 3000) + " 131:" + ms(T + 3001));
         check(Tracked.ContainsKey(501), "a worker's process given a person's old pid is not hidden by the cache");
+
+        // w6734 B2: a process that exits, its stop handled, between Seed's check and its insert is not inserted
+        Command("roots");
+        run(140, 4, T + 6000);
+        run(600, 140, T + 6100);
+        run(601, 9999, T + 6200); low.Add(601); marked.Add(601);
+        GapFn = p => { if (p == 600 || p == 601) { exit(p); OnStop(p); } };
+        Command("roots 140:" + ms(T + 6000));
+        GapFn = null;
+        check(Tracked.ContainsKey(140), "B2: the host itself is a root");
+        check(!Tracked.ContainsKey(600), "B2: a child that exited in Seed's gap is not inserted");
+        check(!Tracked.ContainsKey(601), "B2: an orphan that exited in Seed's gap is not inserted");
+        // and a root whose host exits in SetRoots' gap
+        run(150, 4, T + 7000);
+        GapFn = p => { if (p == 150) { exit(p); OnStop(p); } };
+        Command("roots 140:" + ms(T + 6000) + " 150:" + ms(T + 7000));
+        GapFn = null;
+        check(!Roots.Contains(150) && !Tracked.ContainsKey(150), "B2: a host that exited in SetRoots' gap is not a root");
 
         Captured = null;
         foreach (string f in fails) Console.Out.WriteLine("selftest FAIL: " + f);
