@@ -440,7 +440,7 @@ export class BlockerWatch {
       // w6687 stage 1: machine exclusions that cite no live hold, config rule, capability or person's words are logged, not dropped.
       // Its own catch (w6697 review): a throw in the audit must not skip the pair cut and the room flag below.
       try {
-        for (const id of this.d.orchestrators.auditExclusions?.() ?? []) did.set(id, 'logged: an exclusion enforcing would drop (w6687, warn-only)');
+        for (const id of this.d.orchestrators.auditExclusions?.() ?? []) did.set(id, 'a machine exclusion that cites no live reason: logged, or dropped under config placement.exclusions enforce (w6687, w6754)');
       } catch (e) {
         console.warn(`blocker watch: exclusion audit (w6687): ${(e as Error).message}`);
       }

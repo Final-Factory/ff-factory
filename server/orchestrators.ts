@@ -4770,8 +4770,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         // w6754: under config placement.exclusions enforce, needs ("only on X/Y") that leave out a computer no live reason
         // keeps off are refused, with each reason; needs that are the request's pin are the pin's (w2521), judged as one.
         const exFacts = this.d.exclusionFacts?.();
-        if (needs.length && !pin && exclusionMode(exFacts) === 'enforce') {
-          const bad = needsUnreasoned({ ...w, pair }, needs, exFacts!, w.pair?.for ? this.store.work.get(w.pair.for) : undefined);
+        // A pair run is judged by its avoid, never its needs (the audit skips them too), and its Steam and cross-OS needs are
+        // facts the audit cannot see, so a pair run's needs are not refused here (w6758, the w6756 review, 1).
+        if (needs.length && !pin && !(pair ?? w.pair) && exclusionMode(exFacts) === 'enforce') {
+          const bad = needsUnreasoned(w, needs, exFacts!);
           if (bad.length) throw new Error(`needs ${needs.join(', ')} leave out ${bad.map((v) => v.machine).join(', ')}, and nothing live keeps ${w.id} off ${bad.length > 1 ? 'them' : 'it'} (w6754, config placement.exclusions is enforce): no crash hold of ${w.id}, machine hold or pause, config placement rule, capability or person's words names ${bad.length > 1 ? 'them' : 'it'}. A hold an earlier brief names is no hold unless list_sandboxes shows it. Queue it with needs that add ${bad.map((v) => v.machine).join(', ')}, or with no needs.`);
         }
         w.queuedFor = { at: this.now().toISOString(), ...(needs.length ? { needs } : {}) };
@@ -5537,9 +5539,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const avoid = [...new Set([...(open ? this.pairFailedOn(open) : []), ...named])];
       const split = a.split?.replace(/\s+/g, ' ').trim().slice(0, 300);
       p = this.newPair(w, sessionId, { what, brief, legs, ...(a.legs !== undefined ? { legsSaid: true as const } : {}), crossOs, timed: a.timed === true, ...(split && !saysNone(split) ? { split } : {}), ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(steamNone ? { noSteam: STEAM_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}), ...(a.player ? { player: a.player } : {}), ...(legacyData ? { legacyData } : {}), ...(dataDirChecked ? { dataDirChecked } : {}) });
-      if (open) for (const m of this.pairFailedOn(open)) if (!named.includes(m)) citeAvoid(p, [m], `an earlier leg of ${open.id} failed there (w2041)`);
+      if (open) for (const m of this.pairFailedOn(open)) if (!named.includes(m)) citeAvoid(p, [m], `an earlier leg of ${open.id} failed there (w2041)`, true);
       // w6754 (the w6697 review, 1): the server's own record of where the earlier legs failed, the audit's reason to keep them off.
-      if (failedBefore.length && p.pair) {
+      // Set on every retry, empty too, so a retry without it is one filed before w6754 (w6758, the w6756 review, 3).
+      if (open && p.pair) {
         p.pair = { ...p.pair, failedOn: failedBefore };
         this.store.putWork(p);
       }
@@ -10055,24 +10058,34 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const parent = w.pair?.for ? this.store.work.get(w.pair.for) : undefined;
       const lines: string[] = [];
       const drop = { avoid: [] as string[], needs: [] as string[] };
-      for (const v of auditExclusions(w, facts, parent)) {
+      let marks: string[] | undefined;
+      const verdicts = auditExclusions(w, facts, parent);
+      for (const v of verdicts) {
         const key = `${w.id}|${v.source}|${v.machine}`;
         live.add(key);
         const was = this.exclusionSeen.get(key);
         this.exclusionSeen.set(key, v);
+        const mark = `${v.source}|${v.machine}`;
         if (v.keep) {
           // A machine hold (offline, paused, a build) says nothing about the mark: the warning stands (w6754 e).
-          if (v.kind !== 'machine-hold') this.exclusionWarned.delete(key);
+          if (v.kind !== 'machine-hold') {
+            this.exclusionWarned.delete(key);
+            if (w.exclusionsLogged?.includes(mark)) marks = (marks ?? w.exclusionsLogged).filter((m) => m !== mark);
+          }
           continue;
         }
         const enforce = mode === 'enforce' && v.source !== 'machinePin';
         if (enforce) (v.source === 'pair.avoid' ? drop.avoid : drop.needs).push(v.machine);
-        else if (this.exclusionWarned.has(key) || (!was && w.log.some((l) => l.includes(`would drop ${markText(v)}:`)))) {
+        // Seen before a restart: its mark on the request (w6758), or for one logged before that, its line in the log (w6754 d).
+        else if (this.exclusionWarned.has(key) || (!was && (w.exclusionsLogged?.includes(mark) || w.log.some((l) => l.includes(`${markText(v)}:`))))) {
           this.exclusionWarned.add(key);
+          // One logged before w6758 is known only by its log line: keep its mark too, before the line scrolls out (the w6760 review, b).
+          if (!w.exclusionsLogged?.includes(mark)) marks = [...new Set([...(marks ?? w.exclusionsLogged ?? []), mark])];
           continue;
         }
         this.exclusionWarned.add(key);
-        const line = warnLine(v, was, enforce);
+        if (!enforce) marks = [...new Set([...(marks ?? w.exclusionsLogged ?? []), mark])];
+        const line = warnLine(v, was, mode, enforce);
         lines.push(line);
         console.log(`[w6687 exclusions] ${w.id}: ${line}`);
       }
@@ -10085,7 +10098,20 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       }
       if (drop.needs.length && w.queuedFor?.needs) w.queuedFor = { ...w.queuedFor, needs: [...new Set([...w.queuedFor.needs, ...drop.needs])] };
       if (drop.avoid.length || drop.needs.length) this.roomFlags.delete(w.id);
-      if (!lines.length) continue;
+      // Marks it no longer carries go with the next write (w6758).
+      const carried = new Set(verdicts.map((v) => `${v.source}|${v.machine}`));
+      if (marks || w.exclusionsLogged?.some((m) => !carried.has(m))) {
+        const kept = (marks ?? w.exclusionsLogged ?? []).filter((m) => carried.has(m));
+        const same = kept.length === (w.exclusionsLogged ?? []).length && kept.every((m) => w.exclusionsLogged?.includes(m));
+        if (!same) {
+          w.exclusionsLogged = kept.length ? kept : undefined;
+          if (!lines.length && !drop.avoid.length && !drop.needs.length) this.store.putWork(w);
+        }
+      }
+      if (!lines.length) {
+        if (drop.avoid.length || drop.needs.length) this.store.putWork(w);
+        continue;
+      }
       // Only its log changes (not stamp: the audit touches no gate, check-in or updatedAt).
       const now = this.now();
       w.log = [...w.log, ...lines.map((line) => logLine(now, line))].slice(-40);
@@ -10389,9 +10415,15 @@ export function sameTimedAsk(leg: WorkItem, sessionId: string, brief: string, pl
  * exclusion audit (server/exclusionAudit.ts) logs it beside its verdict. The words are kept, never trusted: the audit reads
  * the live holds, config and capabilities, and a cited hold that is not live counts for nothing.
  */
-export function citeAvoid(p: WorkItem, machines: readonly string[], why: string | undefined): void {
+/** The cite filePair writes for a computer where a leg of the run a retry replaces failed (w2041). */
+const SERVER_FAILED_CITE = /^an earlier leg of w\d+ failed there \(w2041\)$/i;
+
+export function citeAvoid(p: WorkItem, machines: readonly string[], why: string | undefined, byServer = false): void {
   if (!p.pair || !machines.length) return;
-  const text = why?.replace(/\s+/g, ' ').trim().slice(0, 200) || 'no reason given';
+  const said = why?.replace(/\s+/g, ' ').trim().slice(0, 200) || 'no reason given';
+  // The audit trusts the server's own w2041 cite on a retry filed before w6754 (no failedOn): an asker's copy of it is marked
+  // as theirs, so it is never read as the server's (w6758, the w6760 review, a).
+  const text = !byServer && SERVER_FAILED_CITE.test(said) ? `the asker wrote: ${said}` : said;
   const cited = { ...(p.pair.avoidWhy ?? {}) };
   for (const m of machines) cited[placeId(m)] = text;
   p.pair = { ...p.pair, avoidWhy: cited };
