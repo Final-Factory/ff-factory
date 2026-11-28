@@ -628,12 +628,14 @@ test('w6782 (N1): a request "blocked" with no gate left is woken in place', asyn
 });
 
 test("w6782 (N2): a blocked request's dispatcher line does not name the in-place wake", async (t) => {
-  const { agents, request, told, sent } = await wakeSetup(t);
+  const { store, agents, request, told, sent } = await wakeSetup(t);
   const at = new Date(Date.now() - MIN).toISOString();
   request({ id: 'w6500', sessionIds: ['dddd4444'], status: 'blocked', blocked: { kind: 'pr', ref: 'Final-Factory/ff-factory#1', what: 'PR #1 merging', at, by: 'worker dddd4444' } as never });
   agents.lostCheckIn('dddd4444', { at: Date.now() - MIN, note: 'x' }, 'could not be woken (at the agent limit)');
   assert.match(told[0]!, /FF Factory does not wake its worker dddd4444 in place: w6500 is held on .*whose resume wakes it when that clears/);
   assert.doesNotMatch(told[0]!, /wakes its worker dddd4444 again where it is/);
+  assert.match(store.work.get('w6500')!.log.join(' | '), /leave its worker dddd4444 to the resume of its gate \(.*\), which wakes it when that clears/);
+  assert.doesNotMatch(store.work.get('w6500')!.log.join(' | '), /when that clears once it can/, 'review w6783, nit 2');
   assert.deepEqual(agents.moveAwayWork(Date.now()), []);
   assert.equal(sent.length, 0);
 });
@@ -650,5 +652,20 @@ test('w6782 (N3): no in-place wake while a message already waits for the worker;
   assert.equal(sent.length, 0, 'a gate resume held for room wakes it: nothing queued behind it');
   waiting = [];
   assert.deepEqual(agents.moveAwayWork(now + MIN), [['w6500', WOKEN]], 'not stamped as tried: goes on the next pass');
+  assert.equal(sent.length, 1);
+});
+
+test('w6782 (review w6783, nit 1): no in-place wake while a parked message waits for the worker (its pool held)', async (t) => {
+  const { agents, request, sent } = await wakeSetup(t);
+  const x = (agents as unknown as { sessions: { parked: (id?: string) => { id: string }[] } }).sessions;
+  let parked = [{ id: 'dddd4444' }];
+  x.parked = (id) => parked.filter((q) => id === undefined || q.id === id);
+  request({ id: 'w6500', sessionIds: ['dddd4444'] });
+  agents.lostCheckIn('dddd4444', { at: Date.now() - MIN, note: 'x' }, 'could not be woken (at the agent limit)');
+  const now = Date.now();
+  assert.deepEqual(agents.moveAwayWork(now), []);
+  assert.equal(sent.length, 0, 'a wake sent now would be parked behind it and go with it');
+  parked = [];
+  assert.deepEqual(agents.moveAwayWork(now + MIN), [['w6500', WOKEN]]);
   assert.equal(sent.length, 1);
 });
