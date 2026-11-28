@@ -17,6 +17,7 @@ import { ensureReadBackDirs, readFenceProbeTargets } from './readFence.ts';
 import { NO_READ_UP, READ_BACK, noReadUpTargets, relabelInside, relabelScript, type LabelTarget } from './lowIntegrity.ts';
 import { buildMirror, mirrorPath, precheckPlan, probeReadFenceWin, realVerdict, windowsReadVerdict } from './readFenceWin.ts';
 import { personFile } from './personPlay.ts';
+import { DAEMON_NODE_FOLDER, daemonNodeExe } from '../server/agentNode.ts';
 
 const tmp = (n: string) => fs.mkdtempSync(path.join(os.tmpdir(), `w5957-${n}-`));
 const ino = (p: string) => fs.statSync(p, { bigint: true }).ino;
@@ -25,7 +26,9 @@ const src = (f: string) => fs.readFileSync(path.join(import.meta.dirname, '..', 
 // ------------------------------------------------------------------------------------------------ N5
 
 test('w5957 N5: every file the fences give back in the daemon folder names how it is written, and none is written by rename', () => {
-  const files = FENCE_READ_ALLOW.filter((p) => /\.[a-z0-9]+$/i.test(p));
+  // The daemon's node folder (node-v24.22.1, w6603) ends in what looks like an extension; it is a folder, made by rename
+  // before the daemon starts, and the daemon's start labels it.
+  const files = FENCE_READ_ALLOW.filter((p) => /\.[a-z0-9]+$/i.test(p) && p !== DAEMON_NODE_FOLDER);
   assert.deepEqual(files.filter((f) => !FENCE_FILE_WRITERS[f]), [], 'a given-back file with no writer listed in FENCE_FILE_WRITERS');
   assert.deepEqual(Object.keys(FENCE_FILE_WRITERS).filter((f) => !files.includes(f)), [], 'FENCE_FILE_WRITERS names a file that is not given back');
   // update/job.json and result.json are written by rename (machine/selfUpdate.ts writeJson): their folder is given back.
@@ -360,4 +363,24 @@ test('w6120 (Windows): relabelInside stops its walk when the mode file changes, 
   } finally {
     fs.rmSync(d, { recursive: true, force: true });
   }
+});
+
+test("w6603 (w6655's review): every node the workers' shims start stays readable under the Windows read fence, the daemon's own pinned copy included", () => {
+  // ff-pr (prFlow.ts), ff-leftovers (leftovers.ts), ffu-slot (ffuSlots.ts), the Unity slot shims (unitySlots.ts) and the gh
+  // shim and its credential helper (ghApp.ts) start the daemon's process.execPath; Windows needs read access to start an exe.
+  const R = 'F:\\ffw';
+  const app = path.win32.join(R, 'daemon');
+  const daemonNode = path.win32.join(app, DAEMON_NODE_FOLDER, 'node.exe');
+  const there = new Set([app, path.win32.join(R, 'secrets'), path.win32.join(app, DAEMON_NODE_FOLDER), path.win32.join(app, 'gh-app', 'bin')]);
+  const t = noReadUpTargets({ root: R, appDir: app, allowBack: FENCE_READ_ALLOW, stat: (x) => (there.has(x) ? 'dir' : undefined), path: path.win32 });
+  // The label that reaches a path: the nearest labelled folder above it (or the path itself); none means the fence leaves it be.
+  const labelOf = (p: string) =>
+    t.filter((x) => p.toLowerCase() === x.path.toLowerCase() || p.toLowerCase().startsWith(`${x.path.toLowerCase()}\\`)).sort((a, b) => b.path.length - a.path.length)[0]?.sddl;
+  assert.equal(labelOf(path.win32.join(app, 'daemon.json')), NO_READ_UP.dir, 'the daemon folder itself is closed');
+  for (const exe of [daemonNode, path.win32.join(R, 'tools', 'node', 'node.exe'), 'C:\\Program Files\\nodejs\\node.exe']) {
+    const l = labelOf(exe);
+    assert.ok(l === undefined || l === READ_BACK.dir || l === READ_BACK.file, `${exe} is readable to Low workers (got ${l})`);
+  }
+  assert.equal(labelOf(daemonNode), READ_BACK.dir);
+  assert.equal(DAEMON_NODE_FOLDER, path.basename(path.dirname(daemonNodeExe('/r'))), "the folder given back is the one ensureDaemonNode fills");
 });

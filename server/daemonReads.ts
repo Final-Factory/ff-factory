@@ -1,6 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { flatten, normPath, pathSpellings, shellWords, spellingsRegex, splitShell, GIT_READ_ONLY } from './mainCloneGuard.ts';
+import { DAEMON_NODE_FOLDER } from './agentNodePin.ts';
 import { globBase, mayList, readProblem, realReadFs, type ReadCtx, type ReadFs, type SecretRules } from './secretGuard.ts';
 
 /**
@@ -62,8 +63,12 @@ export const HOST_READ_ALLOW = ['devdrive.json', 'moved.json'];
  * folder (w5546): the guard's list above, plus what workers run or their tools read there: the gh shim's folder
  * (gh-app/bin; never gh-app/tokens.json, w5547) and the Unity MCP server's status files (unity-mcp, machine/unityMcp.ts).
  * root.json and its spare (root-backup.json) are closed since w5546 (lothsahn: "...and root.json").
+ * The daemon's node (w6603, agentNode.ts daemonNodeDir): the shims workers run (ff-pr, ff-leftovers, ffu-slot, the Unity slot
+ * shims, the gh shim and its credential helper) start the daemon's own process.execPath, and Windows needs read access to
+ * start an exe (w6655's review, measured on BEAST). Its older version's folder, kept for a rollback, is given back by the
+ * older code that runs on it.
  */
-export const FENCE_READ_ALLOW = [...DAEMON_READ_ALLOW.filter((p) => !p.startsWith('update/')), 'update', 'gh-app/bin', 'unity-mcp', 'rpc'];
+export const FENCE_READ_ALLOW = [...DAEMON_READ_ALLOW.filter((p) => !p.startsWith('update/')), 'update', 'gh-app/bin', 'unity-mcp', 'rpc', DAEMON_NODE_FOLDER];
 
 /**
  * w5957 (N5): the files in FENCE_READ_ALLOW must keep their give-back when the daemon rewrites them. A Landlock grant is by

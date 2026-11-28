@@ -5,7 +5,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PUT_BACK, runJob, toolsTimedOut, updateFlagsOf, type JobDeps } from './linkJob.ts';
 import { jobName, jobPlist, launchJob } from '../../machine/osJob.ts';
-import { jobRemoveScript, jobScript, jobTaskXml, rollbackScript } from '../../server/machineDeployWin.ts';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { installScript, jobRemoveScript, jobScript, jobTaskXml, rollbackScript } from '../../server/machineDeployWin.ts';
 import type { UpdateJob } from '../../machine/selfUpdate.ts';
 
 const NEW = 'b'.repeat(40);
@@ -243,4 +247,38 @@ test('w5967: a tools run that hangs is failed with the reason at its limit, so t
   assert.deepEqual(await runJob(tools, { ...m.deps, tools: async () => 0, toolsMs: 1_000 }), { ok: true, exit: 0 });
   const threw = await runJob(tools, { ...m.deps, tools: async () => { throw new Error('git pull failed'); }, toolsMs: 1_000 });
   assert.deepEqual(threw, { ok: false, exit: 1, note: 'the agent tools run exited 1' });
+});
+
+test("w6603: an install keeps the supervisor it replaces, and a rollback puts it back with app.old, so the old code runs on its old node", { skip: process.platform !== 'win32' && 'needs Windows PowerShell' }, () => {
+  const F = fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), 'w6603-rollback-'));
+  for (const d of ['app', 'app.old']) fs.mkdirSync(path.join(F, d, 'machine'), { recursive: true });
+  fs.writeFileSync(path.join(F, 'app', 'machine', 'VERSION'), 'new\n');
+  fs.writeFileSync(path.join(F, 'app.old', 'machine', 'VERSION'), 'old\n');
+  fs.writeFileSync(path.join(F, 'run-daemon.ps1'), "$node = 'D:\\ffw\\daemon\\node-v24.22.1\\node.exe'\n");
+  fs.writeFileSync(path.join(F, 'run-daemon.ps1.old'), "$node = 'C:\\Program Files\\nodejs\\node.exe'\n");
+  const real = rollbackScript(F, { task: 'FFW6603RollbackTest', only: true });
+  assert.match(real, /Move-Retry \$old \$app\n[\s\S]*Move-Item -LiteralPath \(\$sup \+ '\.old'\) -Destination \$sup -Force/);
+  // Run as written, but with no daemon to stop or task to start: this folder has neither.
+  const script = real.replace('$null = Stop-FFDaemon\n', '').replace(/if \(Test-FFLoggedOn\) \{ Start-FFDaemon; 'started=True' \} else \{ 'started=False' \}/, "'started=test'");
+  assert.notEqual(script, real);
+  const file = path.join(F, 'rollback.ps1');
+  fs.writeFileSync(file, script);
+  const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8' });
+  assert.match(out, /supervisor=restored/);
+  assert.equal(fs.readFileSync(path.join(F, 'app', 'machine', 'VERSION'), 'utf8'), 'old\n');
+  assert.match(fs.readFileSync(path.join(F, 'run-daemon.ps1'), 'utf8'), /Program Files\\nodejs/);
+  assert.match(fs.readFileSync(path.join(F, 'run-daemon.ps1.failed'), 'utf8'), /node-v24\.22\.1/);
+  assert.ok(!fs.existsSync(path.join(F, 'run-daemon.ps1.old')));
+  // An install from before w6603 kept no supervisor: the one there stays.
+  fs.renameSync(path.join(F, 'app'), path.join(F, 'app.old'));
+  fs.mkdirSync(path.join(F, 'app'));
+  assert.doesNotMatch(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8' }), /supervisor=restored/);
+  assert.match(fs.readFileSync(path.join(F, 'run-daemon.ps1'), 'utf8'), /Program Files\\nodejs/);
+  fs.rmSync(F, { recursive: true, force: true });
+});
+
+test('w6603: the install script copies the supervisor there to run-daemon.ps1.old before it writes the new one', () => {
+  const s = installScript({ sid: 'S-1-5-21-1-2-3-1001', home: 'C:\\Users\\l', config: '{}', node: 'D:\\ffw\\daemon\\node-v24.22.1\\node.exe', flag: false, appDir: 'D:\\ffw\\daemon', service: { task: 'FFWorkerTest', only: true } });
+  const keep = s.indexOf("Copy-Item -LiteralPath $sup -Destination ($sup + '.old') -Force");
+  assert.ok(keep > 0 && keep < s.indexOf("Write-B64 'run-daemon.ps1'"));
 });

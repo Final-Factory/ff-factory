@@ -667,14 +667,33 @@ settings for it (Library seed set or not, editors below normal, slot repos, comm
 machine reports is no drift. It changes and refuses nothing: the fix for a difference is the installer/updater or the
 portal setting, never a hand edit on one machine.
 
-**The daemon's node (w6603, warn only).** Each OS has one node its daemon is to run on, `PINNED_DAEMON_NODE` in
-shared/machineBaseline.ts: on Windows the agents' pinned node (`AGENT_NODE` in server/agentNode.ts, v24.22.1, at
-`<root>\tools\node\node.exe`; a test keeps the two equal). Mac and Linux have no pin yet and are compared with their peers
-only. A daemon on another node shows first in that line (`daemon node 22.17.0, not the pinned 24.22.1`), even when every
-machine of its OS agrees, and the installer's Windows daemon step says `Daemon node (w6603, warn only): ...` and leaves the
-daemon on the node it found (`installDaemonWin`, scripts/worker/worker.ts). Moving the daemon onto the pinned node is a
-separate change with its own recovery (lothsahn, 2026-11-27: "Python being in the work folder, and any other tools, should
-be part of the install process").
+**The daemon's node (w6603).** Each OS has one node its daemon runs on, `PINNED_DAEMON_NODE` in
+shared/machineBaseline.ts: on Windows the agents' pinned node (`AGENT_NODE` in server/agentNode.ts, v24.22.1; a test keeps
+the two equal). Mac and Linux have no pin yet and are compared with their peers only. A daemon on another node shows first
+in that line (`daemon node 22.17.0, not the pinned 24.22.1`), even when every machine of its OS agrees (lothsahn,
+2026-11-27: "Python being in the work folder, and any other tools, should be part of the install process").
+
+The Windows installer and every update put the daemon on it (`installDaemonWin`, scripts/worker/worker.ts):
+`ensureDaemonNode` places the daemon's own copy at `<root>\daemon\node-<version>\node.exe`, in the daemon's folder that no
+daemon labels Low, unpacked from the zip the agents' node keeps in `<root>\daemon\agent-node` (one download for both) and
+hashed against the pin before it is used. It is not `<root>\tools\node`, which every rollout swaps while agents run from
+it. A copy there that hashes to the pin is kept as it is (the running daemon holds it open); anything else is replaced.
+npm ci and `run-daemon.ps1` then use that node. When it cannot be placed (no download, a wrong hash), the install says
+`WARNING: Daemon node: ...`, keeps the node the daemon had, and the next update tries again: a machine is never left with
+no node for its daemon.
+
+Low workers start that node too: ff-pr, ff-leftovers, ffu-slot, the Unity slot shims and the gh shim and its credential
+helper all run the daemon's `process.execPath`, and Windows needs read access to start an exe. So the read fence gives
+`node-<version>` back to reads (`FENCE_READ_ALLOW`, server/daemonReads.ts; machine/readFenceGaps.test.ts checks every
+node the shims start), and `ensureDaemonNode` sets the folder's own plain Medium label before it moves it into place.
+Without that label, the new folder stays closed to Low reads like the rest of the daemon's folder until the restarted daemon's
+label pass reaches it, which took minutes on LothDesktop (w5980). A label it cannot set counts as a failed placement
+(review w6655).
+
+Recovery needs nobody at the machine: the install keeps the supervisor it replaces as `run-daemon.ps1.old`, and the update
+job's rollback (`rollbackScript`, server/machineDeployWin.ts; scripts/worker/linkJob.ts puts the old code back when the
+new daemon does not come up) puts it back with `app.old`, so the old code starts on the node it ran on before. The one
+that failed stays as `run-daemon.ps1.failed`. A node folder of another version goes once neither supervisor names it.
 
 ## The daemon's logs
 
