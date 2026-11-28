@@ -136,6 +136,9 @@ export function exclusionReason(machine: string, w: Subject, facts: ExclusionFac
   const c = facts.computers.find((x) => placeId(x.id) === id);
   if (!c) return { kind: 'capability', reason: `${id} is no computer this portal has` };
   if (!c.online) return { kind: 'machine-hold', reason: `${id} is offline${c.offlineSince ? ` since ${hhmm(c.offlineSince)}` : ''}` };
+  // A retry filed before w6754 has no failedOn: the cite the server itself wrote then stands for it (w6758, the w6756 review, 3).
+  const legacy = w.pair?.retryOf && !w.pair.failedOn && w.pair.avoidWhy?.[id] === `an earlier leg of ${w.pair.retryOf} failed there (w2041)`;
+  if (legacy) return { kind: 'failed-leg', reason: `a leg of ${w.pair!.retryOf} failed on ${id} (w2041, as the server cited it)` };
   if (w.pair?.failedOn?.map(placeId).includes(id)) return { kind: 'failed-leg', reason: `a leg of ${w.pair.retryOf ?? 'the run it retries'} failed on ${id} (w2041)` };
   if (w.pair) {
     // w3697: a Mac never runs a multiplayer client; only a split run's host leg may go on one (w4468).
@@ -214,9 +217,12 @@ export const markText = (v: Pick<ExclusionVerdict, 'source' | 'machine'>) => `${
  * The request log line for one verdict that cites no live reason: "w6687 warn-only, nothing dropped: ..." under warn (and for
  * a pin, which is never dropped), "w6754 enforced: dropped ..." when enforce dropped it.
  */
-export function warnLine(v: ExclusionVerdict, was?: ExclusionVerdict, dropped = false): string {
-  const cleared = was?.keep && was.kind === 'crash-hold' ? `${was.reason} has cleared, so ${dropped ? 'it is re-queued' : 'enforcing would re-queue it'} for ${v.machine}; ` : '';
-  return dropped ? `w6754 enforced: dropped ${markText(v)}: ${cleared}${v.reason}` : `w6687 warn-only, nothing dropped: enforcing would drop ${markText(v)}: ${cleared}${v.reason}`;
+export function warnLine(v: ExclusionVerdict, was?: ExclusionVerdict, mode: ExclusionMode = 'warn', dropped = false): string {
+  const cleared = was?.keep && was.kind === 'crash-hold' ? `${was.reason} has cleared, so ${dropped ? 'it is re-queued' : mode === 'enforce' ? 'it may go there' : 'enforcing would re-queue it'} for ${v.machine}; ` : '';
+  if (dropped) return v.source === 'queuedFor.needs' ? `w6754 enforced: added ${v.machine} to its queue needs: ${cleared}${v.reason}` : `w6754 enforced: dropped ${markText(v)}: ${cleared}${v.reason}`;
+  // Under enforce only a pin reaches here: pins are only ever logged (w6758, the w6756 review, 2).
+  if (mode === 'enforce') return `w6754 enforce, pins are only logged, nothing dropped: ${markText(v)}: ${cleared}${v.reason}`;
+  return `w6687 warn-only, nothing dropped: enforcing would drop ${markText(v)}: ${cleared}${v.reason}`;
 }
 
 /**
