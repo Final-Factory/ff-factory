@@ -245,6 +245,10 @@ try {
         $args0 = [string]($t.Actions | Select-Object -First 1).Arguments
         if ($args0.IndexOf($Vhdx, [StringComparison]::OrdinalIgnoreCase) -ge 0) { Unregister-ScheduledTask -TaskName $t.TaskName -Confirm:$false; Say "removed task $($t.TaskName)" }
       }
+      # The dedup repair (w6597) names the drive's letter, not the VHDX: the installer takes it and its service ACE away.
+      if (Get-ScheduledTask -TaskName 'ffsb-helper-deduprepair' -ErrorAction SilentlyContinue) {
+        & (Join-Path $PSScriptRoot '..\install-privileged-helpers.ps1') -Uninstall -Actions deduprepair | ForEach-Object { Say "helpers: $_" }
+      }
       if (Test-Path -LiteralPath $Vhdx) {
         Dismount-DiskImage -ImagePath $Vhdx -ErrorAction SilentlyContinue | Out-Null
         Remove-Item -LiteralPath $Vhdx -Force

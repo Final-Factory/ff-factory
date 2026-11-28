@@ -87,9 +87,11 @@ $results = Join-Path $dir 'results'
 $actions = if ($Actions.Count) { @($Actions | ForEach-Object { $_ -split ',' } | Where-Object { $_ }) } else { @('mount', 'trim', 'compact', 'detach', 'reboot') + $(if ($PagefileGB -ge 4) { 'pagefile' } else { @() }) }
 
 if ($Uninstall) {
-  Remove-DedupRepairAce
-  foreach ($a in 'mount', 'trim', 'compact', 'detach', 'reboot', 'pagefile', 'grow', 'dedup', 'deduprepair') { Unregister-ScheduledTask -TaskName "ffsb-helper-$a" -Confirm:$false -ErrorAction SilentlyContinue }
-  "removed the ffsb-helper-* tasks (left $dir for its results)"
+  # -Actions limits the uninstall too (devdrive.ps1 remove takes deduprepair away this way: its arguments name no VHDX).
+  $gone = if ($Actions.Count) { $actions } else { @('mount', 'trim', 'compact', 'detach', 'reboot', 'pagefile', 'grow', 'dedup', 'deduprepair') }
+  if ($gone -contains 'deduprepair') { Remove-DedupRepairAce }
+  foreach ($a in $gone) { Unregister-ScheduledTask -TaskName "ffsb-helper-$a" -Confirm:$false -ErrorAction SilentlyContinue }
+  "removed the tasks ffsb-helper-$($gone -join ', ffsb-helper-') (left $dir for its results)"
   return
 }
 
