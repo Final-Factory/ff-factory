@@ -208,11 +208,21 @@ export class McpScopes {
    * sync off the loop (w6639): the same look, its folders written with fs.promises (syncStatusDirAsync), from status files
    * read off the loop too (readStatusFilesAsync). The daemon's 5 s refreshMcpScopes runs this.
    */
-  async syncAsync(appDir: string, places: McpPlace[], now: number, log: (line: string) => void, files: StatusFile[]): Promise<void> {
+  async syncAsync(appDir: string, places: McpPlace[], now: number, log: (line: string) => void, files: StatusFile[], current: () => boolean = () => true): Promise<void> {
+    if (!current()) return;
     const { dirs, gone } = this.look(appDir, places, now);
+    // w6675: a folder is written only while its place is still one this keeps (a later look that saw its sandbox deleted
+    // removed it, and must not see it made again) and while this pass is the current one (`current`: the daemon's refresh).
     await Promise.all(
-      dirs.map((d) => syncStatusDirAsync(d.dir, d.project, d.editor, files, d.clones).catch((e) => log(`unity mcp ${d.place}: status folder ${d.dir}: ${(e as Error).message}`))),
+      dirs.map((d) =>
+        syncStatusDirAsync(d.dir, d.project, d.editor, files, d.clones, () => current() && this.seen.has(d.place)).catch((e) =>
+          log(`unity mcp ${d.place}: status folder ${d.dir}: ${(e as Error).message}`),
+        ),
+      ),
     );
+    // A place a later look found deleted while this pass waited on the disk: that look removed its folder, and this pass may
+    // have made it again (its mkdir already under way), so it goes once more (w6675).
+    for (const place of new Set(dirs.map((d) => d.place))) if (!this.seen.has(place)) gone.push(mcpStatusDir(appDir, place));
     await Promise.all(gone.map((dir) => fs.promises.rm(dir, { recursive: true, force: true }).catch(() => undefined)));
   }
 

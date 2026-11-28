@@ -1,0 +1,1 @@
+- The daemon's Unity MCP status refresh no longer stops for good after a pass that never finishes. A pass still running after 60 s is logged and left behind, a new one starts, and the old one writes nothing more. A failed write no longer leaves a `.tmp` file in a status folder. A sandbox deleted while a pass waited on the disk no longer gets its status folder back. (w6675)
