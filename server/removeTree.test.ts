@@ -68,7 +68,13 @@ test('removeTree: a folder still there after every try is a failure, with a line
   assert.match(r.stderr, /still there after removing it by its plain path and by its \\\\\?\\ path \(w6462\)/);
   assert.equal(calls.length, 2);
   // A relative path has no \\?\ form: no second try, the same failure.
-  const rel = path.relative(process.cwd(), dir);
+  // Made under the working folder: the temp folder may be on another drive (C: beside D: on CI), where no relative path
+  // reaches it.
+  const here = fs.mkdtempSync(path.join(process.cwd(), '.rmtree-'));
+  t.after(() => fs.rmSync(exact(here), { recursive: true, force: true }));
+  put(path.join(here, 'sb', 'x.', 'f'));
+  const rel = path.relative(process.cwd(), path.join(here, 'sb'));
+  assert.ok(!path.isAbsolute(rel), rel);
   const calls2: string[][] = [];
   const r2 = await removeTree(rel, { run: fakeRd(calls2, { leaveExact: true }), platform: 'win32' });
   assert.notEqual(r2.code, 0);
