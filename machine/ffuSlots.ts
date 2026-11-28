@@ -27,7 +27,8 @@
  * the agent its own temp folder, which no worker writes, so it builds there instead (w5946 F5). A Medium agent's `take` keeps its
  * own CARGO_HOME and never gets the workers' `<root>/cache/cargo` (w5947): crates and build scripts a worker could have planted.
  */
-import { execFile, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
+import { execFileOffThread } from '../server/spawnThread.ts';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -972,7 +973,8 @@ export function readFfuSlotsReport(o: { root: string; factsFile: string; max: nu
   const env = { ...process.env, FF_WORKER_ROOT: o.root, FF_CLEANUP_FACTS: o.factsFile, FF_FFU_SLOTS_MAX: String(o.max), FF_SESSION_ID: '' };
   const args = [...process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), o.script ?? import.meta.filename, 'list', '--json'];
   return new Promise((resolve) => {
-    execFile(process.execPath, args, { env, timeout: 60_000, windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+    // w6639: started from the spawn thread (its start held BEAST's daemon loop 16.4 s, 2026-11-28 01:08Z).
+    execFileOffThread(process.execPath, args, { env, timeout: 60_000, windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         o.log?.(`ffu slots: list --json failed: ${(stderr || err.message).trim().slice(0, 200)}`);
         return resolve(undefined);
@@ -1007,7 +1009,8 @@ export function runFfuSlotSweep(o: { root: string; factsFile: string; max: numbe
   const env = { ...process.env, FF_WORKER_ROOT: o.root, FF_CLEANUP_FACTS: o.factsFile, FF_FFU_SLOTS_MAX: String(o.max), FF_SESSION_ID: '' };
   const args = [...process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), o.script ?? import.meta.filename, 'sweep'];
   return new Promise((resolve) => {
-    execFile(process.execPath, args, { env, timeout: o.timeoutMs ?? FFU_SLOT_SWEEP_KILL_MS, windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+    // w6639: from the spawn thread, as readFfuSlotsReport.
+    execFileOffThread(process.execPath, args, { env, timeout: o.timeoutMs ?? FFU_SLOT_SWEEP_KILL_MS, windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       const out = `${stdout ?? ''}${stderr ?? ''}`;
       resolve({ ok: !err, out: err && !out.trim() ? err.message : out });
     });

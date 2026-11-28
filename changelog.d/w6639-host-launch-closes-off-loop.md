@@ -5,3 +5,7 @@
   keep-open timer and `writeInPlace` close their handles with an async close (56.6 s and 15.8 s), and `refreshMcpScopes`
   reads the editors' status files with fs.promises (10.8 s). With the thread off, everything starts as before. Tests:
   `w6639LoopBlocks.test.ts`.
+- Also, from 78c58df3's read of BEAST's daemon.log on 2026-11-28 (w6639): `readFfuSlotsReport` and `runFfuSlotSweep` start
+  `ffu-slot` from the spawn thread (16.4 s); the tail's other closes (each poll's own handle, handles let go of mid-poll) are
+  async too (6.7 s); and `refreshMcpScopes` writes the status folders with fs.promises (`syncStatusDirAsync`,
+  `McpScopes.syncAsync`), one look at a time (up to 10.8 s).

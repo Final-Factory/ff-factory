@@ -15,8 +15,9 @@ import { EventEmitter } from 'node:events';
 import { launchDetached, useSpawnThread } from './spawnThread.ts';
 import { HostedSession, LineTail, type HostDeps } from '../machine/agentHost.ts';
 import { writeInPlace } from '../machine/readFence.ts';
-import { readStatusFiles, readStatusFilesAsync } from './unityMcp.ts';
-import { McpScopes } from '../machine/unityMcp.ts';
+import { readStatusFiles, readStatusFilesAsync, syncStatusDir, syncStatusDirAsync } from './unityMcp.ts';
+import { McpScopes, mcpHomeStatusDir, mcpStatusDir } from '../machine/unityMcp.ts';
+import { readFfuSlotsReport, slotsBase } from '../machine/ffuSlots.ts';
 import type { FromDaemon } from './machineProtocol.ts';
 import type { SessionInfo } from '../shared/types.ts';
 
@@ -218,4 +219,104 @@ test('w6639: the Unity MCP status files read off the loop are the ones read on i
     Object.assign(fs, real);
   }
   assert.deepEqual(reads, [], 'given the files read off the loop, sync reads none of them again');
+});
+
+// ---- More blocks 78c58df3 (w6553) measured in BEAST's daemon.log on 9a1b2ac5, 2026-11-28 01:00-01:08Z.
+
+test("w6639: the daemon's ffu slot report starts its `ffu-slot list` from the spawn thread, with the same report", { timeout: 60_000 }, async (t) => {
+  const root = tmp(t, 'ffu');
+  fs.mkdirSync(slotsBase(root), { recursive: true });
+  fs.writeFileSync(path.join(slotsBase(root), 'slots.json'), '{}');
+  // A stand-in for `ffu-slot list --json`.
+  const script = path.join(root, 'fake-ffu-slot.mjs');
+  fs.writeFileSync(script, "console.log(JSON.stringify({ max: 2, slots: [{ id: 's1' }], args: process.argv.slice(2) }))");
+  const read = () => readFfuSlotsReport({ root, factsFile: path.join(root, 'facts.json'), max: 2, sizes: new Map([['s1', { bytes: 7, at: 'then' }]]), script });
+  useSpawnThread(false);
+  const off = await loopSpawns(read);
+  useSpawnThread(true, () => {});
+  t.after(() => useSpawnThread(false));
+  const on = await loopSpawns(read);
+  assert.deepEqual(on.value, off.value);
+  assert.deepEqual((on.value as unknown as { args: string[] }).args, ['list', '--json']);
+  assert.equal((on.value!.slots[0] as { targetBytes?: number }).targetBytes, 7);
+  assert.equal(off.spawns.length, 1, off.spawns.join('\n'));
+  assert.deepEqual(on.spawns, [], 'nothing started on the loop with the thread on');
+});
+
+test('w6639: machine/ffuSlots.ts starts no program with a bare execFile', () => {
+  const text = fs.readFileSync(path.join(import.meta.dirname, '..', 'machine', 'ffuSlots.ts'), 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+  assert.doesNotMatch(text, /(^|[^.\w])execFile\(/m);
+});
+
+test("w6639: a tail that opens and closes each poll closes off the loop too (closeQuietly's other path)", async (t) => {
+  const dir = tmp(t, 'tail0');
+  const file = path.join(dir, 'out.jsonl');
+  fs.writeFileSync(file, 'one\n');
+  const lines: string[] = [];
+  const tail = new LineTail(file, (l) => lines.push(l));
+  const { closes } = await syncCloses(() => tail.poll());
+  assert.deepEqual(lines, ['one']);
+  assert.deepEqual(closes, []);
+});
+
+/** A folder's unity-mcp files and their contents, for comparing two syncs. */
+const folder = (dir: string) =>
+  Object.fromEntries(
+    fs
+      .readdirSync(dir)
+      .filter((n) => fs.statSync(path.join(dir, n)).isFile())
+      .sort()
+      .map((n) => [n, fs.readFileSync(path.join(dir, n), 'utf8')]),
+  );
+
+test("w6639: syncStatusDirAsync leaves a sandbox's status folder as syncStatusDir does, and McpScopes.syncAsync writes nothing on the loop", async (t) => {
+  const home = tmp(t, 'mcp2');
+  const now = Date.now();
+  fs.writeFileSync(path.join(home, 'unity-mcp-status-aaa.json'), JSON.stringify({ project_path: 'D:\work\ffsb\sb1', unity_port: 6401 }));
+  fs.writeFileSync(path.join(home, 'unity-mcp-status-ccc.json'), JSON.stringify({ project_path: 'D:\work\ffsb\sb1-clone', unity_port: 6402 }));
+  const files = readStatusFiles(home);
+  const setUp = (name: string) => {
+    const d = tmp(t, name);
+    fs.writeFileSync(path.join(d, 'unity-mcp-status-old.json'), '{"stale":true}');
+    fs.writeFileSync(path.join(d, 'keep-me.txt'), 'x');
+    return d;
+  };
+  const clones = [{ project: 'D:\work\ffsb\sb1-clone', since: now - 60_000 }];
+  for (const editor of [{ since: now - 60_000 }, undefined]) {
+    const a = setUp('sync');
+    const b = setUp('async');
+    syncStatusDir(a, 'D:\work\ffsb\sb1', editor, files, clones);
+    await syncStatusDirAsync(b, 'D:\work\ffsb\sb1', editor, files, clones);
+    assert.deepEqual(folder(b), folder(a));
+    // Again, with nothing changed: still the same.
+    await syncStatusDirAsync(b, 'D:\work\ffsb\sb1', editor, files, clones);
+    assert.deepEqual(folder(b), folder(a));
+  }
+
+  // The daemon's look, both ways, into two app folders: the same folders, and the async one makes no synchronous write.
+  const appA = tmp(t, 'appA');
+  const appB = tmp(t, 'appB');
+  const places = [{ place: 'sb1', project: 'D:\work\ffsb\sb1', pid: process.pid }, { place: 'sb2', project: 'D:\work\ffsb\sb2' }];
+  new McpScopes(home).sync(appA, places, now, () => undefined, files);
+  const scopes = new McpScopes(home);
+  const names = ['writeFileSync', 'renameSync', 'rmSync', 'readdirSync', 'mkdirSync', 'readFileSync'] as const;
+  const f = fs as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const real = new Map(names.map((n) => [n, f[n]]));
+  const touched: string[] = [];
+  for (const n of names) f[n] = (...a: unknown[]) => (String(a[0]).startsWith(appB) && touched.push(`${n} ${String(a[0])}`), real.get(n)!(...a));
+  const logs: string[] = [];
+  try {
+    await scopes.syncAsync(appB, places, now, (l) => logs.push(l), files);
+  } finally {
+    for (const n of names) f[n] = real.get(n)!;
+  }
+  assert.deepEqual(touched, [], 'syncAsync touched the status folders synchronously');
+  assert.deepEqual(logs, []);
+  for (const place of ['sb1', 'sb2']) {
+    assert.deepEqual(folder(mcpStatusDir(appB, place)), folder(mcpStatusDir(appA, place)));
+    assert.deepEqual(folder(mcpHomeStatusDir(appB, place)), folder(mcpHomeStatusDir(appA, place)));
+  }
+  // A sandbox that went: its folder goes, as in sync.
+  await scopes.syncAsync(appB, places.slice(0, 1), now + 5_000, () => undefined, files);
+  assert.equal(fs.existsSync(mcpStatusDir(appB, 'sb2')), false);
 });

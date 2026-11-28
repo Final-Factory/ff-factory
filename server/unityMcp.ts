@@ -88,13 +88,13 @@ const writeIfChanged = (file: string, text: string) => {
  * when it was launched); its status file is copied only if written since then, so a stale file a crashed
  * editor left (whose port another editor may have taken since) never is. `strict`: written after `since`, no allowance.
  */
-export function syncStatusDir(
-  dir: string,
-  project: string,
-  editor: { since?: number; strict?: boolean } | undefined,
-  files: StatusFile[],
-  clones: { project: string; since: number }[] = [],
-) {
+/** What syncStatusDir does to a folder: the status files to keep (written if changed), the rest of unity-mcp-*.json removed. */
+interface StatusDirPlan {
+  keep: Set<string>;
+  writes: { file: string; text: string }[];
+}
+
+function statusDirPlan(dir: string, project: string, editor: { since?: number; strict?: boolean } | undefined, files: StatusFile[], clones: { project: string; since: number }[]): StatusDirPlan {
   const want = normProject(project);
   // A daemon-launched editor's file may carry an mtime up to 2 s before its recorded launch (clock and mtime rounding); a
   // `strict` one (an EditorInstance.json pid, w5746) gets no such allowance: its file must be newer than `since` (w5779).
@@ -108,11 +108,56 @@ export function syncStatusDir(
     return f ? [f] : [];
   });
   const keep = new Set([mine?.name, ...cloneFiles.map((f) => f.name)].filter((n): n is string => !!n));
+  const writes = [...(mine ? [mine] : []), ...cloneFiles].map((f) => ({ file: path.join(dir, f.name), text: f.text }));
+  writes.push({ file: path.join(dir, LEGACY_PORT_FILE), text: JSON.stringify({ unity_port: mine?.port ?? 0, project_path: project }) });
+  return { keep, writes };
+}
+
+const strays = (names: string[], keep: Set<string>) => names.filter((n) => n.startsWith('unity-mcp-') && n.endsWith('.json') && !keep.has(n) && n !== LEGACY_PORT_FILE);
+
+/**
+ * Bring a sandbox's status folder up to date. `editor` is its editor while that process is alive (`since`:
+ * when it was launched); its status file is copied only if written since then, so a stale file a crashed
+ * editor left (whose port another editor may have taken since) never is. `strict`: written after `since`, no allowance.
+ */
+export function syncStatusDir(
+  dir: string,
+  project: string,
+  editor: { since?: number; strict?: boolean } | undefined,
+  files: StatusFile[],
+  clones: { project: string; since: number }[] = [],
+) {
+  const plan = statusDirPlan(dir, project, editor, files, clones);
   fs.mkdirSync(dir, { recursive: true });
-  for (const n of fs.readdirSync(dir)) {
-    if (n.startsWith('unity-mcp-') && n.endsWith('.json') && !keep.has(n) && n !== LEGACY_PORT_FILE) fs.rmSync(path.join(dir, n), { force: true });
+  for (const n of strays(fs.readdirSync(dir), plan.keep)) fs.rmSync(path.join(dir, n), { force: true });
+  for (const w of plan.writes) writeIfChanged(w.file, w.text);
+}
+
+let asyncTmp = 0;
+
+/**
+ * syncStatusDir off the loop (w6639): the same folder afterwards, with fs.promises. Its writes held BEAST's daemon up to
+ * 10.8 s (2026-11-28, refreshMcpScopes). A write goes through its own temporary name, so a synchronous sync of the same
+ * folder (stdioMcpFor) at the same time cannot take its temporary file.
+ */
+export async function syncStatusDirAsync(
+  dir: string,
+  project: string,
+  editor: { since?: number; strict?: boolean } | undefined,
+  files: StatusFile[],
+  clones: { project: string; since: number }[] = [],
+): Promise<void> {
+  const plan = statusDirPlan(dir, project, editor, files, clones);
+  await fs.promises.mkdir(dir, { recursive: true });
+  await Promise.all(strays(await fs.promises.readdir(dir), plan.keep).map((n) => fs.promises.rm(path.join(dir, n), { force: true })));
+  for (const w of plan.writes) {
+    try {
+      if ((await fs.promises.readFile(w.file, 'utf8')) === w.text) continue;
+    } catch {
+      // not there yet
+    }
+    const tmp = `${w.file}.${process.pid}.${++asyncTmp}.tmp`;
+    await fs.promises.writeFile(tmp, w.text);
+    await fs.promises.rename(tmp, w.file);
   }
-  if (mine) writeIfChanged(path.join(dir, mine.name), mine.text);
-  for (const f of cloneFiles) writeIfChanged(path.join(dir, f.name), f.text);
-  writeIfChanged(path.join(dir, LEGACY_PORT_FILE), JSON.stringify({ unity_port: mine?.port ?? 0, project_path: project }));
 }

@@ -138,7 +138,7 @@ export class LineTail {
     this.fd = undefined;
     if (fd === undefined) return;
     if (this.depth > 0) this.deferred.push(fd);
-    else if (later) fs.close(fd, () => undefined);
+    else if (later) closeLater(fd);
     else closeQuietly(fd);
   }
 
@@ -186,10 +186,16 @@ export class LineTail {
       // A kept handle that failed is not kept: the next poll opens the file again.
       if (fd !== undefined && fd === this.fd) this.close();
     } finally {
-      if (own && fd !== undefined) closeQuietly(fd);
-      if (--this.depth === 0) for (const d of this.deferred.splice(0)) closeQuietly(d);
+      // w6639: off the loop (a close here held BEAST's daemon 6.7 s, 2026-11-28 01:00Z): nothing waits on these.
+      if (own && fd !== undefined) closeLater(fd);
+      if (--this.depth === 0) for (const d of this.deferred.splice(0)) closeLater(d);
     }
   }
+}
+
+/** w6639: close a handle with no one waiting on it, off the loop (libuv's thread pool). */
+function closeLater(fd: number) {
+  fs.close(fd, () => undefined);
 }
 
 function closeQuietly(fd: number) {
