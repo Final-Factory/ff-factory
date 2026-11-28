@@ -106,6 +106,10 @@ static class FfReadLog
     static readonly List<string> Allow = new List<string>();
     static readonly HashSet<string> AllowExact = new HashSet<string>();
     static readonly HashSet<string> Seen = new HashSet<string>();
+    // the work folder (`work <folder>`): an orphaned Low process running a program from it is a worker's
+    static string Work = "";
+    // Low processes found to be no worker's (a person's browser, chat or game launcher), so their memory is not read again
+    static readonly HashSet<uint> NotWorker = new HashSet<uint>();
     static List<KeyValuePair<string, string>> devices = new List<KeyValuePair<string, string>>();
     static long fileEvents, procEvents, reported, dropped;
     static int thisMinute;
@@ -164,7 +168,7 @@ static class FfReadLog
             Say("{\"event\":\"stat\",\"fileEvents\":" + Interlocked.Exchange(ref fileEvents, 0) + ",\"procEvents\":" + Interlocked.Exchange(ref procEvents, 0) + ",\"tracked\":" + tracked + ",\"reported\":" + Interlocked.Exchange(ref reported, 0) + ",\"dropped\":" + Interlocked.Exchange(ref dropped, 0) + ",\"lost\":" + lost + "}");
         }, null, 60000, 60000);
         // what was reported is reported again an hour later, so a long run still shows its reads
-        Timer hourly = new Timer(_ => { lock (Gate) Seen.Clear(); Devices(); }, null, 3600000, 3600000);
+        Timer hourly = new Timer(_ => { lock (Gate) { Seen.Clear(); NotWorker.Clear(); } Devices(); }, null, 3600000, 3600000);
 
         string line;
         while ((line = Console.In.ReadLine()) != null)
@@ -174,6 +178,11 @@ static class FfReadLog
             {
                 string p = Norm(line.Substring(6).Trim());
                 if (p.Length > 0) lock (Gate) Allow.Add(p.TrimEnd('\\'));
+            }
+            else if (line.StartsWith("work "))
+            {
+                string p = Norm(line.Substring(5).Trim()).TrimEnd('\\');
+                lock (Gate) Work = p;
             }
             else if (line.StartsWith("exact "))
             {
@@ -319,9 +328,12 @@ static class FfReadLog
         if (fresh.Count > 0) Seed(fresh);
     }
 
-    // A root's descendants that already run when it is named (those it starts later come from Kernel-Process). Then every other
-    // Low process (root 0, "a Low worker process"): a worker's tool whose shell exited has no living parent to be found by, as
-    // after a daemon restart, when the hosts and their agents run on.
+    // A root's descendants that already run when it is named (those it starts later come from Kernel-Process). Then each other
+    // Low process that is a worker's (root 0, "a Low worker process"): a worker's tool whose shell exited has no living parent to
+    // be found by, as after a daemon restart, when the hosts and their agents run on. Low alone is not a worker: a person's
+    // Firefox, Slack, Discord, Spotify and Steam run Low processes too (w6715's review, on BEAST). So one counts only when its
+    // environment carries FF_SESSION_ID (every process a worker starts inherits it; machine/leftovers.ts reads it the same way)
+    // or it runs a program from the work folder (a Git Bash tool under <root>/tools shows no environment, w1575).
     static void Seed(List<uint> roots)
     {
         Dictionary<uint, List<uint>> children = new Dictionary<uint, List<uint>>();
@@ -363,8 +375,14 @@ static class FfReadLog
         foreach (uint pid in all)
         {
             lock (Gate) if (Tracked.ContainsKey(pid)) continue;
+            lock (Gate) if (NotWorker.Contains(pid)) continue;
             if (!IsLow(pid)) continue;
             string image = ImageOf(pid);
+            if (!IsWorkers(pid, image))
+            {
+                lock (Gate) NotWorker.Add(pid);
+                continue;
+            }
             lock (Gate)
             {
                 if (Tracked.ContainsKey(pid)) continue;
@@ -372,6 +390,49 @@ static class FfReadLog
                 Images[pid] = image;
             }
         }
+    }
+
+    static bool IsWorkers(uint pid, string image)
+    {
+        string work;
+        lock (Gate) work = Work;
+        if (work.Length > 0 && image.Length > work.Length && image.StartsWith(work + "\\", StringComparison.OrdinalIgnoreCase)) return true;
+        string env = EnvBlock(pid);
+        return env != null && (env.StartsWith("FF_SESSION_ID=", StringComparison.Ordinal) || env.Contains("\0FF_SESSION_ID="));
+    }
+
+    // A process's environment block, read from its PEB (64-bit only): machine/leftovers.ts WIN_ENV_CS, the same offsets.
+    [StructLayout(LayoutKind.Sequential)]
+    struct Pbi { public IntPtr R1; public IntPtr Peb; public IntPtr R2a; public IntPtr R2b; public IntPtr Pid; public IntPtr R3; }
+    [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h, int c, ref Pbi p, int l, out int r);
+    [DllImport("kernel32.dll")] static extern bool ReadProcessMemory(IntPtr h, IntPtr a, byte[] b, IntPtr s, out IntPtr r);
+    [DllImport("kernel32.dll")] static extern bool IsWow64Process(IntPtr h, out bool w);
+    static long Read8(IntPtr h, long a) { byte[] b = new byte[8]; IntPtr n; if (!ReadProcessMemory(h, new IntPtr(a), b, new IntPtr(8), out n)) return 0; return BitConverter.ToInt64(b, 0); }
+    static string EnvBlock(uint pid)
+    {
+        IntPtr h = OpenProcess(0x0410, false, pid); // PROCESS_QUERY_INFORMATION | PROCESS_VM_READ
+        if (h == IntPtr.Zero) return null;
+        try
+        {
+            bool wow;
+            if (IsWow64Process(h, out wow) && wow) return null;
+            Pbi p = new Pbi(); int r;
+            if (NtQueryInformationProcess(h, 0, ref p, Marshal.SizeOf(typeof(Pbi)), out r) != 0) return null;
+            long pp = Read8(h, p.Peb.ToInt64() + 0x20);
+            if (pp == 0) return null;
+            long env = Read8(h, pp + 0x80);
+            if (env == 0) return null;
+            long size = Read8(h, pp + 0x3F0);
+            if (size <= 0 || size > (1 << 22)) size = 65536;
+            for (; size >= 4096; size /= 2)
+            {
+                byte[] buf = new byte[size]; IntPtr n;
+                bool ok = ReadProcessMemory(h, new IntPtr(env), buf, new IntPtr(size), out n);
+                if (ok || n.ToInt64() >= 4096) return Encoding.Unicode.GetString(buf, 0, (int)(n.ToInt64() & ~1L));
+            }
+            return null;
+        }
+        finally { CloseHandle(h); }
     }
 
     // TokenIntegrityLevel (25): a TOKEN_MANDATORY_LABEL whose SID's last sub-authority is the level, 0x1000 for Low.

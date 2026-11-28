@@ -56,6 +56,8 @@ const NOT_GIT: Record<string, string> = {
   'machine/fenceProbe.ts|cmd': 'the fence probe (sandbox-exec, landlock)',
   'machine/maxEventsFence.ts|cmd': 'the Max events probe (/bin/sh under sandbox-exec or landlock, w5552)',
   'machine/workerCaps.ts|exe': 'the Windows job-object helper (w5554)',
+  'machine/readLog.ts|exe': 'the read-log ETW helper, stopping its session (machine/winReadLog.cs, w6599)',
+  'machine/readLog.ts|e': 'the read-log ETW helper (machine/winReadLog.cs, w6599)',
   'machine/longRuns.ts|node': "the long-run keeper: the daemon's Low node copy (w6367)",
   'machine/longRuns.ts|b': "the keeper script's run: Git Bash for agents on the sandbox's nightly_run.sh (w6367)",
   'machine/longRuns.ts|tk': "the keeper's time limit and runs/stop: Windows' taskkill.exe on its run's tree (w6367)",

@@ -475,6 +475,11 @@ folder and flags it, refusing nothing. It logs paths and the reading program onl
 - It follows every process below a live agent host (the daemon sends the hosts every 15 s; the host's own opens are not
   counted) and reports each file one of them opens outside the allowlist, `readAllowWin` in `machine/readLog.ts`. An open is
   what Kernel-File sees: a stat, a directory listing and an open for writing count as well as a read.
+- A worker's tool whose shell exited, or one that ran on through a daemon restart, has no living host above it. At start the
+  helper therefore also follows a Low process with no tracked parent, but only one that is a worker's: its environment
+  carries FF_SESSION_ID (read from the process as `machine/leftovers.ts` does), or it runs a program from the work folder (a
+  Git Bash tool shows no environment, w1575). Low alone is not enough: a person's Firefox, Slack, Discord, Signal, Spotify
+  and Steam run Low processes too (found by w6715's review on BEAST), and their paths stay out of the log.
 - Each report goes to `<appDir>/logs/read-log-<UTC date>.jsonl` (`t`, `session`, `sandbox`, `pid`, `image`, `path`; at most
   50 MB a day, kept 14 days) and, once a day per worker and folder (a path's first three parts), to daemon.log as
   `read log: <session> (<sandbox>): <program> read <path>, outside the work folder and not on the allowlist (warn only:

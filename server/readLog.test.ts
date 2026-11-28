@@ -63,7 +63,8 @@ test('w6599: the daemon sends the allowlist and the live hosts, writes each read
   r.start();
   await flush();
   assert.deepEqual(started, [['ffreadlog.exe', READ_LOG_SESSION]]);
-  assert.ok(f.sent.includes('allow F:\\ffw') && f.sent.includes('exact C:\\') && f.sent.includes('allow C:\\ProgramData'));
+  assert.ok(f.sent.includes('work F:\\ffw'), 'the work folder, for telling a worker\'s orphaned Low process from a person\'s app (w6715)');
+  assert.ok(f.sent.includes('allow F:\\ffw') &&f.sent.includes('exact C:\\') && f.sent.includes('allow C:\\ProgramData'));
   assert.equal(f.sent.at(-1), 'roots 100');
   r.tick();
   await flush();

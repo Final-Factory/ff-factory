@@ -169,6 +169,8 @@ export class ReadLog {
     child.stdin?.on('error', () => undefined);
     child.on('error', (e) => (error = e.message));
     for (const a of readAllowWin(this.d.env ?? process.env, this.d.root!)) child.stdin?.write(`${a.exact ? 'exact' : 'allow'} ${a.path}\n`);
+    // w6715: an orphaned Low process counts as a worker's only when it runs a program from here or carries FF_SESSION_ID
+    child.stdin?.write(`work ${this.d.root}\n`);
     this.tick();
     const rl = readline.createInterface({ input: child.stdout! });
     rl.on('line', (line) => {
