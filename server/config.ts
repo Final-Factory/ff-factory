@@ -346,6 +346,13 @@ export interface Config {
    */
   movedAwayWorkers?: 'off' | 'warn' | 'on';
   /**
+   * w6768 (Agents.resumeLost): a request whose worker's own check-in came due with nothing to deliver it (WorkItem.lostCheckIn).
+   * "on" (unset) resumes it elsewhere with the check-in's note: a worker on a computer away past the grace moves as a stopped
+   * worker's work does (w2544), a worker that is gone is replaced by a fresh worker where the work fits; "warn" only shows it
+   * Stalled and tells the dispatcher once (the recovery switch). Read live.
+   */
+  lostCheckIns?: 'warn' | 'on';
+  /**
    * w5985 (server/agentCensus.ts, placementCountOf): "on" makes placement count a machine's agents as capFull does (turns
    * sent and not yet reported included, standing agents too) and take the larger of that and its daemon's census while
    * the census is under 45 s old; "off" (unset) counts reported mid-turn sandbox sessions, as before (the recovery switch).

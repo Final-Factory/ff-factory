@@ -73,6 +73,9 @@ export const SETTABLE_KEYS = [
   // puts back "off".
   'placementAgentCount',
   'tmpWriteFence',
+  // w6768: a check-in nothing can deliver (server/agents.ts resumeLost): "on" (unset: its work resumes elsewhere with the
+  // check-in's note) or "warn" (Stalled and the dispatcher told only: the recovery switch); null puts back "on".
+  'lostCheckIns',
   // The privacy guards (w17, docs/privacy.md), the owner's only: true or false; null puts back the default (on for every
   // factory but Final Factory).
   'privacyGuards',
@@ -215,7 +218,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'ownerDeviceApproval', 'privacyGuards', 'machineLinkTailnet', 'agentAccount', 'movedAwayWorkers', 'placementAgentCount', 'tmpWriteFence']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'ownerDeviceApproval', 'privacyGuards', 'machineLinkTailnet', 'agentAccount', 'movedAwayWorkers', 'placementAgentCount', 'tmpWriteFence', 'lostCheckIns']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync', 'crash'];
@@ -647,6 +650,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (value === undefined || value === null) return undefined;
       if (value === 'on' || value === 'off') return value;
       throw new Error(`placementAgentCount is "on" (placement counts a machine's agents as its agent cap does, turns sent and not yet reported included, and takes the larger of that and its daemon's census while it is under 45 s old) or "off" (the default: reported mid-turn sandbox sessions, as before; the recovery switch); null puts back "off" (w5985)`);
+    }
+    case 'lostCheckIns': {
+      if (value === undefined || value === null) return undefined;
+      if (value === 'on' || value === 'warn') return value;
+      throw new Error('lostCheckIns is "on" (a request whose worker\'s check-in came due with nothing to deliver it resumes elsewhere with the check-in\'s note: moved off a computer away past the grace, or a fresh worker for a worker that is gone) or "warn" (Stalled and the dispatcher told only: the recovery switch); null puts back "on" (w6768)');
     }
     case 'tmpWriteFence': {
       if (value === undefined || value === null) return undefined;
@@ -1147,6 +1155,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'movedAwayWorkers') cfg.movedAwayWorkers = v as 'off' | 'warn' | 'on' | undefined;
   else if (key === 'placementAgentCount') cfg.placementAgentCount = v as 'off' | 'on' | undefined;
   else if (key === 'tmpWriteFence') cfg.tmpWriteFence = v as 'warn' | 'on' | undefined;
+  else if (key === 'lostCheckIns') cfg.lostCheckIns = v as 'warn' | 'on' | undefined;
   else if (key === 'privacyGuards') {
     if (v === undefined) delete cfg.privacyGuards;
     else cfg.privacyGuards = v as boolean;

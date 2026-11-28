@@ -41,7 +41,7 @@ import { statusLinesIn, stillOpenIn } from './ledgerRules.ts';
 import { inlineReviewMedia, MEDIA_FILE, outsideReview, publishedCopy, reviewRootOf } from './reviewMedia.ts';
 import { visualAskCheck } from './visualAsk.ts';
 import { ciPushHold } from './savePushHold.ts';
-import { lostLine, type LostCheckIn } from '../shared/lostCheckIn.ts';
+import { lostLine, lostStands, type LostCheckIn } from '../shared/lostCheckIn.ts';
 import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, offSince, onRequest, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
 import { isSamePerson, personForWork, poolOwnerOf, tokenPersonForWork, vaultContext, withPool } from './vault.ts';
 import { ghRunner, githubFromVault, githubPersonOf, githubTokens } from './githubTokens.ts';
@@ -4589,14 +4589,18 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       }
       const l: LostCheckIn = { worker: sessionId, due, note: wake.note.slice(0, 2000), why, seen: new Date(now).toISOString(), turns, ids: [...w.sessionIds] };
       const would = gone ? "start a fresh worker for it where it fits, with the check-in's note" : `move it to a computer with room with the check-in's note, as a stopped worker's work is moved off an away computer (w2544)`;
-      const line = `${lostLine(l)}: nothing resumes it (w6768); warn-only, so nothing moves yet: the automatic move would ${would}`;
+      const on = (this.cfg.lostCheckIns ?? 'on') === 'on';
+      const line = on ? `${lostLine(l)} (w6768): FF Factory will ${would} once it can` : `${lostLine(l)}: nothing resumes it (w6768); lostCheckIns is "warn", so nothing moves: "on" would ${would}`;
       console.warn(`lost check-in: ${w.id}: ${line}`);
       this.orchestrators.ledgerEdit(w.id, line, (x) => {
         x.lostCheckIn = l;
       });
       const how = gone ? 'start a worker for it with start_agent (an agent slot is enough unless its brief needs more)' : `stop_agent its worker ${sessionId} with move_to a computer with room`;
+      const act = on
+        ? `FF Factory ${gone ? 'starts a fresh worker for it' : 'moves it off that computer'} by itself, with the check-in's note, as soon as a computer has room (lostCheckIns "on"). Only if it still reads Stalled for this in 15 min, ${how}, passing its note: "${l.note.slice(0, 600) || '(none)'}".`
+        : `${how[0].toUpperCase()}${how.slice(1)}, passing its note: "${l.note.slice(0, 600) || '(none)'}".`;
       this.orchestrators.toDispatcher(
-        `[ledger] LOST CHECK-IN (w6768): ${w.id} "${w.title.slice(0, 80)}" (${names(w.requesters)}, ${w.priority}): ${lostLine(l)}, so nothing resumes it. ${how[0].toUpperCase()}${how.slice(1)}, passing its note: "${l.note.slice(0, 600) || '(none)'}". Said once.`,
+        `[ledger] LOST CHECK-IN (w6768): ${w.id} "${w.title.slice(0, 80)}" (${names(w.requesters)}, ${w.priority}): ${lostLine(l)}. ${act} Said once.`,
         w.requesters[0],
       );
       done.push(w.id);
@@ -4607,10 +4611,10 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   /** w6768: another worker on `w` than `lost` that is at work or comes back by itself (its own check-in, a job): "worker X ...". */
   private carrierOf(w: WorkItem, lost: string, now: number): string | undefined {
     for (const id of w.sessionIds) {
-      if (id === lost || !onRequest(w, id)) continue;
+      if (id === lost || !onRequest(w, id) || w.done?.[id]) continue;
       const s = this.store.sessions.get(id);
       if (!s) continue;
-      if (isMidTurn(s) || this.sessions.sessions.get(id)?.live) return `worker ${id} (at work)`;
+      if (isMidTurn(s)) return `worker ${id} (at work)`;
       if (this.waker.pending(id)) return `worker ${id} (its own check-in)`;
       const a = agentState(s, undefined, now);
       if ((a.state === 'between_turns' && a.kind !== 'queued') || a.resumes?.startsWith('check-in')) return `worker ${id} (${a.resumes ?? 'between turns'})`;
@@ -4637,7 +4641,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * started again whole. Returns true when a move started, a string when it waits as it is (the reason), undefined when
    * nothing applies.
    */
-  private moveAway(info: SessionInfo, a: { away: Away; line: string }, hold: string, q?: QueuedSend): true | string | undefined {
+  private moveAway(info: SessionInfo, a: { away: Away; line: string }, hold: string, q?: QueuedSend, texts?: string[]): true | string | undefined {
     if (this.roomMoving.has(info.id) || this.timedMoving.has(info.id)) return undefined;
     const m = info.machineId!.toLowerCase();
     const { reqs: all, owned, gone } = this.movableWorkOf(info);
@@ -4679,7 +4683,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       lost: info.placeReleased ? `its sandbox was released before ${m} went away, and its work saved and pushed then` : unpushedText(sb?.git && (!branch || sb.git.branch === branch) ? sb.git : undefined),
       timedLeg: reqs.some((w) => !!w.timedLeg),
     });
-    const entry = { to, texts: q ? [movedText(q)] : [], sends: q ? [q] : [], how: `moved by FF Factory: ${a.line} (w2544)`, lead, reason: `${a.line}, and ${to} has room (w2544)`, away: a.line };
+    const entry = { to, texts: q ? [movedText(q)] : (texts ?? []), sends: q ? [q] : [], how: `moved by FF Factory: ${a.line} (w2544)`, lead, reason: `${a.line}, and ${to} has room (w2544)`, away: a.line };
     this.roomMoving.set(info.id, entry);
     console.log(`away move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${ids}) moves to ${to}: ${a.line}; ${d.move.why}`);
     this.unmemoized(() => {
@@ -4697,9 +4701,14 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    */
   moveAwayWork(now = Date.now()): [string, string][] {
     const did: [string, string][] = [];
-    const workers = new Map<string, { info: SessionInfo; a: { away: Away; line: string } }>();
+    const workers = new Map<string, { info: SessionInfo; a: { away: Away; line: string }; texts?: string[] }>();
     for (const w of this.store.work.values()) {
       if (!isOpen(w)) continue;
+      if (w.lostCheckIn) {
+        const r = this.resumeLost(w, now);
+        if (r && 'move' in r && !workers.has(r.move.info.id)) workers.set(r.move.info.id, r.move);
+        else if (r && 'did' in r) did.push([w.id, r.did]);
+      }
       if (w.status === 'blocked') {
         for (const g of gatesOf(w)) {
           const sid = g.kind === 'machine' && g.ref ? gateSetter(g) : undefined;
@@ -4712,11 +4721,79 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       }
       if (w.status === 'queued') did.push(...this.unpinAwayNeeds(w, now));
     }
-    for (const { info, a } of workers.values()) {
+    for (const { info, a, texts } of workers.values()) {
       const ids = this.workIdsOf(info);
-      if (this.moveAway(info, a, a.line) === true) for (const id of ids) did.push([id, `moved off ${a.line} (w2544)`]);
+      if (this.moveAway(info, a, a.line, undefined, texts) === true) for (const id of ids) did.push([id, `moved off ${a.line} (w2544)`]);
     }
     return did;
+  }
+
+  /** w6768: requests whose fresh worker for a lost check-in is starting, and when a start last failed (tried again after 10 min). */
+  private readonly lostStarting = new Set<string>();
+  private readonly lostFailed = new Map<string, number>();
+
+  /**
+   * w6768, config lostCheckIns "on" (unset; "warn" is the recovery switch): request `w`, whose worker's own check-in came due with
+   * nothing to deliver it (WorkItem.lostCheckIn), resumes elsewhere with the check-in's note. A worker still known, stopped on a
+   * computer away past the grace, is moved as a stopped worker's work is (`move`, for moveAway, w2544: its sandbox's work saved,
+   * the check-in's note its message); a worker that is gone is replaced by a fresh worker where the work fits (startLost). A lost
+   * check-in that no longer stands (a turn since, a new worker) is cleared for good. Called each minute by moveAwayWork.
+   */
+  private resumeLost(w: WorkItem, now: number): { move: { info: SessionInfo; a: { away: Away; line: string }; texts: string[] } } | { did: string } | undefined {
+    const l = w.lostCheckIn!;
+    const workers = w.sessionIds.filter((id) => onRequest(w, id)).map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
+    if (!lostStands(w, workers)) {
+      const x = this.store.work.get(w.id);
+      if (x?.lostCheckIn === l) {
+        delete x.lostCheckIn;
+        this.store.putWork(x);
+      }
+      return undefined;
+    }
+    if ((this.cfg.lostCheckIns ?? 'on') !== 'on' || this.carrierOf(w, l.worker, now)) return undefined;
+    const info = this.store.sessions.get(l.worker);
+    if (info) {
+      if (info.kind !== 'worker' || !info.machineId || !info.machineSandbox || isMidTurn(info) || this.sessions.sessions.get(info.id)?.live) return undefined;
+      const a = this.longAwayOf(info.machineId, now);
+      if (!a) return undefined;
+      const text = `[wake_me, w6768] Your worker's check-in at ${l.due.slice(11, 16)}Z came due while its computer was ${a.line}, so FF Factory moved the work here. Its note: ${l.note || '(none)'}`;
+      return { move: { info, a, texts: [text] } };
+    }
+    const r = this.startLost(w, l, now);
+    return r ? { did: r } : undefined;
+  }
+
+  /**
+   * w6768: a fresh worker for request `w`, whose worker `l.worker` is gone (removed with a deleted sandbox: w6370's e41a69e8),
+   * on the computer placement picks for its work (its pin kept), started as a moved worker is (startMoved), its prompt leading
+   * with the lost check-in and its note. Returns what it did once a start began; undefined while it waits.
+   */
+  private startLost(w: WorkItem, l: LostCheckIn, now: number): string | undefined {
+    if (this.lostStarting.has(w.id) || now - (this.lostFailed.get(w.id) ?? -Infinity) < 10 * 60_000) return undefined;
+    const pin = this.pinOf(w);
+    const places = this.places().filter((p) => !pin?.ids?.length || namesMachine(pin.ids, p.id));
+    const kind: NeedKind = needsOf(w) === 'agent' ? 'agent' : 'game';
+    const pick = pickComputer(places, this.lastPlaced, forPriority(this.placement(), w.priority), kind);
+    if (!pick) {
+      this.lostFailed.set(w.id, now);
+      console.log(`lost check-in: ${w.id}: ${lostLine(l)}; no computer has room for a fresh worker now, tried again in 10 min (w6768)`);
+      return undefined;
+    }
+    const to = pick.pick.id;
+    const ghost: SessionInfo = { id: l.worker, kind: 'worker', title: `${w.id}: ${w.title}`.slice(0, 120), status: 'stopped', permissionMode: this.cfg.worker.permissionMode, createdAt: l.seen, lastActivityAt: l.seen, turns: 0, costUsd: 0, pendingPermissions: [], machineId: '(removed)', machineSandbox: '(removed)', requestedBy: w.requestedBy };
+    const why = `${lostLine(l)}, so nothing could deliver it`;
+    const lead = `[lost check-in, w6768] FF Factory started you for ${w.id}: ${why}. Its note: "${l.note || '(none)'}". That worker no longer exists: carry ${w.id} on from its request, its log and its pull requests (their branches hold its pushed work).`;
+    const hb: HandBack = { machine: '(removed)', why, note: `the check-in's note: ${l.note.slice(0, 400)}`, how: 'started by FF Factory: its worker was gone at its check-in (w6768)', to };
+    this.lostStarting.add(w.id);
+    console.log(`lost check-in: ${w.id}: ${lostLine(l)}: a fresh worker starts on ${to} (${pick.why}) (w6768)`);
+    void this.startMoved(ghost, w, to, pick.why, why, undefined, lead, hb)
+      .then((at) => this.orchestrators.noteMove(w.id, `${lostLine(l)}: started a fresh worker in ${at} with the check-in's note (w6768)`))
+      .catch((e) => {
+        this.lostFailed.set(w.id, Date.now());
+        console.warn(`lost check-in: ${w.id}: the fresh worker on ${to} did not start: ${(e as Error).message}; tried again in 10 min (w6768)`);
+      })
+      .finally(() => this.lostStarting.delete(w.id));
+    return `a fresh worker starts on ${to} for its lost check-in (w6768)`;
   }
 
   /** A Queued request's waits for computers that have all been away past the grace (w2544): dropped, unless it names one. */
