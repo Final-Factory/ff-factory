@@ -17,6 +17,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { gitExecFile } from '../server/safeGit.ts';
+import { execFileOffThread } from '../server/spawnThread.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -168,8 +169,9 @@ export async function processCommand(pid: number, platform: NodeJS.Platform = pr
     const o = { timeout: 15_000, windowsHide: true };
     const out = await new Promise<string | undefined>((resolve) => {
       const done = (e: Error | null, out: string) => resolve(e ? undefined : String(out).trim());
-      if (platform === 'win32') execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter 'ProcessId=${Math.trunc(pid)}').CommandLine`], o, done);
-      else execFile('ps', ['-o', 'command=', '-p', String(Math.trunc(pid))], o, done);
+      // w6784: off the loop's thread, and one probe guard kind for every pid (a WMI hang leaves each one stuck).
+      if (platform === 'win32') execFileOffThread('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter 'ProcessId=${Math.trunc(pid)}').CommandLine`], { ...o, probe: 'job process command line' }, done);
+      else execFileOffThread('ps', ['-o', 'command=', '-p', String(Math.trunc(pid))], { ...o, probe: 'job process command line' }, done);
     });
     return out || undefined;
   } catch {

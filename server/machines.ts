@@ -2194,9 +2194,11 @@ export class MachineManager {
       this.update(m.id, { daemonStopped: undefined });
       return `${m.id}: restarted over its daemon's link (its supervisor starts it again${keeps ? '; its agents run on and the new daemon takes them back' : ''}).`;
     }
-    const { controlDaemon } = await import('./machineDeploy.ts');
+    const { controlDaemon, TASK_ALREADY_RUNNING } = await import('./machineDeploy.ts');
     const done = await controlDaemon(m.host, m.platform, action, m.appDir, !!m.local);
     this.update(m.id, { daemonStopped: action === 'stop' ? true : undefined });
+    // w6784: BEAST's start at 2026-11-28 08:20Z answered "started" while its supervisor waited on a daemon stuck mid-exit.
+    if (done.includes(TASK_ALREADY_RUNNING) && !this.canLink(m.id)) return `${m.id}: ${done}, and no daemon of it is connected: its supervisor or its daemon is stuck (a daemon stuck mid-exit is logged in its logs\\supervisor.log; docs/machines.md, "A daemon stuck mid-exit").`;
     return `${m.id}: ${done}.`;
   }
 

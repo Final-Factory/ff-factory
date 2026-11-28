@@ -140,7 +140,7 @@ export async function processStartTimes(pids: number[], platform: NodeJS.Platfor
           "-Command",
           `@(Get-CimInstance Win32_Process -Filter "${ok.map((p) => `ProcessId=${p}`).join(" OR ")}" -Property ProcessId,CreationDate) | ` +
             `Where-Object { $_.CreationDate } | ForEach-Object { '{0} {1}' -f $_.ProcessId, ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }`,
-        ], { timeoutMs: 30_000 })
+        ], { timeoutMs: 30_000, probe: "player start times" })
       : await run("ps", ["-o", "pid=,lstart=", "-p", ok.join(",")], { env: { ...process.env, LC_ALL: "C" }, timeoutMs: 30_000 });
   for (const line of r.stdout.split(/\r?\n/)) {
     const m = /^\s*(\d+)\s+(.+?)\s*$/.exec(line);

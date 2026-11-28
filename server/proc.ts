@@ -25,6 +25,8 @@ export interface RunOptions {
   env?: NodeJS.ProcessEnv;
   /** Aborting kills the child; the result then has a non-zero code. */
   signal?: AbortSignal;
+  /** w6784: the probe guard's kind for a timed run (server/probeGuard.ts); default: its program, arguments and folder. */
+  probe?: string;
 }
 
 export async function run(cmd: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
@@ -35,7 +37,7 @@ export async function run(cmd: string, args: string[], opts: RunOptions = {}): P
     execFileOffThread(
       cmd,
       f.args,
-      { cwd: opts.cwd, timeout: opts.timeoutMs ?? 0, maxBuffer: 64 * 1024 * 1024, env: f.env, windowsHide: true, signal: opts.signal },
+      { cwd: opts.cwd, timeout: opts.timeoutMs ?? 0, maxBuffer: 64 * 1024 * 1024, env: f.env, windowsHide: true, signal: opts.signal, ...(opts.probe ? { probe: opts.probe } : {}) },
       (err, stdout, stderr) => {
         // err.code is the exit status for a program that ran, or a string like ENOENT when it could not start.
         const raw = (err as { code?: unknown } | null)?.code;

@@ -1,4 +1,5 @@
 import { Worker } from 'node:worker_threads';
+import { type ProbeTicket, probeBegin } from './probeGuard.ts';
 import type { RunResult } from './proc.ts';
 
 /**
@@ -36,6 +37,8 @@ parentPort.on('message', ({ id, cmd, args, timeoutMs, cwd, env, maxBuffer }) => 
 let worker: Worker | undefined;
 let nextId = 0;
 const pending = new Map<number, (r: RunResult) => void>();
+/** w6784: each probe's guard ticket, by id, until its answer comes from the thread (late too: it exited after all). */
+const tickets = new Map<number, ProbeTicket>();
 
 /** The thread keeps the process alive only while a probe waits on it: a portal or test that is done exits. */
 function idle() {
@@ -46,6 +49,8 @@ function probeWorker(): Worker {
   if (worker) return worker;
   const w = new Worker(WORKER_SOURCE, { eval: true });
   w.on('message', (m: RunResult & { id: number }) => {
+    tickets.get(m.id)?.done();
+    tickets.delete(m.id);
     const done = pending.get(m.id);
     pending.delete(m.id);
     idle();
@@ -54,6 +59,8 @@ function probeWorker(): Worker {
   });
   const lost = (why: string) => {
     if (worker === w) worker = undefined;
+    for (const t of tickets.values()) t.done();
+    tickets.clear();
     for (const [id, done] of pending) {
       pending.delete(id);
       done({ code: -1, stdout: '', stderr: `host probe thread ${why}` });
@@ -70,6 +77,8 @@ export interface OffThreadOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   maxBuffer?: number;
+  /** w6784: the probe guard's kind (server/probeGuard.ts); default: its program, arguments and folder. */
+  probe?: string;
 }
 
 /**
@@ -78,7 +87,13 @@ export interface OffThreadOptions {
  */
 export function runOffThread(cmd: string, args: string[], timeoutMs: number, opts: OffThreadOptions = {}): Promise<RunResult> {
   return new Promise((resolve) => {
+    const guard = probeBegin({ cmd, args, cwd: opts.cwd, timeoutMs, probe: opts.probe });
+    if (guard.refused !== undefined) {
+      resolve({ code: -1, stdout: '', stderr: `${cmd}: ${guard.refused}`, timedOut: true });
+      return;
+    }
     const id = nextId++;
+    tickets.set(id, guard.ticket);
     const timer = setTimeout(() => {
       pending.delete(id);
       idle();

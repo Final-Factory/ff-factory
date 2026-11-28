@@ -6,7 +6,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
 import * as win from './machineDeployWin.ts';
-import { bundle, daemonConfig, macControlScript, parseWinProbe, pickRepo, platformOfUname, probeSlug } from './machineDeploy.ts';
+import { bundle, daemonConfig, macControlScript, parseWinProbe, pickRepo, platformOfUname, probeSlug, TASK_ALREADY_RUNNING, winControlAnswer } from './machineDeploy.ts';
 import { SSH_REACHABLE_ARGS, daemonLogPath, machineForPath } from './machines.ts';
 import { checkShell } from './guard.ts';
 import { DAEMON_YIELD_EXIT, keepAwakeCommand } from '../machine/daemon.ts';
@@ -14,6 +14,7 @@ import { editorBinary, editorLogPath, editorTree, editorsFor, parseWinProcs, rep
 import { ROOT } from './config.ts';
 import { powershell } from './testPowershell.ts';
 import { listArchives, maintainLogs } from '../machine/logRetention.ts';
+import { DAEMON_ENDING_MARKER } from '../machine/freezeWatch.ts';
 import { tmpDir } from './testTmp.ts';
 
 // Windows machines (docs/machines.md, "Windows machines"): the scripts the portal sends over ssh, the platform
@@ -162,6 +163,71 @@ test('windows: the supervisor finds its own folder, passes the config, restarts 
   assert.match(s, /Move-Item -LiteralPath \$p -Destination \$to/);
   // w1918: a daemon that ended for a newer one of its machine (DAEMON_YIELD_EXIT) is not started again.
   assert.match(s, new RegExp(`if \\(\\$proc\\.ExitCode -eq ${DAEMON_YIELD_EXIT}\\) \\{[^}]*; break \\}`));
+});
+
+// w6784: BEAST's daemon was stuck mid-exit for hours after the freeze watch's SIGKILL (2026-11-28 07:41Z) while run-daemon.ps1
+// sat in a bare $proc.WaitForExit() and logged nothing. The wait is now in steps and says when a daemon that wrote its ending
+// marker has not exited $stuckAfter s later (warn only).
+test('windows: the supervisor waits in steps, removes a stale ending marker, and logs a daemon stuck mid-exit (w6784)', () => {
+  const s = win.supervisorScript('C:\\nodejs\\node.exe', false);
+  assert.doesNotMatch(s, /\$proc\.WaitForExit\(\)/, 'no unbounded wait');
+  assert.match(s, /while \(-not \$proc\.WaitForExit\(\$waitStepMs\)\)/);
+  assert.match(s, new RegExp(`\\$marker = Join-Path \\$logs '${DAEMON_ENDING_MARKER.replace('.', '\\.')}'`));
+  assert.match(s, new RegExp(`\\$stuckAfter = ${win.SUPERVISOR_STUCK_AFTER_S}\\n`));
+  const removed = s.indexOf('Remove-Item -LiteralPath $marker');
+  assert.ok(removed > 0 && removed < s.indexOf('$proc = Start-Process'), "a marker of the last run is gone before the next starts");
+  assert.ok(s.indexOf('while (-not $proc.WaitForExit') < s.indexOf('if ($proc.ExitCode -eq'), 'the exit code is read once it exited');
+});
+
+// w6784: BEAST's machine_daemon start at 2026-11-28 08:20Z answered "started" and changed nothing: the task was already
+// running (one instance), its supervisor waiting on a daemon stuck mid-exit.
+test('windows: a start reads the task\'s state and the supervisor\'s last daemon first, and says when the task was already running (w6784)', () => {
+  const s = win.controlScript('start');
+  const state = s.indexOf("'state=' + (Get-ScheduledTask -TaskName 'FFFactoryDaemon'");
+  assert.ok(state > 0 && state < s.indexOf('Start-FFDaemon;'), 'before the start');
+  assert.match(s, /Select-String 'started the daemon, pid \(\\d\+\)'/, 'the line run-daemon.ps1 writes');
+  assert.match(win.supervisorScript('C:\\n\\node.exe', false), /"\$\(Get-Date -Format s\) started the daemon, pid \$\(\$proc\.Id\)"/);
+  assert.doesNotMatch(win.controlScript('restart'), /state=/, 'a restart stopped it first');
+  assert.equal(winControlAnswer('state=Ready\nstarted=True\n'), 'started the FFFactoryDaemon task');
+  assert.equal(winControlAnswer('state=Running\r\ndaemonPid=16100 alive=True\r\nstarted=True\r\n'), `the FFFactoryDaemon task ${TASK_ALREADY_RUNNING}; its supervisor's last daemon is pid 16100, still running`);
+  assert.equal(winControlAnswer('state=Running\nstarted=True\n'), `the FFFactoryDaemon task ${TASK_ALREADY_RUNNING}`);
+  assert.equal(winControlAnswer('state=\nstarted=False\n'), 'nobody is logged on there, so the daemon starts at the next logon');
+  assert.equal(winControlAnswer('stopped=2\nstarted=True\n'), 'stopped the FFFactoryDaemon task (2 process(es) ended; Unity editors left running); started the FFFactoryDaemon task');
+  assert.ok(/^[\x00-\x7F]*$/.test(s), 'pure ASCII (psq)');
+});
+
+test('windows (real PowerShell): the supervisor\'s stepped wait logs a daemon whose marker says it ends, once, and waits for its exit (w6784)', { skip: !powershell && 'no PowerShell here' }, () => {
+  const s = win.supervisorScript('C:\\nodejs\\node.exe', false);
+  const block = /    # w6784: wait in steps[\s\S]*?\n(?=    # 75 \(machine\/daemon\.ts)/.exec(s)?.[0];
+  assert.ok(block, 'the wait block of supervisorScript');
+  const dir = tmpDir('ffsup-wait-');
+  const sleeper = path.join(dir, 'daemon.js');
+  fs.writeFileSync(sleeper, 'setTimeout(() => {}, 3000);\n');
+  const runBlock = (pidExpr: string) => {
+    const log = path.join(dir, `supervisor-${pidExpr === '$proc.Id' ? 'own' : 'other'}.log`);
+    const script = [
+      `$log = $env:FFLOG; $marker = Join-Path $env:FFDIR 'daemon-ending.json'; $stuckAfter = 1; $waitStepMs = 200`,
+      `$proc = Start-Process -FilePath $env:FFNODE -ArgumentList ('"' + $env:FFSLEEPER + '"') -PassThru`,
+      `$null = $proc.Handle`,
+      `Set-Content -LiteralPath $marker -Value ('{"pid":' + (${pidExpr}) + ',"at":"2026-11-28T07:41:25Z","why":"freeze watch: SIGKILL after a 181 s freeze"}')`,
+      block,
+      `"exited $($proc.HasExited)"`,
+    ].join('\n');
+    const t0 = Date.now();
+    const out = execFileSync(powershell!, ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, FFLOG: log, FFDIR: dir, FFNODE: process.execPath, FFSLEEPER: sleeper }, encoding: 'utf8' }).trim();
+    return { out, took: Date.now() - t0, log: fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '' };
+  };
+  const own = runBlock('$proc.Id');
+  assert.match(own.out, /exited True$/);
+  assert.ok(own.took >= 2500, `it waited for the exit: ${own.took} ms`);
+  const lines = own.log.trim().split(/\r?\n/);
+  assert.equal(lines.length, 2, own.log);
+  assert.match(lines[0], /the daemon, pid \d+, said it ends \(freeze watch: SIGKILL after a 181 s freeze\) \d+ s ago and has still not exited: it is stuck mid-exit; this supervisor goes on waiting for it \(w6784, warn only\)$/);
+  assert.match(lines[1], /the daemon, pid \d+, has exited after all$/);
+  // A marker another pid wrote (an earlier run's) says nothing.
+  const other = runBlock('$proc.Id + 1');
+  assert.match(other.out, /exited True$/);
+  assert.equal(other.log, '');
 });
 
 test('windows: the probe output is parsed (CRLF too), and the shortest clone wins unless one was given', () => {

@@ -589,6 +589,24 @@ export function macControlScript(action: DaemonAction | 'uninstall', label = LAB
   }
 }
 
+/** w6784: what a start said when its task was already running (Task Scheduler runs one instance, so it changed nothing). */
+export const TASK_ALREADY_RUNNING = 'was already running, so this start changed nothing';
+
+/** The Windows control script's answer (win.controlScript), in a few words. */
+export function winControlAnswer(out: string): string {
+  const stopped = /stopped=(\d+)/.exec(out)?.[1];
+  const started = /started=(True|False)/.exec(out)?.[1];
+  const running = /^state=Running\s*$/m.test(out);
+  const d = /daemonPid=(\d+) alive=(True|False)/.exec(out);
+  const daemon = d ? `; its supervisor's last daemon is pid ${d[1]}, ${d[2] === 'True' ? 'still running' : 'gone'}` : '';
+  return [
+    stopped !== undefined ? `stopped the ${win.TASK_NAME} task (${stopped} process(es) ended; Unity editors left running)` : '',
+    started === 'True' ? (running ? `the ${win.TASK_NAME} task ${TASK_ALREADY_RUNNING}${daemon}` : `started the ${win.TASK_NAME} task`) : started === 'False' ? 'nobody is logged on there, so the daemon starts at the next logon' : '',
+  ]
+    .filter(Boolean)
+    .join('; ');
+}
+
 /**
  * Start, stop or restart the daemon on a machine. A stopped Mac daemon loads again at the next login, a
  * Windows one starts again at the next logon. Returns what happened, in a few words.
@@ -597,14 +615,7 @@ export async function controlDaemon(host: string, platform: MachinePlatform | un
   const pf = local ? 'win32' : (platform ?? (await detectPlatform(host)));
   if (pf === 'win32') {
     const out = await mustPs(local ? win.LOCAL : host, `daemon ${action}`, win.controlScript(action, appDir), { timeoutMs: 2 * 60_000 });
-    const stopped = /stopped=(\d+)/.exec(out)?.[1];
-    const started = /started=(True|False)/.exec(out)?.[1];
-    return [
-      stopped !== undefined ? `stopped the ${win.TASK_NAME} task (${stopped} process(es) ended; Unity editors left running)` : '',
-      started === 'True' ? `started the ${win.TASK_NAME} task` : started === 'False' ? 'nobody is logged on there, so the daemon starts at the next logon' : '',
-    ]
-      .filter(Boolean)
-      .join('; ');
+    return winControlAnswer(out);
   }
   if (pf === 'linux') {
     await must(host, `daemon ${action}`, linuxControlScript(action, LABEL, appDir), 60_000);

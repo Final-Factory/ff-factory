@@ -52,7 +52,7 @@ const WORKER_SOURCE = `
 const { workerData } = require('node:worker_threads');
 const fs = require('node:fs');
 const beat = new BigInt64Array(workerData.sab);
-const { afterMs, repeatMs, exitMs, everyMs, beatMs, fd, who } = workerData;
+const { afterMs, repeatMs, exitMs, everyMs, beatMs, fd, who, markerFile } = workerData;
 const out = (line) => {
   try { fs.writeSync(fd, new Date().toISOString() + ' ' + line + '\\n'); } catch {}
 };
@@ -78,7 +78,19 @@ const end = () => {
   const gap = frozenFor(Date.now());
   if (gap < afterMs) { out('event loop: came free before it was ended (' + Math.round(gap / 1000) + ' s since its beat or a wake): ' + who + ' goes on (w6555)'); return; }
   out('event loop: ending ' + who + ' now (SIGKILL); its supervisor starts a fresh one (w6555)');
+  // w6784: the supervisor reads this to tell a process stuck mid-exit (BEAST, 2026-11-28 07:41Z: still there hours after
+  // this kill) from one still at work; written before the kill, as nothing runs after it.
+  if (markerFile) {
+    try { fs.writeFileSync(markerFile, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), why: 'freeze watch: SIGKILL after a ' + Math.round(gap / 1000) + ' s freeze' })); } catch (e) { out('event loop: could not write ' + markerFile + ': ' + ((e && e.message) || e)); }
+  }
+  const killedAt = Date.now();
   try { process.kill(process.pid, 'SIGKILL'); } catch (e) { out('event loop: could not end ' + who + ': ' + ((e && e.message) || e)); }
+  // w6784: a kill that worked runs nothing more here. Still running: say so (the supervisor's own bounded wait acts on it).
+  const still = setInterval(() => {
+    out('event loop: ' + who + ' (pid ' + process.pid + ') is still running ' + Math.round((Date.now() - killedAt) / 1000) + ' s after its SIGKILL; trying it again (w6784)');
+    try { process.kill(process.pid, 'SIGKILL'); } catch {}
+  }, 10000);
+  still.unref?.();
 };
 const drop = (s) => {
   try { s.disconnect(); } catch {}
@@ -158,7 +170,7 @@ export interface FreezeWatch {
  * only log). `fd`: where its lines go (default 1, the daemon's stdout);
  * `beatMs`/`everyMs`: how often the main loop beats and the thread looks (1 s; a test's shorter).
  */
-export function startFreezeWatch(o: { afterMs: number; repeatMs: number; exitMs?: number; fd?: number; beatMs?: number; everyMs?: number; who?: string; onError?: (e: Error) => void }): FreezeWatch {
+export function startFreezeWatch(o: { afterMs: number; repeatMs: number; exitMs?: number; fd?: number; beatMs?: number; everyMs?: number; who?: string; markerFile?: string; onError?: (e: Error) => void }): FreezeWatch {
   const sab = new SharedArrayBuffer(8);
   const beat = new BigInt64Array(sab);
   const tick = () => void Atomics.store(beat, 0, BigInt(Date.now()));
@@ -167,7 +179,7 @@ export function startFreezeWatch(o: { afterMs: number; repeatMs: number; exitMs?
   timer.unref();
   const w = new Worker(WORKER_SOURCE, {
     eval: true,
-    workerData: { sab, afterMs: o.afterMs, repeatMs: o.repeatMs, exitMs: o.exitMs ?? 0, everyMs: o.everyMs ?? 1000, beatMs: o.beatMs ?? 1000, fd: o.fd ?? 1, who: o.who ?? 'the daemon' },
+    workerData: { sab, afterMs: o.afterMs, repeatMs: o.repeatMs, exitMs: o.exitMs ?? 0, everyMs: o.everyMs ?? 1000, beatMs: o.beatMs ?? 1000, fd: o.fd ?? 1, who: o.who ?? 'the daemon', markerFile: o.markerFile ?? '' },
     // Its own small heap: a thread that only reads a clock and writes a line.
     resourceLimits: { maxOldGenerationSizeMb: 16, maxYoungGenerationSizeMb: 4 },
   });
@@ -181,3 +193,10 @@ export function startFreezeWatch(o: { afterMs: number; repeatMs: number; exitMs?
     },
   };
 }
+
+/**
+ * w6784: the file in the daemon logs folder written just before the freeze watch ends the process, and at every exit:
+ * {pid, at, why}. run-daemon.ps1 (server/machineDeployWin.ts supervisorScript) reads it to tell a daemon stuck mid-exit
+ * from one at work.
+ */
+export const DAEMON_ENDING_MARKER = 'daemon-ending.json';
