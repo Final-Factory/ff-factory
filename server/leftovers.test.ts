@@ -4,7 +4,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LEFTOVER, LeftoverReaper, forPerson, personStarted, launchForPerson, personEnv, waitLoop, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, personGames, readEnvs, readLeases, realInspect, sameRoot, sessionVerdict, sessionTempRoot, msysParents, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
+import { LEFTOVER, LeftoverReaper, forPerson, personStarted, launchForPerson, personEnv, waitLoop, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, personGames, pathlessGame, confirmPersons, readEnvs, readLeases, realInspect, sameRoot, sessionVerdict, sessionTempRoot, msysParents, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
 import { realDeps as realUnityDeps, type Proc, type UnityPlatform } from '../machine/unity.ts';
 import { playerText, unitySlotsLine } from '../shared/fleet.ts';
 import { tmpDir } from './testTmp.ts';
@@ -34,7 +34,7 @@ interface Session {
 }
 
 /** A fake machine: processes with their environments, start times and CPU, sessions, leases and a clock. */
-function machine(procs: (Proc & { env?: ProcEnv; born?: number; cpu?: number })[], o: { platform?: UnityPlatform; sessions?: Record<string, Session>; leases?: PlayerLease[]; ready?: boolean; known?: string[]; personPlay?: boolean; root?: string } = {}) {
+function machine(procs: (Proc & { env?: ProcEnv; born?: number; cpu?: number })[], o: { platform?: UnityPlatform; sessions?: Record<string, Session>; leases?: PlayerLease[]; ready?: boolean; known?: string[]; personPlay?: boolean; root?: string; slotRoots?: string[]; tempRoot?: string } = {}) {
   const t0 = 1_000 * HOUR;
   for (const p of procs) p.born ??= t0 - 30 * HOUR;
   const st = {
@@ -62,8 +62,8 @@ function machine(procs: (Proc & { env?: ProcEnv; born?: number; cpu?: number })[
     hostSince: (id) => st.sessions[id]?.hostSince,
     liveSandboxes: () => new Set(Object.values(st.sessions).filter((s) => s.live && s.sandbox).map((s) => s.sandbox!)),
     ready: () => st.ready,
-    slotRoots: () => [PLAYERS],
-    tempRoot: () => TMP,
+    slotRoots: () => o.slotRoots ?? [PLAYERS],
+    tempRoot: () => o.tempRoot ?? TMP,
     leases: () => st.leases,
     protectedPaths: () => [`${ROOT}/repo`, `${ROOT}/daemon`],
     places: () => [1, 2, 3].map((k) => ({ id: `slot${k}`, path: `${ROOT}/sandboxes/slot${k}` })),
@@ -706,6 +706,9 @@ test("w1894: a game no worker started is a person's (Steam's); a worker's never 
   const leases: PlayerLease[] = [{ slot: 'slot2-0', pid: 501, host: 'biscuit', session: 'cccc3333', sandbox: `${ROOT}/sandboxes/slot2` }];
   const on = machine(procs(), { personPlay: true, leases, sessions: { aaaa1111: { live: true }, cccc3333: { live: true } } });
   await on.look(0);
+  // w6737: one look is not enough (a dying agent's game, the first look after a start); the next look, a minute on, counts it.
+  assert.deepEqual(on.reaper.report().persons, []);
+  await on.look(1);
   assert.deepEqual(on.reaper.report().persons, [4242]);
   // w2994: a slot player with no lease of its own is the pool's, judged as an orphan exactly as with the look off.
   assert.equal(on.reaper.report().players.find((p) => p.pid === 4343)?.owner, 'orphan');
@@ -773,6 +776,110 @@ test("w2994: a person's own game (Steam's, or the main clone's build) with no wo
     { pid: 4343, ppid: 9212, cmd: `${PLAYERS}/slot1-0/player/finalfactory.x86_64 -screen-fullscreen 0` },
   ];
   assert.deepEqual(personGames(linux, [], new Map(), { platform: 'linux', self: new Set([100]), places: [], tempRoot: TMP, slotRoots: [PLAYERS] }), [4242]);
+});
+
+// ---------------------------------------------------------------- w6737: LothDesktop's two false holds of 2026-11-28
+
+// 05:57:51Z: w6684's player (pid 53744), launched 05:30Z by `player_slots.py launch` from V:\ffw\players\slot1-0 (its lease
+// names the game's pid), flagged while ff-leftovers end was ending it, right after a daemon restart (85adf15 -> 50ee613).
+// 06:10:00Z: the players broker's player for worker ee512015 (pid 100716), started 06:09:37Z, gone by 06:10:52Z. Both were
+// under the slot root, which personGames drops by path; an exiting process is listed by Win32_Process with its name and
+// no command line, so the path, its slot and its lease (matched by slot) were all lost, and nothing else tied it to a worker.
+const W6737 = {
+  daemon: { pid: 100, ppid: 9212, cmd: String.raw`"C:\Program Files\nodejs\node.exe" D:\work\ffw\daemon\app\machine\daemon.ts`, name: 'node.exe' },
+  w6684: { pid: 53744, ppid: 61200, cmd: String.raw`"V:\ffw\players\slot1-0\player\finalfactory.exe" -ffSoloQuitAfterSeconds 3600 -logFile V:\ffw\tmp\ffa-af39aa7c\p.log`, name: 'finalfactory.exe' },
+  broker: { pid: 100716, ppid: 100, cmd: String.raw`V:\ffw\players\slot3-0\player\finalfactory.exe -ffAutomationRole solo`, name: 'finalfactory.exe' },
+  steamGame: { pid: 5100, ppid: 5000, cmd: String.raw`"C:\Program Files (x86)\Steam\steamapps\common\Final Factory\FinalFactory.exe"`, name: 'FinalFactory.exe' },
+};
+const dying = <T extends { cmd: string }>(p: T): T => ({ ...p, cmd: '' });
+const W6737_LEASES: PlayerLease[] = [
+  { slot: 'slot1-0', pid: 53744, host: 'biscuit', session: 'af39aa7c', sandbox: 'V:/ffw/sandboxes/slot1' },
+  { slot: 'slot3-0', pid: 100716, host: 'biscuit', session: 'ee512015', sandbox: 'V:/ffw/sandboxes/slot3', broker: true } as PlayerLease,
+];
+const w6737O = (extra: Partial<Parameters<typeof personGames>[3]> = {}) => ({ platform: 'win32' as const, self: new Set<number>([100]), places: ['V:/ffw/sandboxes/slot1', 'V:/ffw/sandboxes/slot3'], tempRoot: 'V:/ffw/tmp', slotRoots: [String.raw`V:\ffw\players`], ...extra });
+
+test("w6737: both of LothDesktop's flagged command lines are slot players, never a person's, by path in any case and by their own lease", () => {
+  const procs = Object.values(W6737);
+  assert.deepEqual(personGames(procs, [], new Map(), w6737O()), [5100], "only Steam's game");
+  assert.equal(slotOf(W6737.w6684.cmd, [String.raw`V:\ffw\players`], 'win32'), 'slot1-0');
+  assert.equal(slotOf(W6737.broker.cmd, ['v:/FFW/Players/'], 'win32'), 'slot3-0');
+  assert.deepEqual(personGames(procs, [], new Map(), w6737O({ slotRoots: ['v:/FFW/Players'] })), [5100], 'drive and path case do not matter');
+  // Exiting (no command line): no path, no slot. Its own lease, or an earlier look that knew it, still says it is a worker's.
+  const exiting = [W6737.daemon, dying(W6737.w6684), dying(W6737.broker), W6737.steamGame];
+  assert.deepEqual(personGames(exiting, [], new Map(), w6737O()).sort((a, b) => a - b), [5100, 53744, 100716], 'what the incident looks saw');
+  assert.deepEqual(personGames(exiting, [], new Map(), w6737O({ leasePids: new Set([53744, 100716]) })), [5100]);
+  assert.deepEqual(personGames(exiting, [], new Map(), w6737O({ known: new Set([53744, 100716]) })), [5100]);
+  assert.ok(pathlessGame(dying(W6737.w6684), 'win32') && !pathlessGame(W6737.w6684, 'win32') && !pathlessGame(W6737.broker, 'win32'));
+});
+
+test('w6737: confirmPersons counts a game on its second look in a row, a pathless one on its third, and starts again when it is gone', () => {
+  let looks = new Map<number, number>();
+  const step = (raw: number[], pathless: number[] = []) => {
+    const c = confirmPersons(raw, looks, new Set(pathless));
+    looks = c.looks;
+    return c.persons;
+  };
+  assert.deepEqual(step([5100, 53744], [53744]), []);
+  assert.deepEqual(step([5100, 53744], [53744]), [5100]);
+  assert.deepEqual(step([5100, 53744], [53744]), [5100, 53744]);
+  assert.deepEqual(step([]), []);
+  assert.deepEqual(step([5100]), [], 'a game seen again after a look without it starts at one');
+});
+
+test("w6737: the daemon's look never holds the machine for an agent's exiting slot player, on a fresh start or later, and still finds a person's game", async () => {
+  const opts = { platform: 'win32' as const, personPlay: true, slotRoots: [String.raw`V:\ffw\players`], tempRoot: 'V:/ffw/tmp', sessions: { af39aa7c: { live: true }, ee512015: { live: true } } };
+  // Fresh start (the 05:57:51Z look): the first look sees w6684's player exiting, its lease file already gone.
+  const fresh = machine([SYSTEMD, W6737.daemon, dying(W6737.w6684)], opts);
+  await fresh.look(0);
+  assert.deepEqual(fresh.reaper.report().persons, [], 'nothing is held on the first look after a start');
+  fresh.st.procs = fresh.st.procs.filter((p) => p.pid !== 53744);
+  await fresh.look(1);
+  assert.deepEqual(fresh.reaper.report().persons, []);
+  // Fresh start, the exiting player still holding its lease (the broker's at 06:10:00Z): never, on any look.
+  const leased = machine([SYSTEMD, W6737.daemon, dying(W6737.broker)], { ...opts, leases: W6737_LEASES });
+  for (let i = 0; i < 4; i++) {
+    await leased.look(i ? 1 : 0);
+    assert.deepEqual(leased.reaper.report().persons, [], `look ${i + 1}`);
+  }
+  // A running daemon: the players are seen whole, then exit without a command line or a lease: still a worker's.
+  const run = machine([SYSTEMD, W6737.daemon, { ...W6737.w6684 }, { ...W6737.broker }], { ...opts, leases: W6737_LEASES });
+  await run.look(0);
+  await run.look(1);
+  assert.deepEqual(run.reaper.report().persons, []);
+  run.st.procs = [SYSTEMD, W6737.daemon, dying(W6737.w6684), dying(W6737.broker)];
+  run.st.leases = [];
+  for (let i = 0; i < 4; i++) {
+    await run.look(1);
+    assert.deepEqual(run.reaper.report().persons, [], `exiting look ${i + 1}`);
+  }
+  // A person's game beside them is still found, on its second look; one listed with no command line, on its third.
+  const person = machine([SYSTEMD, W6737.daemon, { ...W6737.w6684 }, { ...W6737.steamGame }, { pid: 5300, ppid: 5000, cmd: '', name: 'FinalFactory.exe' }], { ...opts, leases: W6737_LEASES });
+  await person.look(0);
+  assert.deepEqual(person.reaper.report().persons, []);
+  await person.look(1);
+  assert.deepEqual(person.reaper.report().persons, [5100]);
+  await person.look(1);
+  assert.deepEqual(person.reaper.report().persons.sort((a, b) => a - b), [5100, 5300]);
+  assert.ok(person.alive(5100) && person.alive(5300), "a person's game is never ended");
+});
+
+test("w6737 (w6745's review): a lease left behind, or a remembered pid Windows gives to a person's game, never hides that game", async () => {
+  const opts = { platform: 'win32' as const, personPlay: true, slotRoots: [String.raw`V:\ffw\players`], tempRoot: 'V:/ffw/tmp', sessions: { af39aa7c: { live: true } } };
+  // A dead player's lease still names pid 5100 (BEAST kept such leases for 6-9 h); a person's Steam game now runs as 5100.
+  const stale: PlayerLease[] = [{ slot: 'slot1-0', pid: 5100, host: 'biscuit', session: 'af39aa7c', sandbox: 'V:/ffw/sandboxes/slot1' }];
+  assert.deepEqual(personGames([W6737.daemon, W6737.steamGame], [], new Map(), w6737O({ leasePids: new Set([5100]), known: new Set([5100]) })), [5100], 'a path that reads is judged by its path');
+  const lease = machine([SYSTEMD, W6737.daemon, { ...W6737.steamGame }], { ...opts, leases: stale });
+  await lease.look(0);
+  await lease.look(1);
+  assert.deepEqual(lease.reaper.report().persons, [5100], 'found on its second look despite the stale lease');
+  // The agent's game 53744 is remembered, exits, and a person's game gets pid 53744 before the next look.
+  const reuse = machine([SYSTEMD, W6737.daemon, { ...W6737.w6684 }], opts);
+  await reuse.look(0);
+  reuse.st.procs = [SYSTEMD, W6737.daemon, { ...W6737.steamGame, pid: 53744 }];
+  await reuse.look(1);
+  assert.deepEqual(reuse.reaper.report().persons, []);
+  await reuse.look(1);
+  assert.deepEqual(reuse.reaper.report().persons, [53744], 'the reused pid is judged by its path, found on its second look');
 });
 
 test('ff-leftovers on Windows (w3637): a native program a Git Bash script left running in the background is listed, though its starter shows no session', () => {
