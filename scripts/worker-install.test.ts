@@ -13,7 +13,7 @@ import { installScript, taskName, taskXml, uninstallScript } from '../server/mac
 import { adoptLayout, leaveRoot, poolSettingsOf } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
 import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type OldLayout } from './worker/migrate.ts';
-import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, parseWinSupervisorFacts, supervisorSeen, winSupervisorScript, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { tmpDir } from '../server/testTmp.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
@@ -479,6 +479,38 @@ test("worker install: each sandbox owns two player folders, and a new count adds
   } finally {
     fs.rmSync(players, { recursive: true, force: true });
   }
+});
+
+test('worker install: a supervisor this session cannot read is counted from the task, and the check says what it saw (w6662)', () => {
+  // CI run 46095625045: the update job ran on the daemon's Medium-labelled node, so at Medium, under a supervisor the
+  // UAC-off runner ran High; every powershell.exe command line came back empty and the count read 0 for 30 s.
+  const out = ['installed=True', 'here=True', 'restarts=True', 'script=True', 'taskState=Running', 'enginePids=7040', 'level=8192', 'running=0', 'unreadable=1', 'taskProcs=1', 'seen=pid 7044 (parent 7040): (command line not readable)'].join('\r\n');
+  const f = parseWinSupervisorFacts(out);
+  assert.deepEqual({ running: f.running, unreadable: f.unreadable, taskProcs: f.taskProcs, enginePids: f.enginePids, level: f.level, taskState: f.taskState }, { running: 0, unreadable: 1, taskProcs: 1, enginePids: [7040], level: '8192', taskState: 'Running' });
+  const winL = { daemon: String.raw`D:\work\ffw\daemon` };
+  assert.deepEqual(supervisorProblems(f, winL, 'FFFactoryDaemon', true, 'win32'), []);
+  // Neither by command line nor under the task's instance: still refused, and the refusal says why it could not tell.
+  const none = parseWinSupervisorFacts(out.replace('taskProcs=1', 'taskProcs=0').replace('enginePids=7040', 'enginePids='));
+  assert.deepEqual(supervisorProblems(none, winL, 'FFFactoryDaemon', true, 'win32'), [String.raw`no supervisor runs from D:\work\ffw\daemon\run-daemon.ps1`]);
+  const seen = supervisorSeen(none);
+  assert.match(seen, /this session runs at Medium/);
+  assert.match(seen, /0 powershell\.exe ran it by command line, 1 other powershell\.exe had a command line this session could not read/);
+  assert.match(seen, /the task is Running, with no running instance/);
+  assert.match(seen, /pid 7044 \(parent 7040\): \(command line not readable\)/);
+  // A failed process query is said as such, never read as none running.
+  const failed = parseWinSupervisorFacts('installed=True\nhere=True\nrestarts=True\nscript=True\nlevel=12288\nrunning=0\ncimError=Access denied');
+  assert.equal(failed.unreadable, undefined);
+  assert.match(supervisorSeen(failed), /High; the process query failed: Access denied/);
+  // An older daemon's script printed only the first five lines: nothing new is assumed.
+  assert.deepEqual(parseWinSupervisorFacts('installed=True\nhere=True\nrestarts=True\nscript=True\nrunning=1').taskProcs, undefined);
+  // The script itself: read-only, pure ASCII (machineDeployWin.ts psq), the query fails loudly into cimError, and an
+  // encoded command is never printed.
+  const script = winSupervisorScript(String.raw`D:\work\ffw\daemon`, 'FFFactoryDaemon');
+  assert.match(script, /-ErrorAction Stop/);
+  assert.match(script, /GetRunningTasks\(1\)/);
+  assert.match(script, /<encoded>/);
+  assert.ok(/^[\x00-\x7f]*$/.test(script));
+  assert.doesNotMatch(script, /Stop-|Remove-|Set-|Register-|Start-/);
 });
 
 test('worker install: the supervisor is required, and what the installer writes passes its check (w576)', () => {
