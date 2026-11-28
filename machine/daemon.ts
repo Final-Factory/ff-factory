@@ -29,7 +29,7 @@ import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCAT
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
 import { StallProfiler } from '../server/stallProfile.ts';
-import { freezeWatchSettings, startFreezeWatch, type FreezeWatch } from './freezeWatch.ts';
+import { DAEMON_ENDING_MARKER, freezeWatchSettings, startFreezeWatch, type FreezeWatch } from './freezeWatch.ts';
 import { execFileOffThread, useSpawnThread } from '../server/spawnThread.ts';
 import { useProbeGuard } from '../server/probeGuard.ts';
 import { warmScopeProbes } from './linuxScope.ts';
@@ -2452,9 +2452,21 @@ export class Daemon {
     this.loopWatch = new LoopWatch({ log: (l) => log(l), who: 'the daemon', stallLogMs: DAEMON_STALL_LOG_MS }).start();
     // w6555: BEAST's loop was held 891 s on 2026-11-27 (w6546) and its log said nothing until it ended; this thread says it during.
     const fw = freezeWatchSettings(this.cfg.freezeWatch);
+    // w6784: run-daemon.ps1 reads this marker to tell a daemon stuck mid-exit (BEAST, 2026-11-28: still there hours after the
+    // freeze watch's kill) from one at work; written just before the kill, and at every exit the process gets to run.
+    const endingMarker = process.platform === 'win32' ? path.join(appDirOfConfig(this.cfg), 'logs', DAEMON_ENDING_MARKER) : undefined;
+    if (endingMarker) {
+      process.once('exit', (code) => {
+        try {
+          fs.writeFileSync(endingMarker, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), why: `exit code ${code}` }));
+        } catch {
+          // The supervisor then waits as it did before w6784.
+        }
+      });
+    }
     if (fw && process.env.FF_FREEZE_WATCH !== 'off') {
       try {
-        this.freezeWatch = startFreezeWatch({ afterMs: fw.afterMin * 60_000, repeatMs: fw.repeatMin * 60_000, exitMs: fw.exitMin === false || process.env.FF_FREEZE_WATCH === 'log' ? 0 : fw.exitMin * 60_000, onError: (e) => log(`freeze watch: its thread failed: ${e.message}`) });
+        this.freezeWatch = startFreezeWatch({ afterMs: fw.afterMin * 60_000, repeatMs: fw.repeatMin * 60_000, exitMs: fw.exitMin === false || process.env.FF_FREEZE_WATCH === 'log' ? 0 : fw.exitMin * 60_000, markerFile: endingMarker, onError: (e) => log(`freeze watch: its thread failed: ${e.message}`) });
       } catch (e) {
         log(`freeze watch: not started: ${(e as Error).message}`);
       }
