@@ -96,6 +96,7 @@ import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashH
 import { designGoAsk } from './designGo.ts';
 import { failureLine, failureOf, failurePriority, kindOfKey, structuredFailure, wordFailure, type Failure } from './failurePriority.ts';
 import { openQuestionsOf } from './reports.ts';
+import { auditExclusions, warnLine, type ExclusionFacts, type ExclusionVerdict } from './exclusionAudit.ts';
 import { DISK_CLEANUP_FLOOR_GB, REPORT_KINDS, WORK_PRIORITIES, asWorkPriority, atLeast, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
 import { FOR_YOU_CHARS, FOR_YOU_KEPT, forYouId, splitForYou } from '../shared/forYou.ts';
 
@@ -442,6 +443,8 @@ export interface OrchestratorsDeps {
   personPlaying?: (id: string) => string | undefined;
   /** w2443: why a machine is paused from its tray (pauseWhy), or undefined while it runs. */
   machinePaused?: (id: string) => string | undefined;
+  /** w6687: the live facts a machine exclusion may cite (crash holds, placement holds and rules, the computers); absent: no audit. */
+  exclusionFacts?: () => ExclusionFacts;
   /** Whether a computer takes no work now (shared/availability.ts): offline past the blip grace, or paused. Absent: all do. */
   machineAway?: (id: string) => 'offline' | 'paused' | undefined;
   /**
@@ -5404,7 +5407,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * have room at once, and its own request is Blocked on that request's report: the w890 release frees its sandbox when its
    * turn ends, and the report resumes it. One open pair run per request: asked again, it waits on the one there is.
    */
-  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[]; pr?: string; commit?: string; steam?: string; menus?: string; split?: string; player?: PairPlayer; legacy_data?: string; data_dir?: PairDataDirVerdict }): string {
+  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[]; avoid_why?: string; pr?: string; commit?: string; steam?: string; menus?: string; split?: string; player?: PairPlayer; legacy_data?: string; data_dir?: PairDataDirVerdict }): string {
     const w = this.workerRequest(sessionId, a.request, 'request_pair', { reopen: true });
     const what = clip(String(a.what ?? '').replace(/\s+/g, ' ').trim(), 100);
     const brief = String(a.brief ?? '').trim();
@@ -5500,6 +5503,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       p = open;
       if (named.length && !open.pair?.started) {
         p.pair = { ...p.pair!, avoid: [...new Set([...(p.pair!.avoid ?? []), ...named])] };
+        citeAvoid(p, named, a.avoid_why);
         p.constraints = pairText(p.pair);
         this.stamp(p, `worker ${sessionId} on ${w.id} asked again: not on ${named.join(', ')} (w2041)`);
         this.store.putWork(p);
@@ -5519,10 +5523,15 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const avoid = [...new Set([...(open ? this.pairFailedOn(open) : []), ...named])];
       const split = a.split?.replace(/\s+/g, ' ').trim().slice(0, 300);
       p = this.newPair(w, sessionId, { what, brief, legs, ...(a.legs !== undefined ? { legsSaid: true as const } : {}), crossOs, timed: a.timed === true, ...(split && !saysNone(split) ? { split } : {}), ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(steamNone ? { noSteam: STEAM_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}), ...(a.player ? { player: a.player } : {}), ...(legacyData ? { legacyData } : {}), ...(dataDirChecked ? { dataDirChecked } : {}) });
+      if (open) for (const m of this.pairFailedOn(open)) if (!named.includes(m)) citeAvoid(p, [m], `an earlier leg of ${open.id} failed there (w2041)`);
       if (open) this.supersedePair(open, p, spent!);
       head = open
         ? `${open.id} (${spent}) is cancelled, and its legs no longer count for ${w.id}: filed ${p.id}, a retry, ${pairText(p.pair!)}, with fresh legs. Only ${p.id}'s report resumes you, never one from ${open.id}'s legs. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once.`
         : `Filed ${p.id}, ${pairText(p.pair!)}${macRefusedScenario(p) ? `, no leg on a Mac (each leg starts ${macRefusedScenario(p)}'s host and client on its own computer; w3697)` : ''}, for ${w.id}. ${p.pair!.legs === 1 ? 'The dispatcher starts its one leg, a new worker that runs the host and the client on its own computer, as soon as one computer has room.' : "The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once; each leg's first message says which leg it is and where the others are."}`;
+    }
+    if (named.length && p.pair && !p.pair.started) {
+      citeAvoid(p, named, a.avoid_why);
+      this.store.putWork(p);
     }
     // w2459: too few computers signed in to different Steam accounts for it: the pair run is Blocked on that, not Queued.
     const steamShort = !p.pair?.started && p.status !== 'blocked' ? this.steamShortOf(p.pair) : undefined;
@@ -9987,6 +9996,45 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     return roomEnough(facts, w, on) ? on : [];
   }
 
+  /** w6687: the last verdict on each request's machine exclusions, by "request|source|machine" (memory only: a restart logs once again). */
+  private readonly exclusionSeen = new Map<string, ExclusionVerdict>();
+
+  /**
+   * w6687 stage 1, warn-only (lothsahn's lockout rule): each minute, judge every machine exclusion and pin an open request
+   * carries (server/exclusionAudit.ts) and log on the request, once per change, each one that cites no live crash hold,
+   * machine hold, config rule, checkable capability or person's words, including one whose crash hold has cleared. Nothing
+   * is dropped or re-queued here; the enforce stage does that. Returns the ids of the requests it logged on.
+   */
+  auditExclusions(): string[] {
+    const facts = this.d.exclusionFacts?.();
+    if (!facts) return [];
+    const logged: string[] = [];
+    const live = new Set<string>();
+    for (const w of this.store.work.values()) {
+      if (w.status === 'done' || w.status === 'rejected' || w.status === 'cancelled' || w.status === 'merged') continue;
+      const parent = w.pair?.for ? this.store.work.get(w.pair.for) : undefined;
+      const lines: string[] = [];
+      for (const v of auditExclusions(w, facts, parent)) {
+        const key = `${w.id}|${v.source}|${v.machine}`;
+        live.add(key);
+        const was = this.exclusionSeen.get(key);
+        this.exclusionSeen.set(key, v);
+        if (v.keep || (was && !was.keep)) continue;
+        const line = warnLine(v, was);
+        lines.push(line);
+        console.log(`[w6687 exclusions] ${w.id}: ${line}`);
+      }
+      if (!lines.length) continue;
+      // Only its log changes (not stamp: warn-only touches no gate, check-in or updatedAt).
+      const now = this.now();
+      w.log = [...w.log, ...lines.map((line) => logLine(now, line))].slice(-40);
+      this.store.putWork(w);
+      logged.push(w.id);
+    }
+    for (const key of [...this.exclusionSeen.keys()]) if (!live.has(key)) this.exclusionSeen.delete(key);
+    return logged;
+  }
+
   flagQueuedWithRoom(room: readonly string[] | RoomNow): string[] {
     // The room the page and decide_work queue read (this.roomNow()); a bare list is the game room, nothing held.
     const facts: RoomNow = Array.isArray(room) ? { game: [...room], agent: [], held: [] } : (room as RoomNow);
@@ -10272,4 +10320,17 @@ export function sameTimedAsk(leg: WorkItem, sessionId: string, brief: string, pl
   if (pin && leg.machinePin && !leg.machinePin.ids.includes(pin)) return false;
   const key = timedAskKey(brief);
   return t.ask !== undefined ? t.ask === key : timedAskKey(leg.brief).startsWith(key);
+}
+
+/**
+ * w6687: record what the asker cited for each computer it put on a pair run's avoid list (request_pair avoid_why), so the
+ * exclusion audit (server/exclusionAudit.ts) logs it beside its verdict. The words are kept, never trusted: the audit reads
+ * the live holds, config and capabilities, and a cited hold that is not live counts for nothing.
+ */
+export function citeAvoid(p: WorkItem, machines: readonly string[], why: string | undefined): void {
+  if (!p.pair || !machines.length) return;
+  const text = why?.replace(/\s+/g, ' ').trim().slice(0, 200) || 'no reason given';
+  const cited = { ...(p.pair.avoidWhy ?? {}) };
+  for (const m of machines) cited[placeId(m)] = text;
+  p.pair = { ...p.pair, avoidWhy: cited };
 }

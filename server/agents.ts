@@ -3,6 +3,7 @@ import { baselineDrift, daemonNodePinLine, driftLine, portalSettings } from '../
 import { deployLead, deployStayNote, deployWaitLine } from './deployResume.ts';
 import { describePortalPin } from '../machine/portalPin.ts';
 import { crashHoldMark } from './crashHolds.ts';
+import { crashHoldsLine, liveCrashHoldList } from './exclusionAudit.ts';
 import { untimedText } from '../shared/benchGlance.ts';
 import { modelChoices, workerModelChoice } from './workerModel.ts';
 import path from 'node:path';
@@ -1151,6 +1152,7 @@ export class Agents {
       identity,
       options: this.orchestratorOptions,
       places: () => ({ machines: machines.list() }),
+      exclusionFacts: () => ({ crashHolds: liveCrashHoldList(this.store.work.values()), prefs: this.placement(), computers: this.places() }),
       recentCommits: () => this.recentCommits,
       room: () => this.roomNow(),
       roomFacts: () => this.roomFacts(),
@@ -2428,6 +2430,7 @@ export class Agents {
       ...(typeof a.request === 'string' && a.request.trim() ? { request: a.request } : {}),
       ...(a.retry === true ? { retry: true } : {}),
       ...(Array.isArray(a.avoid) ? { avoid: a.avoid.filter((x): x is string => typeof x === 'string').slice(0, 6) } : {}),
+      ...(typeof a.avoid_why === 'string' && a.avoid_why.trim() ? { avoid_why: a.avoid_why } : {}),
       ...(typeof a.pr === 'string' && a.pr.trim() ? { pr: a.pr } : {}),
       ...(typeof a.commit === 'string' && a.commit.trim() ? { commit: a.commit } : {}),
       ...(player ? { player } : {}),
@@ -7914,7 +7917,8 @@ A report is for a person who asked for one, and people want very few. File one w
       const ffu = ffuSlotLines(m.id, this.machines.statsOf(m.id)?.ffuSlots, this.ffuHolder);
       if (ffu.length) parts.push('', ...ffu);
     }
-    const cap = [...capacityLines(this.places(), this.lastPlaced, this.placement()), ...[this.timedRuns?.capacityLine()].filter((l): l is string => !!l)];
+    const capBlock = capacityLines(this.places(), this.lastPlaced, this.placement());
+    const cap = [...capBlock, ...(capBlock.length ? [crashHoldsLine(liveCrashHoldList(this.store.work.values()))] : []), ...[this.timedRuns?.capacityLine()].filter((l): l is string => !!l)];
     this.logTimedLine(cap);
     return [...cap, ...(cap.length ? [''] : []), ...parts, ...this.ops.groupLines()].join('\n').replace(/^\n+/, '');
   }
@@ -8745,6 +8749,7 @@ ${w.repo ?? ''}
               `${statsLine(s.hostname, s)} (this host)`,
               ...(this.machineStatusLines?.() ?? []),
               ...capacityLines(this.places(), this.lastPlaced, this.placement()),
+              crashHoldsLine(liveCrashHoldList(this.store.work.values())),
               ...this.unsetHoldAsks(),
               ...[this.timedRuns?.capacityLine()].filter((l): l is string => !!l),
               ...(this.usageLines?.() ?? []),

@@ -2493,6 +2493,8 @@ export interface WorkPair {
    */
   retryOf?: string;
   avoid?: string[];
+  /** w6687: what the asker cited for each computer on `avoid` (request_pair avoid_why), by id; kept for the audit's log, never trusted. */
+  avoidWhy?: Record<string, string>;
   /**
    * w4925: a person's words (decide_work block's override_gate) asking this unstarted pair run to wait on a computer or an
    * hour while others have room; without them such a block is refused, and the ledger flags one that stands beside room.
