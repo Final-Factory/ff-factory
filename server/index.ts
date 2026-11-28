@@ -133,6 +133,7 @@ import { costMark, costSince } from './placeCost.ts';
 import { pageAllStats } from './ffuSlotsView.ts';
 import { pageNamedSessions, pageSession, pageSessions, PageSessionsCache, SESSION_REVS_FILE, SessionRevs, sessionsPart, stateSizes } from './pageState.ts';
 import { dropKeptParts } from '../shared/pageParts.ts';
+import { holdsOwnCopy } from '../shared/pageCache.ts';
 import { StallProfiler } from './stallProfile.ts';
 import { drainOf, drainHold } from './machineDrain.ts';
 
@@ -2891,10 +2892,12 @@ server.on('upgrade', (req, socket, head) => {
     const phases: [string, number][] = [];
     // w6428: what placement cost within this build (free, places, claims), for the line's 'place' part.
     const marks = [costMark(agents.placeCost.free), costMark(agents.placeCost.places), costMark(agents.placeAgain.claimsCost)] as const;
-    const whole = appState(user, q.get('have'), phases);
+    // w6763: a fresh load's rev and hashes come from the page's saved copy, taken only when it is this person's.
+    const own = holdsOwnCopy(q.get('u'), user);
+    const whole = appState(user, own ? q.get('have') : null, phases);
     const place = `${costSince('places', agents.placeCost.places, marks[1])}${costSince('free', agents.placeCost.free, marks[0])}${costSince('claims', agents.placeAgain.claimsCost, marks[2])}`.trim();
     const tKeep = performance.now();
-    const state = dropKeptParts(whole, q.get('parts'));
+    const state = dropKeptParts(whole, own ? q.get('parts') : null);
     const t1 = performance.now();
     phases.push(['kept', t1 - tKeep]);
     // w6382: a slow build is named function by function in the journal at the profile window's end (stallProfile.ts noteSpan).

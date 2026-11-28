@@ -57,7 +57,8 @@ export interface FirstState { ms: number; bytes: number; sessions?: number; delt
  * What a page says once its first state is on screen (w6336, web/src/api.ts): each phase of its connect in ms, as the
  * page measured it. `load`: since the page itself began loading (first connect only: HTML, scripts and all).
  */
-export interface PageReady { open: number; state: number; parse: number; render: number; load?: number; openEpoch?: number; stateEpoch?: number }
+/** script: when its script began; shell: when its saved copy was on screen, both since the page began loading (w6763). */
+export interface PageReady { open: number; state: number; parse: number; render: number; load?: number; openEpoch?: number; stateEpoch?: number; script?: number; shell?: number }
 
 /** ", kept reports,machines, 3 of 100 requests changed": what a reconnect did not resend. */
 /**
@@ -92,11 +93,11 @@ export function readyOf(raw: unknown): PageReady | undefined {
   const ms = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= PHASE_MAX_MS ? Math.round(v) : undefined);
   const open = ms(o.open), state = ms(o.state), parse = ms(o.parse), render = ms(o.render);
   if (open === undefined || state === undefined || parse === undefined || render === undefined) return undefined;
-  const load = ms(o.load);
+  const load = ms(o.load), shell = ms(o.shell), script = ms(o.script);
   // w6762: the page's own clock (Date.now()) at its open and at its first state, set beside the server's on the ready line.
   const epoch = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 1e12 && v < 1e14 ? Math.round(v) : undefined);
   const openEpoch = epoch(o.openEpoch), stateEpoch = epoch(o.stateEpoch);
-  return { open, state, parse, render, ...(load !== undefined ? { load } : {}), ...(openEpoch !== undefined ? { openEpoch } : {}), ...(stateEpoch !== undefined ? { stateEpoch } : {}) };
+  return { open, state, parse, render, ...(load !== undefined ? { load } : {}), ...(openEpoch !== undefined ? { openEpoch } : {}), ...(stateEpoch !== undefined ? { stateEpoch } : {}), ...(shell !== undefined ? { shell } : {}), ...(script !== undefined ? { script } : {}) };
 }
 
 /** A drop is a socket ended by the server's ping timeout or the network, or one the page gave up on as silent ('stale'). */
@@ -247,7 +248,7 @@ export class PageSockets<S extends object> {
     o.ready = true;
     const total = r.open + r.state + r.parse + r.render;
     const server = o.state ? `, server build ${Math.round(o.state.ms)}ms ${Math.round(o.state.bytes / 1024)}KB` : '';
-    this.log(`page socket ready: ${o.user} via ${o.via}, ${total}ms: open ${r.open}ms, first state ${r.state}ms, parse ${r.parse}ms, render ${r.render}ms${server}${r.load !== undefined ? `; ${r.load}ms since the page began loading` : ''}${clocksOf(o.handoff, r)}${o.handoff && o.handoff.sentMs !== undefined && o.handoff.sentMs < 1000 ? handoffOf(o.handoff) : ''}`);
+    this.log(`page socket ready: ${o.user} via ${o.via}, ${total}ms: open ${r.open}ms, first state ${r.state}ms, parse ${r.parse}ms, render ${r.render}ms${server}${r.load !== undefined ? `; ${r.load}ms since the page began loading` : ''}${r.script !== undefined ? `, script at ${r.script}ms` : ''}${r.shell !== undefined ? `, saved copy on screen at ${r.shell}ms` : ''}${clocksOf(o.handoff, r)}${o.handoff && o.handoff.sentMs !== undefined && o.handoff.sentMs < 1000 ? handoffOf(o.handoff) : ''}`);
   }
 
   /** The server is about to end this socket itself (call before terminate/close), so its close line says so. */

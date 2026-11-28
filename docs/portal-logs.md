@@ -235,6 +235,15 @@ message:
   still lands where a fresh load does.
 - `page socket first state sent: <login> via <path>, <ms>ms after the open` (w5861): only when handing the first state to
   the network took a second or more, which on a slow path means the page was still taking it in.
+- `page socket ready: <login> via <via>, <ms>ms: open <ms>, first state <ms>, parse <ms>, render <ms>, server build <ms> <KB>; <ms>ms since the page began loading[, script at <ms>ms][, saved copy on screen at <ms>ms]`
+  (w6336, w6763): the page's own timing of its first connect, sent once a socket's first state is on screen. "since the
+  page began loading" is `performance.now()`, so it counts the HTML and script download too. `script at` is when the
+  page's script began running. `saved copy on screen at` (w6763) is when the page had drawn its saved copy of its last
+  state (IndexedDB `ff-page`, shared/pageCache.ts): a usable page before any socket. That copy is saved at most once a
+  minute while the tab is visible and once more as it is hidden or closed, drawn only by the same web build within 24 h,
+  and cleared at sign-out. The first socket of such a load sends the copy's `have` and `parts` (with `u=<login>`, so the
+  server takes them only for that person), and its `page socket open ... why=first` line shows `changed` with a small
+  size. Before w6763 lothsahn's fresh loads took 1.4-10.3 s to ready (median 3.2 s, 4.3-4.6 MB first state, 2026-11-27/28).
 - `page state sizes: <top fields with KB>; <n> sessions, by field: <session fields with KB>` (w5861): where the first
   state's bytes go, at most once an hour (server/pageState.ts, `stateSizes`). The page's sessions leave out the fields no
   page code reads and, for a session no shown request names and idle 3 days, its last report (`pageSession`); since

@@ -69,6 +69,11 @@ test('w6336: the page says when its first state is on screen, and one line gives
   p.ready(a, JSON.stringify({ type: 'ready', open: 1, state: 1, parse: 1, render: 1 }));
   p.ready({}, JSON.stringify({ type: 'ready', open: 1, state: 1, parse: 1, render: 1 }));
   assert.equal(lines.length, 2);
+  // w6763: a load that drew its saved copy says when, and when its script began.
+  const b = {};
+  p.opened(b, 'lothsahn', req('127.0.0.1', {}, '/ws?why=first'), { ms: 40, bytes: 60 * 1024 });
+  p.ready(b, JSON.stringify({ type: 'ready', open: 300, state: 90, parse: 2, render: 30, load: 900, script: 310.4, shell: 520.6 }));
+  assert.match(lines[3], /; 900ms since the page began loading, script at 310ms, saved copy on screen at 521ms$/);
 });
 
 test('w6336: a ready message is only its numbers: anything odd is dropped, not logged', () => {

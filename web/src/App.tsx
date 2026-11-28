@@ -137,6 +137,7 @@ function Bar({ kind, text, children, onDismiss, busy, action }: { kind: 'warn' |
 /** The live connection dropped: say so (after a moment, so a quick reconnect does not flash). */
 function ConnectionBanner() {
   const ws = useStore((s) => s.ws);
+  const shell = useStore((s) => s.shell);
   const [show, setShow] = useState(false);
   useEffect(() => {
     if (ws === 'open') {
@@ -147,6 +148,15 @@ function ConnectionBanner() {
     return () => clearTimeout(t);
   }, [ws]);
   if (!show) return null;
+  // w6763: a fresh load drawn from the page's saved copy says how old what it shows is until the live state lands.
+  if (shell !== null) {
+    const at = new Date(shell).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return (
+      <Bar kind="warn" busy text={`Showing the copy saved at ${at}. Connecting…`}>
+        <b>Showing the copy saved at {at}.</b> Connecting…
+      </Bar>
+    );
+  }
   return (
     <Bar kind="warn" busy text="Connection lost. Reconnecting…">
       <b>Connection lost.</b> Reconnecting…

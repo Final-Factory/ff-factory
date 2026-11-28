@@ -209,6 +209,9 @@ async function fixedFleet(page: Page, hash = '#/', shape: (s: AppState) => AppSt
     r.fulfill({ json: { lines: ['[Licensing::Module] Channel doesn\'t exist', 'Refreshing native plugins compatible for Editor', 'error CS0103: The name \'Foo\' does not exist'] } }),
   );
   await page.clock.setFixedTime(NOW);
+  // This fleet is a rewrite of a whole first state: a reload must not draw the page's saved copy of the last one, nor
+  // open its socket with that copy's rev and hashes (w6763), which would bring a delta `shape` cannot rewrite.
+  await page.addInitScript(() => void indexedDB.deleteDatabase('ff-page'));
   // Every group open at the start of a test; a reload inside it keeps what the test folded.
   await page.addInitScript(() => {
     if (sessionStorage.getItem('fleet-test')) return;
