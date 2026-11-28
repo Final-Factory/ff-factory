@@ -189,7 +189,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // workers then only warn after the run), and an older portal never sends it (launch.ts then reads it as warn).
 // w6266 (no bump): the 'junctionRm' signal { line } (a Windows worker's junction rm warning); an older portal re-emits it with no
 // listener, and an older daemon or host never sends it.
-const DECIDED = { protocol: 9, fingerprint: '831bb95c4a0d4dfc' };
+// w6727 (no bump): `steam_start` / `steam_start_result` and `steamStart` in the hello, optional; the portal sends steam_start only
+// to a daemon whose hello offered steamStart, so an older daemon never gets one, and an older portal never sends it (so a
+// daemon never answers it).
+const DECIDED = { protocol: 9, fingerprint: '4725c06754de071b' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
