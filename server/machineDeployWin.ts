@@ -220,7 +220,8 @@ function Stop-FFDaemon([switch]$Agents) {
   if ($Agents) { $marks += $hosts }
   $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine, CreationDate)
   $kill = Get-FFKillSet $all $marks $hosts $Agents.IsPresent
-  foreach ($id in $kill) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+  $refused = New-Object System.Collections.Generic.HashSet[int]
+  foreach ($id in $kill) { try { Stop-Process -Id $id -Force -ErrorAction Stop } catch { if (Get-Process -Id $id -ErrorAction SilentlyContinue) { $null = $refused.Add($id) } } }
   for ($i = 0; $i -lt 30; $i++) {
     if (-not @($kill | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count) { break }
     if ($i -eq 10) { foreach ($id in $kill) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue } }
@@ -228,9 +229,27 @@ function Stop-FFDaemon([switch]$Agents) {
   }
   if ($task) { $null = $task | Enable-ScheduledTask -ErrorAction SilentlyContinue }
   # A survivor would answer beside the daemon started next (w1918: three daemons on LothLaptop): fail, naming it, instead.
+  # w6784: except one that took its TerminateProcess and is still there 15 s later: it is stuck mid-exit in the kernel and runs
+  # no code of its own again (BEAST, 2026-11-28: pid 16100 for hours), so it cannot answer; it is named and passed.
   $left = @($kill | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
-  if ($left.Count) { throw "the old daemon did not stop: pid(s) $($left -join ', ') still run 15 s after Stop-Process; nothing new was started beside them" }
+  $script:FFStuck = @($left | Where-Object { -not $refused.Contains($_) })
+  $left = @($left | Where-Object { $refused.Contains($_) })
+  if ($left.Count) { throw "the old daemon did not stop: pid(s) $($left -join ', ') refused Stop-Process and still run 15 s later; nothing new was started beside them" }
   $kill.Count
+}
+
+# w6784: a PowerShell snippet in a child, its answer if it ends within $Ms, else nothing: a child stuck in a WMI call is
+# left behind (TerminateProcess asked, never waited on) instead of holding this script up. Its output goes through a file, as
+# a pipe a stuck child holds would block the read.
+function Invoke-FFBounded([string]$Script, [int]$Ms) {
+  $o = Join-Path $F ('logs\\bounded-' + $PID + '-' + [guid]::NewGuid().ToString('N') + '.txt')
+  try {
+    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script))
+    $c = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', $enc) -NoNewWindow -PassThru -RedirectStandardOutput $o
+    if ($c.WaitForExit($Ms)) { return ([string](Get-Content -LiteralPath $o -Raw -ErrorAction SilentlyContinue)).Trim() }
+    try { $c.Kill() } catch { }
+    ''
+  } catch { '' } finally { Remove-Item -LiteralPath $o -Force -ErrorAction SilentlyContinue }
 }
 
 function Start-FFDaemon {
@@ -441,6 +460,18 @@ if ($r.Code -ne 0) { throw "npm ci failed ($($r.Code)): $($r.Out)" }
  */
 /** w6784: a daemon that wrote its ending marker and is still running this long after is logged as stuck mid-exit. */
 export const SUPERVISOR_STUCK_AFTER_S = 120;
+/** w6784: the supervisor's own state ({pid, daemonPid, abandoned, at}), rewritten every 5 s step, in logs. */
+export const SUPERVISOR_STATE = 'supervisor.json';
+/** w6784: a restart asked of a live supervisor ({why, at}), in logs; it takes the file away and acts once. */
+export const SUPERVISOR_REQUEST = 'daemon-restart-request.json';
+/** w6784: this file in the daemon's folder turns the stage-2 recovery off: a daemon stuck mid-exit is only logged. */
+export const SUPERVISOR_WARN_ONLY = 'supervisor-warn-only';
+/** w6784: a supervisor whose state file is older than this is not live (it rewrites it every 5 s step). */
+export const SUPERVISOR_FRESH_S = 30;
+/** w6784: how long a start or restart waits for a live supervisor to start a fresh daemon (15 s to end the old one, then the start). */
+export const SUPERVISOR_ANSWER_S = 60;
+/** w6784: how long a start waits for the task's state before it goes on without it. */
+export const TASK_STATE_WAIT_MS = 15_000;
 
 export function supervisorScript(node: string, flag: boolean, service?: WinService): string {
   const flags = [...(flag ? ['--experimental-strip-types'] : []), '--disable-warning=ExperimentalWarning'].join(' ');
@@ -458,53 +489,137 @@ $daemon = Join-Path $app 'machine\\daemon.ts'
 $argv = ${psq(flags)} + ' "' + $daemon + '" "' + (Join-Path $F 'daemon.json') + '"'
 $log = Join-Path $logs 'supervisor.log'
 $delay = 10
+$leftWaitS = 10
 # w6784: the daemon writes this ({pid, at, why}; machine/freezeWatch.ts DAEMON_ENDING_MARKER) just before the freeze watch ends
 # it and at every exit. A daemon that wrote it and is still not gone $stuckAfter s later is stuck mid-exit (BEAST, 2026-11-28
-# 07:41Z: hours after its SIGKILL, with this supervisor waiting on it the whole time). The wait is in steps so it can say so.
+# 07:41Z: hours after its SIGKILL, with this supervisor waiting on it the whole time). The wait is in steps so it can act.
 $marker = Join-Path $logs '${DAEMON_ENDING_MARKER}'
 $stuckAfter = ${SUPERVISOR_STUCK_AFTER_S}
 $waitStepMs = 5000
-while ($true) {
-  # Each run's output is kept under the time it closed (w2038); the daemon gzips and prunes them (machine/logRetention.ts).
+# w6784: this supervisor's own state, rewritten every step: a start or restart over ssh reads it to tell a live supervisor
+# (then it asks this one, by the request file, and needs neither the Task Scheduler nor WMI, both hung on BEAST).
+$state = Join-Path $logs '${SUPERVISOR_STATE}'
+$request = Join-Path $logs '${SUPERVISOR_REQUEST}'
+# w6784: this file in the daemon's folder keeps the stage-1 behaviour: a daemon stuck mid-exit is only logged, never left behind.
+$warnOnly = Join-Path $F '${SUPERVISOR_WARN_ONLY}'
+$abandoned = New-Object System.Collections.Generic.List[int]
+function Say($line) { "$(Get-Date -Format s) $line" | Out-File $log -Append -Encoding utf8 }
+function Beat($daemonPid) {
+  $alive = @($abandoned | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+  try { [pscustomobject]@{ pid = $PID; daemonPid = $daemonPid; abandoned = $alive; at = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress | Set-Content -LiteralPath "$state.tmp" -Encoding utf8; Move-Item -LiteralPath "$state.tmp" -Destination $state -Force } catch { }
+}
+# A restart asked over ssh (controlScript): its why, once; the file is taken away so each ask acts once.
+function Take-Request {
+  if (-not (Test-Path -LiteralPath $request)) { return $null }
+  # One older than the asker's wait (an ask whose asker died before it could take it back, w6790) is dropped, never acted on.
+  $age = 0
+  try { $age = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $request).LastWriteTimeUtc).TotalSeconds } catch { }
+  if ($age -gt ${SUPERVISOR_ANSWER_S}) { Remove-Item -LiteralPath $request -Force -ErrorAction SilentlyContinue; Say "dropped a restart request $([int]$age) s old: its asker gave up on it (w6784)"; return $null }
+  $why = 'no reason given'
+  try { $why = [string](Get-Content -LiteralPath $request -Raw -ErrorAction Stop | ConvertFrom-Json).why } catch { }
+  Remove-Item -LiteralPath $request -Force -ErrorAction SilentlyContinue
+  $why
+}
+# The daemon's output files: daemon.log, or daemon.held<N>.log while an abandoned daemon still holds the ones before (Windows
+# keeps a stuck process's handles). Each run's output is kept under the time it closed (w2038) as daemon.log.<stamp>, whichever
+# name it ran under; the daemon gzips and prunes those (machine/logRetention.ts).
+function Rotate-Out($base) {
   $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd'T'HHmmssfff'Z'")
-  foreach ($f in 'daemon.log', 'daemon.err.log') {
-    $p = Join-Path $logs $f
-    if ((Test-Path -LiteralPath $p) -and (Get-Item -LiteralPath $p).Length -gt 0) {
-      $to = $p + '.' + $stamp
-      $i = 0
-      while ((Test-Path -LiteralPath $to) -or (Test-Path -LiteralPath ($to + '.gz'))) { $i++; $to = $p + '.' + $stamp + '-' + $i }
-      Move-Item -LiteralPath $p -Destination $to
-    }
+  foreach ($f in @(Get-ChildItem -LiteralPath $logs -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "$base.log" -or $_.Name -match ('^' + [regex]::Escape($base) + '\\.held\\d+\\.log$') })) {
+    try {
+      if ($f.Length -gt 0) {
+        $to = Join-Path $logs "$base.log.$stamp"
+        $i = 0
+        while ((Test-Path -LiteralPath $to) -or (Test-Path -LiteralPath ($to + '.gz'))) { $i++; $to = Join-Path $logs "$base.log.$stamp-$i" }
+        Move-Item -LiteralPath $f.FullName -Destination $to -ErrorAction Stop
+      } elseif ($f.Name -ne "$base.log") { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop }
+    } catch { }
   }
+  $name = "$base.log"
+  for ($n = 1; (Test-Path -LiteralPath (Join-Path $logs $name)) -and (Get-Item -LiteralPath (Join-Path $logs $name)).Length -gt 0; $n++) { $name = "$base.held$n.log" }
+  $name
+}
+# Ends the daemon and checks it went (w6785's review: the supervisor, not the daemon, owns the kill and its check). Answers
+# whether it is gone. It ends it through the handle this supervisor holds from Start-Process (Process.Kill uses it), which has
+# every access right, so a live daemon cannot refuse it (w6790: a refused Stop-Process must never leave a healthy daemon behind
+# a fresh one); TerminateProcess on that handle fails only for a process already ending, which is the stuck case.
+function Stop-Held($p) { $p.Kill() }
+function End-Daemon($p) {
+  try { Stop-Held $p } catch { Say "ending the daemon, pid $($p.Id), answered: $($_.Exception.Message) (it is already ending)" }
+  $p.WaitForExit(15000)
+}
+while ($true) {
+  $out = Rotate-Out 'daemon'
+  $err = Rotate-Out 'daemon.err'
+  if ($out -ne 'daemon.log') { Say "daemon.log is still held (abandoned daemon pid(s) $($abandoned -join ', ')); this daemon writes $out and $err (w6784)" }
   $started = Get-Date
+  $asked = $false
   Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
   try {
-    $proc = Start-Process -FilePath $node -ArgumentList $argv -WorkingDirectory $app -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logs 'daemon.log') -RedirectStandardError (Join-Path $logs 'daemon.err.log')
+    $proc = Start-Process -FilePath $node -ArgumentList $argv -WorkingDirectory $app -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logs $out) -RedirectStandardError (Join-Path $logs $err)
     $null = $proc.Handle
-    "$(Get-Date -Format s) started the daemon, pid $($proc.Id)" | Out-File $log -Append -Encoding utf8
-    # w6784: wait in steps; a daemon that said it ends and is still there is logged once (warn only: lothsahn's lockout rule).
+    Say "started the daemon, pid $($proc.Id)"
+    Beat $proc.Id
+    # w6784: wait in steps. A restart asked over ssh ends this daemon; one that said it ends and is still there after
+    # $stuckAfter s is ended once more and, if still there, left behind and a fresh one started (warn-only file: only logged).
     $stuckSaid = $false
+    $left = $false
     while (-not $proc.WaitForExit($waitStepMs)) {
+      Beat $proc.Id
+      $ask = Take-Request
+      if ($ask) {
+        Say "a restart was asked ($ask): ending the daemon, pid $($proc.Id) (w6784)"
+        $asked = $true
+        if (End-Daemon $proc) { break }
+        if (Test-Path -LiteralPath $warnOnly) { Say "the daemon, pid $($proc.Id), is still there 15 s after it was ended; $warnOnly says warn only, so this supervisor goes on waiting for it"; continue }
+        $left = $true
+        Say "the daemon, pid $($proc.Id), is still there 15 s after it was ended: it is stuck mid-exit; left behind, a fresh one starts beside it (w6784)"
+        break
+      }
       if ($stuckSaid -or -not (Test-Path -LiteralPath $marker)) { continue }
       try {
         $m = Get-Content -LiteralPath $marker -Raw -ErrorAction Stop | ConvertFrom-Json
         $for = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $marker).LastWriteTimeUtc).TotalSeconds
-        if ([int]$m.pid -eq $proc.Id -and $for -ge $stuckAfter) {
-          "$(Get-Date -Format s) the daemon, pid $($proc.Id), said it ends ($($m.why)) $([int]$for) s ago and has still not exited: it is stuck mid-exit; this supervisor goes on waiting for it (w6784, warn only)" | Out-File $log -Append -Encoding utf8
-          $stuckSaid = $true
-        }
-      } catch { }
+        if ([int]$m.pid -ne $proc.Id -or $for -lt $stuckAfter) { continue }
+      } catch { continue }
+      $stuckSaid = $true
+      if (Test-Path -LiteralPath $warnOnly) {
+        Say "the daemon, pid $($proc.Id), said it ends ($($m.why)) $([int]$for) s ago and has still not exited: it is stuck mid-exit; $warnOnly says warn only, so this supervisor goes on waiting for it (w6784)"
+        continue
+      }
+      Say "the daemon, pid $($proc.Id), said it ends ($($m.why)) $([int]$for) s ago and has still not exited: ending it again (w6784)"
+      if (End-Daemon $proc) { break }
+      $left = $true
+      Say "the daemon, pid $($proc.Id), is still there: it is stuck mid-exit; left behind, a fresh one starts beside it (w6784)"
+      break
     }
-    if ($stuckSaid) { "$(Get-Date -Format s) the daemon, pid $($proc.Id), has exited after all" | Out-File $log -Append -Encoding utf8 }
-    # 75 (machine/daemon.ts DAEMON_YIELD_EXIT): a newer daemon of this machine took over, so this supervisor ends too (w1918).
-    if ($proc.ExitCode -eq 75) { "$(Get-Date -Format s) the daemon ended for a newer one of this machine; this supervisor ends" | Out-File $log -Append -Encoding utf8; break }
-    $why = "exited with code $($proc.ExitCode)"
+    if ($left) {
+      $abandoned.Add($proc.Id)
+      $why = "was left behind stuck mid-exit"
+    } else {
+      if ($stuckSaid) { Say "the daemon, pid $($proc.Id), has exited after all" }
+      # 75 (machine/daemon.ts DAEMON_YIELD_EXIT): a newer daemon of this machine took over, so this supervisor ends too (w1918).
+      if ($proc.ExitCode -eq 75 -and -not $asked) { Say "the daemon ended for a newer one of this machine; this supervisor ends"; break }
+      $why = "exited with code $($proc.ExitCode)"
+    }
   } catch {
     $why = "could not start: $($_.Exception.Message)"
   }
-  if (((Get-Date) - $started).TotalMinutes -gt 5) { $delay = 10 } else { $delay = [Math]::Min($delay * 2, 300) }
-  "$(Get-Date -Format s) the daemon $why; starting it again in $delay s" | Out-File $log -Append -Encoding utf8
-  Start-Sleep $delay
+  if (((Get-Date) - $started).TotalMinutes -gt 5) { $delay = 10 } elseif (-not $left -and -not $asked) { $delay = [Math]::Min($delay * 2, 300) }
+  # An asked restart starts at once and a left-behind daemon's successor after $leftWaitS, but neither resets the back-off:
+  # $delay = 0 doubled stays 0, and the supervisor restarted a daemon an update's Stop-FFDaemon had just ended, at once, so
+  # the update could not move app aside (w6784's Worker update CI, 2026-11-28).
+  $wait = $delay
+  if ($asked) { $wait = 0 } elseif ($left) { $wait = $leftWaitS }
+  Say "the daemon $why; starting it again in $wait s"
+  # The back-off is in steps too: the state stays fresh, and a restart asked meanwhile starts it at once.
+  $until = (Get-Date).AddSeconds($wait)
+  while ((Get-Date) -lt $until) {
+    Beat $null
+    $ask = Take-Request
+    if ($ask) { Say "a restart was asked ($ask): starting the daemon now (w6784)"; break }
+    Start-Sleep -Milliseconds ([Math]::Max(1, [Math]::Min($waitStepMs, ($until - (Get-Date)).TotalMilliseconds)))
+  }
 }
 `;
 }
@@ -744,20 +859,63 @@ export function stopScript(agents: boolean, appDir?: string, service?: WinServic
  * hosts running for the new daemon (w605). Prints `stopped=<n>` and/or `started=True|False`.
  */
 export function controlScript(action: 'start' | 'stop' | 'restart', appDir?: string, service?: WinService): string {
+  if (action === 'stop') return `${head({ appDir, service })}\n'stopped=' + (Stop-FFDaemon -Agents)\nif ($script:FFStuck.Count) { 'stuck=' + ($script:FFStuck -join ',') }\n`;
   return `${head({ appDir, service })}
-${action === 'stop' ? "'stopped=' + (Stop-FFDaemon -Agents)" : action === 'restart' ? "'stopped=' + (Stop-FFDaemon)" : ''}
-${action === 'start' ? startState(taskName(service)) : ''}
-${action !== 'stop' ? "if (Test-FFLoggedOn) { Start-FFDaemon; 'started=True' } else { 'started=False' }" : ''}
+${askSupervisor(action)}
+if (-not $viaSupervisor) {
+${action === 'restart' ? "  'stopped=' + (Stop-FFDaemon)\n  if ($script:FFStuck.Count) { 'stuck=' + ($script:FFStuck -join ',') }" : startState(taskName(service))}
+  if (Test-FFLoggedOn) { Start-FFDaemon; 'started=True' } else { 'started=False' }
+}
 `;
 }
 
 /**
+ * w6784: a start or restart asks the daemon's live supervisor first, by a file it reads every 5 s step (supervisorScript):
+ * no Task Scheduler and no WMI, both hung on BEAST on 2026-11-28 (Get-ScheduledTask, schtasks and the task's start all
+ * hung), and the supervisor already runs in the user's interactive session, which Unity needs. A supervisor is live when
+ * its state file is under SUPERVISOR_FRESH_S old and its pid runs. A restart asks it always; a start asks it only while it
+ * has no daemon (it skips the rest of its back-off), and else says which daemon it has. Prints `supervisor=<pid>
+ * daemonPid=<pid|none>`, then `restartedBy=supervisor daemonPid=<new pid>` or `supervisorAnswered=False`; sets
+ * $viaSupervisor when it answered, so the task route is skipped.
+ */
+const askSupervisor = (action: 'start' | 'restart') => `$ErrorActionPreference = 'Continue'
+$viaSupervisor = $false
+$sj = Join-Path $F 'logs\\${SUPERVISOR_STATE}'
+$req = Join-Path $F 'logs\\${SUPERVISOR_REQUEST}'
+$live = $null
+if (Test-Path -LiteralPath $sj) {
+  try {
+    $s0 = Get-Content -LiteralPath $sj -Raw -ErrorAction Stop | ConvertFrom-Json
+    $age = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $sj).LastWriteTimeUtc).TotalSeconds
+    if ($age -lt ${SUPERVISOR_FRESH_S} -and (Get-Process -Id ([int]$s0.pid) -ErrorAction SilentlyContinue)) { $live = $s0 }
+  } catch { }
+}
+if ($live) {
+  $old = [string]$live.daemonPid
+  'supervisor=' + $live.pid + ' daemonPid=' + $(if ($old) { $old } else { 'none' })
+  if (${action === 'restart' ? '$true' : '-not $old'}) {
+    [pscustomobject]@{ why = 'machine_daemon ${action} over ssh'; at = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress | Set-Content -LiteralPath $req -Encoding utf8
+    $until = (Get-Date).AddSeconds(${SUPERVISOR_ANSWER_S})
+    while ((Get-Date) -lt $until -and -not $viaSupervisor) {
+      Start-Sleep -Milliseconds 500
+      try {
+        $s1 = Get-Content -LiteralPath $sj -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($s1.daemonPid -and [string]$s1.daemonPid -ne $old -and -not (Test-Path -LiteralPath $req)) { 'restartedBy=supervisor daemonPid=' + $s1.daemonPid; $viaSupervisor = $true }
+      } catch { }
+    }
+    if (-not $viaSupervisor) { Remove-Item -LiteralPath $req -Force -ErrorAction SilentlyContinue; 'supervisorAnswered=False' }
+  } else { $viaSupervisor = $true }
+}
+$ErrorActionPreference = 'Stop'`;
+
+/**
  * w6784: before a start, the task's state and the supervisor's last daemon. Start-ScheduledTask on a task that is already
  * running does nothing (one instance), and BEAST's start at 2026-11-28 08:20Z answered "started" while its supervisor sat on a
- * daemon stuck mid-exit. Get-Process reads no WMI, which was what hung there.
+ * daemon stuck mid-exit. Get-ScheduledTask is a CIM cmdlet, and WMI hung there (w6785's review), so it runs in a child
+ * given TASK_STATE_WAIT_MS (Invoke-FFBounded: no answer is an empty state); Get-Process reads no WMI.
  */
 const startState = (task: string) => `$ErrorActionPreference = 'Continue'
-'state=' + (Get-ScheduledTask -TaskName '${task}' -ErrorAction SilentlyContinue).State
+'state=' + (Invoke-FFBounded "(Get-ScheduledTask -TaskName '${task}' -ErrorAction SilentlyContinue).State" ${TASK_STATE_WAIT_MS}) + ''
 $sup = Join-Path $F 'logs\\supervisor.log'
 if (Test-Path -LiteralPath $sup) {
   $last = Get-Content -LiteralPath $sup -Tail 200 -ErrorAction SilentlyContinue | Select-String 'started the daemon, pid (\\d+)' | Select-Object -Last 1

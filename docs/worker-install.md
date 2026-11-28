@@ -121,11 +121,12 @@ fence) starts the daemon and its jobs at Medium; on such a machine the check cou
 it counts none by command line it says what it saw: this session's level, how many command lines it could not read, a
 failed query's error, the task's instance and the command lines it did see.
 
-**A daemon stuck mid-exit is logged** (w6784): `run-daemon.ps1` waits for the daemon in 5 s steps, and when the daemon said it
+**A daemon stuck mid-exit is recovered** (w6784): `run-daemon.ps1` waits for the daemon in 5 s steps. When the daemon said it
 ends (`logs\daemon-ending.json`, written before the freeze watch's SIGKILL and at every exit) but is still there 2 minutes
-later, `logs\supervisor.log` says `... it is stuck mid-exit; this supervisor goes on waiting for it (w6784, warn only)`.
-`machine_daemon start` says when the task was already running, so the start changed nothing. Details: [machines.md](machines.md),
-"A daemon stuck mid-exit".
+later, the supervisor ends it again, and if it is still there leaves it behind and starts a fresh daemon (a file
+`supervisor-warn-only` in the daemon's folder makes it only log that). A `machine_daemon restart` over ssh asks a live
+supervisor first, by `logs\daemon-restart-request.json`, with no Task Scheduler or WMI. `machine_daemon start` says when the
+task was already running, so the start changed nothing. Details: [machines.md](machines.md), "A daemon stuck mid-exit".
 
 **The short way for a new machine: a join code** (w1592): an owner asks for one, and one line at the PC does the rest,
 record and credential included ([Adding a machine with a join code](#adding-a-machine-with-a-join-code-w1592)).

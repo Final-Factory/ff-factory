@@ -591,6 +591,8 @@ export function macControlScript(action: DaemonAction | 'uninstall', label = LAB
 
 /** w6784: what a start said when its task was already running (Task Scheduler runs one instance, so it changed nothing). */
 export const TASK_ALREADY_RUNNING = 'was already running, so this start changed nothing';
+/** w6784: a start whose live supervisor already has a daemon (it changes nothing; a restart asks that supervisor). */
+export const SUPERVISOR_HAS_DAEMON = 'is live, so this start changed nothing (a restart asks it for a fresh daemon); its daemon is';
 
 /** The Windows control script's answer (win.controlScript), in a few words. */
 export function winControlAnswer(out: string): string {
@@ -599,7 +601,15 @@ export function winControlAnswer(out: string): string {
   const running = /^state=Running\s*$/m.test(out);
   const d = /daemonPid=(\d+) alive=(True|False)/.exec(out);
   const daemon = d ? `; its supervisor's last daemon is pid ${d[1]}, ${d[2] === 'True' ? 'still running' : 'gone'}` : '';
+  // w6784: the live supervisor's answer, ahead of the task's.
+  const sup = /supervisor=(\d+) daemonPid=(\d+|none)/.exec(out);
+  const fresh = /restartedBy=supervisor daemonPid=(\d+)/.exec(out)?.[1];
+  const stuck = /^stuck=([\d,]+)\s*$/m.exec(out)?.[1];
+  if (sup && fresh) return `its supervisor (pid ${sup[1]}) started a fresh daemon, pid ${fresh}${sup[2] !== 'none' ? `, in place of pid ${sup[2]}` : ''}, without the Task Scheduler`;
+  if (sup && !/supervisorAnswered=False/.test(out) && started === undefined) return `its supervisor (pid ${sup[1]}) ${SUPERVISOR_HAS_DAEMON} pid ${sup[2]}`;
   return [
+    sup ? `its supervisor (pid ${sup[1]}) did not start a fresh daemon within 60 s, so this went through the ${win.TASK_NAME} task` : '',
+    stuck ? `pid(s) ${stuck.replace(/,/g, ', ')} took Stop-Process and are still there, stuck mid-exit (they run no code); left behind` : '',
     stopped !== undefined ? `stopped the ${win.TASK_NAME} task (${stopped} process(es) ended; Unity editors left running)` : '',
     started === 'True' ? (running ? `the ${win.TASK_NAME} task ${TASK_ALREADY_RUNNING}${daemon}` : `started the ${win.TASK_NAME} task`) : started === 'False' ? 'nobody is logged on there, so the daemon starts at the next logon' : '',
   ]

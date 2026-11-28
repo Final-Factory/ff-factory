@@ -44,6 +44,7 @@ on:
       - 'server/machineDeploy.ts'
       - 'server/machineDeployWin.test.ts'
       - 'server/machineDeployWin.ts'
+      - 'server/supervisorWin.test.ts'
       - 'server/machineDialogs.test.ts'
       - 'server/machineJoinHttp.ts'
       - 'server/machineSandboxesEditors.test.ts'
