@@ -284,6 +284,8 @@ export function writeInPlace(file: string, data: string): void {
     fs.writeSync(fd, b, 0, b.length, 0);
     fs.ftruncateSync(fd, b.length);
   } finally {
-    fs.closeSync(fd);
+    // w6639: closed off the loop: this close held BEAST's daemon 15.8 s (2026-11-28 00:56Z, writeCleanupFacts). The bytes are
+    // written and the length cut by now; a close error loses nothing a reader could see.
+    fs.close(fd, () => undefined);
   }
 }

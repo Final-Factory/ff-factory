@@ -22,7 +22,7 @@
 //   node machine/agentHost.ts <host folder>      (started by the daemon; the start record comes on stdin)
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { launchDetached } from '../server/spawnThread.ts';
 import { pathToFileURL } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { createHash, randomUUID } from 'node:crypto';
@@ -127,14 +127,18 @@ export class LineTail {
   /** Handles let go of while a poll read them: closed once the outermost poll is done. */
   private deferred: number[] = [];
 
-  /** Let go of the kept handle now (before its folder is removed); a later poll opens the file again. */
-  close() {
+  /**
+   * Let go of the kept handle now (before its folder is removed); a later poll opens the file again. `later` (the keep-open
+   * timer, w6639): closed off the loop, where one close held BEAST's daemon 56.6 s (2026-11-28 00:54Z); nothing waits on it.
+   */
+  close(later = false) {
     clearTimeout(this.closer);
     this.closer = undefined;
     const fd = this.fd;
     this.fd = undefined;
     if (fd === undefined) return;
     if (this.depth > 0) this.deferred.push(fd);
+    else if (later) fs.close(fd, () => undefined);
     else closeQuietly(fd);
   }
 
@@ -156,7 +160,7 @@ export class LineTail {
         fd = fs.openSync(this.file, 'r');
         if (this.keepOpenMs > 0) {
           this.fd = fd;
-          this.closer = setTimeout(() => this.close(), this.keepOpenMs);
+          this.closer = setTimeout(() => this.close(true), this.keepOpenMs);
           this.closer.unref?.();
         } else own = true;
       }
@@ -365,7 +369,7 @@ export interface HostDeps {
   changed: () => void;
   log: (line: string) => void;
   /** Starts a host process; tests may replace it. Returns its pid. */
-  launch?: (dir: string, start: HostStart) => number;
+  launch?: (dir: string, start: HostStart) => number | Promise<number>;
   /** The machine's hands on host processes (start time, ending a tree); tests replace them. */
   procs?: HostProcs;
   /** Its host's tree is being stopped (true) or is gone (false): its sandbox is not free meanwhile (w799). */
@@ -412,31 +416,16 @@ export function hostCommand(dir: string, start: HostStart, scope: { platform?: N
  * Start a host: detached (outside node's own kill-on-exit job on Windows, its own session on a Mac, its own systemd scope
  * on Linux: machine/linuxScope.ts, w2474), output to host.log.
  */
-export function launchHost(dir: string, start: HostStart, env: NodeJS.ProcessEnv = process.env): number {
+export function launchHost(dir: string, start: HostStart, env: NodeJS.ProcessEnv = process.env): number | Promise<number> {
   const f = hostFiles(dir);
-  const log = fs.openSync(f.log, 'a');
-  try {
-    // Not in its own folder (w799): Windows refuses to delete a folder a live process works in, and the daemon removes it.
-    const cmd = hostCommand(dir, start);
-    if (cmd.capped && cmd.unit && !cmd.limited) fs.writeSync(log, `${new Date().toISOString()} worker caps: its scope has no MemoryMax or TasksMax (this user manager does not delegate them or takes no OOMPolicy=continue): the limits are not applied\n`);
-    // Its systemd scope's name (w2884): read when the host dies, for why (an OOM kill names itself in that scope's journal).
-    if (cmd.unit) fs.writeFileSync(f.scope, cmd.unit);
-    const child = spawn(cmd.bin, cmd.args, {
-      cwd: path.dirname(dir),
-      detached: true,
-      stdio: ['pipe', log, log],
-      windowsHide: true,
-      env,
-    });
-    child.on('error', () => undefined);
-    child.stdin!.on('error', () => undefined);
-    child.stdin!.end(JSON.stringify(start));
-    child.unref();
-    if (!child.pid) throw new Error('the agent host did not start');
-    return child.pid;
-  } finally {
-    fs.closeSync(log);
-  }
+  // Not in its own folder (w799): Windows refuses to delete a folder a live process works in, and the daemon removes it.
+  const cmd = hostCommand(dir, start);
+  if (cmd.capped && cmd.unit && !cmd.limited) fs.appendFileSync(f.log, `${new Date().toISOString()} worker caps: its scope has no MemoryMax or TasksMax (this user manager does not delegate them or takes no OOMPolicy=continue): the limits are not applied
+`);
+  // Its systemd scope's name (w2884): read when the host dies, for why (an OOM kill names itself in that scope's journal).
+  if (cmd.unit) fs.writeFileSync(f.scope, cmd.unit);
+  // w6639: started from the spawn thread when it is on (the daemon): the start held BEAST's loop 24.7 s on 2026-11-27.
+  return launchDetached({ cmd: cmd.bin, args: cmd.args, cwd: path.dirname(dir), env, log: f.log, input: JSON.stringify(start), noPid: 'the agent host did not start' });
 }
 
 /**
@@ -457,6 +446,8 @@ export class HostedSession implements SessionHandle {
   private tail?: LineTail;
   private polls = 0;
   private launchedAt = 0;
+  /** w6639: which start of the host a launch's late answer is for: an answer for an earlier start is dropped. */
+  private launchGen = 0;
   private timer?: NodeJS.Timeout;
   private savedOffset = -1;
   /**
@@ -745,12 +736,12 @@ export class HostedSession implements SessionHandle {
     this.staleSince = undefined;
     this.pid = undefined;
     this.follow(0);
-    try {
-      const pid = (this.deps.launch ?? launchHost)(f.dir, start);
+    const gen = ++this.launchGen;
+    const started = (pid: number) => {
       this.pid = pid;
       this.deps.log(`agent host for ${this.info.id} started, pid ${pid}`);
-      return true;
-    } catch (e) {
+    };
+    const failed = (e: unknown) => {
       const error = `could not start its agent host: ${(e as Error).message}`;
       this.running = false;
       this.liveNow = false;
@@ -760,8 +751,29 @@ export class HostedSession implements SessionHandle {
       Object.assign(this.info, { status: 'error', statusDetail: error });
       this.deps.log(`agent ${this.info.id}: ${error}`);
       this.deps.out({ type: 'failed', sessionId: this.info.id, error, reason: 'host_start' });
+    };
+    let pid: number | Promise<number>;
+    try {
+      pid = (this.deps.launch ?? launchHost)(f.dir, start);
+    } catch (e) {
+      failed(e);
       return false;
     }
+    if (typeof pid === 'number') {
+      started(pid);
+      return true;
+    }
+    // w6639: the spawn thread answers later. Until then the host counts as starting (START_MS, as a host that has not written
+    // host.json yet), and a failure is told as a failed start was, unless a later start (or a stop) has replaced this one.
+    pid.then(
+      (n) => gen === this.launchGen && started(n),
+      (e) => {
+        if (gen !== this.launchGen || !this.running) return;
+        failed(e);
+        this.deps.changed();
+      },
+    );
+    return true;
   }
 
   private command(c: DistributiveOmit<HostCommand, 'n'>): HostCommand {

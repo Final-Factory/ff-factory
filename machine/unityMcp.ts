@@ -5,7 +5,7 @@ import { claudeJsonFiles } from '../server/claudeHome.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { readStatusFiles, syncStatusDir } from '../server/unityMcp.ts';
+import { readStatusFiles, syncStatusDir, type StatusFile } from '../server/unityMcp.ts';
 import { mcpStatusDirs } from '../server/unityHang.ts';
 import { normProject } from '../server/unityHang.ts';
 import type { StdioServer } from '../server/launch.ts';
@@ -185,9 +185,14 @@ export class McpScopes {
     this.home = home;
   }
 
+  /** The folders it reads status files from (w6639: the daemon reads them off the loop, readStatusFilesAsync, and passes them to sync). */
+  statusDirs(): string | string[] {
+    return this.home ?? mcpStatusDirs();
+  }
+
   /** One look: `places` maps a place key to its project folder and its editor's pid (undefined: not running). */
-  sync(appDir: string, places: McpPlace[], now: number, log: (line: string) => void = () => undefined) {
-    const files = readStatusFiles(this.home ?? mcpStatusDirs());
+  sync(appDir: string, places: McpPlace[], now: number, log: (line: string) => void = () => undefined, read?: StatusFile[]) {
+    const files = read ?? readStatusFiles(this.statusDirs());
     for (const p of places) {
       const st = this.seen.get(p.place) ?? {};
       if (p.pid && p.pid !== st.pid) st.since = st.lookedAt ?? (p.fromInstance ? now : 0);

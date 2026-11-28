@@ -67,6 +67,7 @@ import { liveRunGuardModeOf } from './liveRunGuard.ts';
 import { gitPackagesModeOf } from './gitPackages.ts';
 import { UnitySlots, editorInstancePid, editorInstancePidAsync, gamePlayers, unityProcesses, writeShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
 import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
+import { readStatusFilesAsync, type StatusFile } from '../server/unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
 import { cliProjectsDir } from '../server/cliTranscript.ts';
@@ -1987,7 +1988,7 @@ export class Daemon {
   }
 
   /** Bring every place's Unity MCP status folder up to date, from the editor pids the watches know. */
-  syncMcpScopes() {
+  syncMcpScopes(files?: StatusFile[]) {
     const alive = (pid?: number) => {
       if (!pid) return undefined;
       try {
@@ -2000,7 +2001,7 @@ export class Daemon {
     // w6595: the pids refreshMcpScopes read off the loop (at most 5 s old); a sandbox not read yet is read here once.
     const instancePid = (project: string) => (this.mcpInstancePids.has(project) ? this.mcpInstancePids.get(project) : editorInstancePid(project));
     const places = mcpPlaces(this.pool.list(), alive, instancePid, this.mcpEditors);
-    this.mcpScopes.sync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line));
+    this.mcpScopes.sync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line), files);
   }
 
   /**
@@ -2019,7 +2020,8 @@ export class Daemon {
     const projects = this.pool.list().map((sb) => sb.path);
     const pids = await Promise.all(projects.map((p) => editorInstancePidAsync(p)));
     this.mcpInstancePids = new Map(projects.map((p, i) => [p, pids[i]]));
-    this.syncMcpScopes();
+    // w6639: the editors' status files too (read in sync, they held BEAST's loop 10.8 s on 2026-11-28 00:49Z).
+    this.syncMcpScopes(await readStatusFilesAsync(this.mcpScopes.statusDirs()));
   }
 
   get connected() {

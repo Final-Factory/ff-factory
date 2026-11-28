@@ -45,6 +45,32 @@ export function readStatusFiles(dir: string | string[] = mcpStatusDirs()): Statu
   return out;
 }
 
+/**
+ * readStatusFiles off the loop (w6639): the same files, read with fs.promises. On BEAST the synchronous read held the daemon
+ * 10.8 s (2026-11-28 00:49Z, refreshMcpScopes), on a busy disk.
+ */
+export async function readStatusFilesAsync(dir: string | string[] = mcpStatusDirs()): Promise<StatusFile[]> {
+  if (Array.isArray(dir)) return (await Promise.all(dir.map((d) => readStatusFilesAsync(d)))).flat();
+  let names: string[] = [];
+  try {
+    names = (await fs.promises.readdir(dir)).filter((n) => /^unity-mcp-status-[\w-]+\.json$/.test(n));
+  } catch {
+    return [];
+  }
+  const read = async (name: string): Promise<StatusFile | undefined> => {
+    try {
+      const file = path.join(dir, name);
+      const text = (await fs.promises.readFile(file, 'utf8')).replace(/^﻿/, '');
+      const j = JSON.parse(text) as { project_path?: string; unity_port?: number };
+      if (!j.project_path) return undefined;
+      return { name, project: normProject(j.project_path), port: typeof j.unity_port === 'number' ? j.unity_port : undefined, mtimeMs: (await fs.promises.stat(file)).mtimeMs, text };
+    } catch {
+      return undefined; // being written; next poll
+    }
+  };
+  return (await Promise.all(names.map(read))).filter((f): f is StatusFile => !!f);
+}
+
 const LEGACY_PORT_FILE = 'unity-mcp-port.json';
 
 const writeIfChanged = (file: string, text: string) => {
