@@ -13,17 +13,24 @@
 #
 #   -Mode repair   find and repair (the task's mode)
 #   -Mode check    find and say, change nothing (warn/log only)
+#   -Mode force    tests only: run the repair even on a healthy drive (the forced test, docs/sandbox-disk.md)
+#
+# Once it has stopped the service it always starts it again (finally), whatever fails after the stop (w6597: the first
+# forced test on LothDesktop left refsdedupsvc stopped). Native commands run through Native, never bare under 'Stop': in
+# Windows PowerShell 5.1 a native command's stderr is a terminating error there.
 #
 # <ResultDir>\dedup-repair.json: { action, mode, ok, at, state, reasons, did, detail, whoami }; one line per run in
 # dedup-repair.log beside it. ok is false only when the drive was broken and is still broken (or the check failed).
 param(
   [string]$Letter = 'V',
   [Parameter(Mandatory)][string]$ResultDir,
-  [ValidateSet('repair', 'check')][string]$Mode = 'repair',
+  [ValidateSet('repair', 'check', 'force')][string]$Mode = 'repair',
   # A volume task Running this long after the last job start is stuck: the daily job caps itself at 2 h.
   [int]$StuckHours = 3,
   # Tests only: judge the logs as they stood at this time (implies -Mode check; the task state is read as it is now).
-  [datetime]$AsOf = [datetime]::MinValue
+  [datetime]$AsOf = [datetime]::MinValue,
+  # Tests only: throw right after the service stop, to prove the service is started again (the e2e runs it elevated).
+  [switch]$FailAfterStop
 )
 $ErrorActionPreference = 'Stop'
 if ($AsOf -ne [datetime]::MinValue) { $Mode = 'check' }
@@ -41,6 +48,15 @@ function Save {
   [IO.File]::AppendAllText((Join-Path $ResultDir 'dedup-repair.log'), $line.TrimEnd() + "`r`n")
   exit ([int](-not $r.ok))
 }
+# A native command, its stderr kept as text: under 'Stop', WinPS 5.1 turns stderr into a terminating NativeCommandError.
+function Native([string]$exe, [string[]]$a) {
+  $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  try {
+    $o = @(& $exe @a 2>&1 | ForEach-Object { if ($_ -is [Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" } })
+    $code = $LASTEXITCODE
+  } finally { $ErrorActionPreference = $old }
+  [pscustomobject]@{ code = $code; out = (($o | Where-Object { "$_".Trim() -and "$_" -ne 'System.Management.Automation.RemoteException' }) -join ' ').Trim() }
+}
 function MountPoints($e) {
   try { @((([xml]$e.ToXml()).Event.EventData.Data.'#text' | ConvertFrom-Json).Volume.MountPoints) } catch { @() }
 }
@@ -56,14 +72,15 @@ function Events([string]$logName, [int[]]$ids, [int]$max, [scriptblock]$where) {
 }
 function Newest6([string]$mp) { Events $Log 6 20 { (MountPoints $_) -contains $mp } | Select-Object -First 1 }
 function TaskStatus([string]$tn) {
-  $o = & $schtasks /query /tn $tn /fo csv /nh 2>&1
+  # A service stop deletes the volume task, so 'missing' is an answer here, not an error (w6597 forced test).
+  $x = Native $schtasks @('/query', '/tn', $tn, '/fo', 'csv', '/nh')
   # Only "cannot find" is missing; a refusal (access denied as LOCAL SERVICE) is unreadable, never taken as healthy (w6623 H2).
-  if ($LASTEXITCODE -ne 0) { if ("$o" -match 'cannot find') { return 'missing' }; return "unreadable ($("$o".Trim()))" }
-  $f = ("$($o | Select-Object -Last 1)" -split '","')
+  if ($x.code -ne 0) { if ($x.out -match 'cannot find') { return 'missing' }; return "unreadable ($($x.out))" }
+  $f = ($x.out -split '","')
   return $f[-1].Trim('"')
 }
 function ServiceState {
-  $o = (& $sc query $Service) -join ' '
+  $o = (Native $sc @('query', $Service)).out
   if ($o -match 'STATE\s+:\s+\d+\s+(\w+)') { return $Matches[1] }
   return "unknown ($($o -replace '\s+', ' '))"
 }
@@ -81,13 +98,13 @@ try {
   } catch { $r.whoami = "whoami failed: $($_.Exception.Message)" }
 
   $mp = "$($Letter):\"
-  $vp = "$(& $mountvol $mp /L 2>$null)".Trim()
+  $vp = (Native $mountvol @($mp, '/L')).out
   $guid = [regex]::Match($vp, '\{[0-9a-fA-F-]+\}').Value
   if (-not $guid) { $r.state = "no volume at $mp"; Save }
   $tn = "\Microsoft\Windows\ReFsDedupSvc\$($guid.ToUpper())"
   $started = Events $Log 3 60 { (MountPoints $_) -contains $mp }
-  if (-not $started.Count) { $r.state = "ReFS dedup has run no job on $mp (nothing to repair)"; Save }
-  $lastStart = $started[0].TimeCreated
+  if (-not $started.Count -and $Mode -ne 'force') { $r.state = "ReFS dedup has run no job on $mp (nothing to repair)"; Save }
+  $lastStart = if ($started.Count) { $started[0].TimeCreated } else { [datetime]::MaxValue }
   $ev6 = Newest6 $mp
   $dm = Events 'Microsoft-Windows-ReFS/Operational' 303 200 { $_.Message -match [regex]::Escape($guid) } | Select-Object -First 1
   $end = Events $Log 4, 13 60 { (MountPoints $_) -contains $mp } | Select-Object -First 1
@@ -103,36 +120,63 @@ try {
   if ($task -eq 'Running' -and $lastStart -lt (Get-Date).AddHours(-$StuckHours)) {
     $r.reasons += "stuck: $tn Running, last job start $($lastStart.ToUniversalTime().ToString('s'))Z"
   }
+  if ($task -eq 'missing' -and $AsOf -eq [datetime]::MinValue) {
+    # A service stopped and not started again leaves V: with no volume task, so no nightly job (w6791 N1).
+    $r.reasons += "no volume task: $tn is missing, so the nightly dedup job has no trigger"
+  }
+  if ($Mode -eq 'force') { $r.reasons += "forced test (-Mode force): repair whatever the state (task $task, service $(ServiceState))" }
   if (-not $r.reasons.Count -and $task -like 'unreadable*') { $r.ok = $false; $r.state = "healthy by the event logs, but the volume task's state is $task, so a stuck task cannot be seen"; Save }
   if (-not $r.reasons.Count) { $r.state = "healthy (service $(ServiceState), task $task)"; Save }
   if ($Mode -eq 'check') { $r.state = 'broken (check only: nothing changed)'; $r.ok = $false; Save }
 
-  # The repair.
+  # The repair. Once the service is stopped it is started again whatever happens next (finally).
   $t0 = Get-Date
-  if ((ServiceState) -ne 'STOPPED') {
-    $o = & $sc stop $Service 2>&1
-    $r.did += "sc stop $Service (exit $LASTEXITCODE)"
-    if (-not (WaitService 'STOPPED' 60)) { $r.did += "still $(ServiceState) after 60 s" }
+  try {
+    if ((ServiceState) -ne 'STOPPED') {
+      $x = Native $sc @('stop', $Service)
+      $r.did += "sc stop $Service (exit $($x.code)$(if ($x.code) { ": $($x.out)" }))"
+      if (-not (WaitService 'STOPPED' 60)) { $r.did += "still $(ServiceState) after 60 s" }
+    }
+    if ($FailAfterStop) { throw 'test fault right after the stop (-FailAfterStop)' }
+    $ts = TaskStatus $tn
+    if ($ts -eq 'Running' -or $ts -like 'unreadable*') {
+      $x = Native $schtasks @('/end', '/tn', $tn)
+      $r.did += "schtasks /end $tn (exit $($x.code)$(if ($x.code) { ": $($x.out)" }))"
+    } elseif ($ts -eq 'missing') {
+      $r.did += 'volume task gone after the stop (the service registers it again when it starts; checked below)'
+    }
+  } finally {
+    $x = Native $sc @('start', $Service)
+    $r.did += "sc start $Service (exit $($x.code)$(if ($x.code) { ": $($x.out)" }))"
+    if (-not (WaitService 'RUNNING' 60)) {
+      # One more try (w6791 N2): a stop still pending after 60 s refuses the first start.
+      [void](WaitService 'STOPPED' 60)
+      $x = Native $sc @('start', $Service)
+      $r.did += "sc start $Service again (exit $($x.code)$(if ($x.code) { ": $($x.out)" }))"
+      [void](WaitService 'RUNNING' 60)
+    }
+    $r.did += "service $(ServiceState)"
   }
-  $ts = TaskStatus $tn
-  if ($ts -eq 'Running' -or $ts -like 'unreadable*') {
-    $o = & $schtasks /end /tn $tn 2>&1
-    $r.did += "schtasks /end $tn (exit $LASTEXITCODE$(if ($LASTEXITCODE) { ": $("$o".Trim())" }))"
+  # The stop deletes V:'s volume task, and that task is the nightly job's trigger. Success needs it back (w6791 N1): the
+  # service registers it again when it starts and watches the volume. This script never makes it itself (no dedup setting
+  # is changed here); if it does not come back the run fails, and the watch reports it.
+  $seen = $null; $task = 'missing'
+  for ($i = 0; $i -lt 60 -and (-not $seen -or $task -eq 'missing'); $i++) {
+    if (-not $seen) { $n = Newest6 $mp; if ($n -and $n.TimeCreated -ge $t0) { $seen = $n } }
+    $task = TaskStatus $tn
+    if (-not $seen -or $task -eq 'missing') { Start-Sleep -Seconds 2 }
   }
-  $o = & $sc start $Service 2>&1
-  $r.did += "sc start $Service (exit $LASTEXITCODE)"
-  [void](WaitService 'RUNNING' 60)
-  $seen = $null
-  for ($i = 0; $i -lt 60 -and -not $seen; $i++) {
-    $n = Newest6 $mp
-    if ($n -and $n.TimeCreated -ge $t0) { $seen = $n } else { Start-Sleep -Seconds 2 }
+  $next = ''
+  if ($task -ne 'missing' -and $task -notlike 'unreadable*') {
+    $q = Native $schtasks @('/query', '/tn', $tn, '/fo', 'list')
+    $next = [regex]::Match($q.out, 'Next Run Time:\s+(.+?)\s+Status:').Groups[1].Value
   }
-  $task = TaskStatus $tn
-  if ($seen -and $task -ne 'Running' -and $task -notlike 'unreadable*') {
-    $r.state = "repaired: the service watches $mp again (event 6 at $($seen.TimeCreated.ToUniversalTime().ToString('s'))Z), task $task"
+  if ($seen -and $task -ne 'Running' -and $task -ne 'missing' -and $task -notlike 'unreadable*') {
+    $r.state = "repaired: the service watches $mp again (event 6 at $($seen.TimeCreated.ToUniversalTime().ToString('s'))Z), volume task back ($task, next run $next)"
   } else {
     $r.ok = $false
-    $r.state = "repair did not finish: event 6 $(if ($seen) { 'seen' } else { 'not seen within 120 s' }), service $(ServiceState), task $task"
+    $why = if ($task -eq 'missing') { "the volume task $tn is not back, so the nightly job has no trigger" } else { "task $task" }
+    $r.state = "repair did not finish: event 6 $(if ($seen) { 'seen' } else { 'not seen within 120 s' }), service $(ServiceState), $why"
   }
   Save
 } catch {
