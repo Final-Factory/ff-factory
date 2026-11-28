@@ -111,3 +111,20 @@ test('w6484: the daemon sweep has no kill timer: killed inside the slots lock it
   const r = await runFfuSlotSweep({ root: dir, factsFile: 'x', max: 4, script });
   assert.equal(r.ok, true, r.out);
 });
+
+test('w6803: a due unpushed rescue runs a sweep with no stale slot; a failed rescue push is logged as a failure; one not due runs nothing', async () => {
+  const quiet = { ...REPORT, slots: REPORT.slots.filter((s) => !s.stale) };
+  const rescue = { branch: 'rescue/ffu-slot/slot2-5a78ddd2-7e2a4052', holder: '5a78ddd2', slot: 'slot2', at: '2026-11-28T03:08:17.003Z' };
+  const out = "ffu-slot: rescue push failed: rescue/ffu-slot/slot2-5a78ddd2-7e2a4052 (5a78ddd2's work from slot2, 7e2a4052) is in /x/repo only, tried again on a later sweep: remote: error: GH007: Your push would publish a private email address.\nffu-slot: no slot to free\n";
+  const on = rig('on', async () => ({ ok: true, out }));
+  assert.deepEqual(await on.a.onReport({ ...quiet, unpushedRescues: [{ ...rescue, due: false }] }), []);
+  assert.equal(on.sweeps(), 0, 'not due: no sweep');
+  assert.deepEqual(await on.a.onReport({ ...quiet, unpushedRescues: [{ ...rescue, due: true }] }), []);
+  assert.equal(on.sweeps(), 1, 'due: a sweep tries it again');
+  assert.ok(on.logs.some((l) => /^ffu slots: auto sweep failed: rescue push of rescue\/ffu-slot\/slot2-5a78ddd2-7e2a4052 .*GH007/.test(l)), on.logs.join('\n'));
+  const warn = rig('warn', async () => ({ ok: true, out }));
+  await warn.a.onReport({ ...quiet, unpushedRescues: [{ ...rescue, due: true, error: 'GH007' }] });
+  await warn.a.onReport({ ...quiet, unpushedRescues: [{ ...rescue, due: true, error: 'GH007' }] });
+  assert.equal(warn.sweeps(), 0);
+  assert.equal(warn.logs.filter((l) => /auto sweep failed: rescue push of .* warn-only/.test(l)).length, 1, 'warn names it once');
+});

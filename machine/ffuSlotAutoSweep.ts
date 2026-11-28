@@ -15,6 +15,10 @@
  * Only holders that no longer run are freed (sweepSlots skips running ones when it has no session); a running holder's stale
  * slot is left to the next take. The sweep runs in a child process, so a failure is a log line and never stops the daemon; the portal's
  * machines.cleanup.staleOutput.ffuSlotSweep turns it off again with nobody at the machine.
+ *
+ * w6803: a report that names a rescue not on origin yet (unpushedRescues, due RESCUE_RETRY_MS after its last try) runs a
+ * sweep too, which tries its push again; a rescue push that fails is logged as `ffu slots: auto sweep failed: rescue push
+ * of ...`, the failure line the health and review checks read.
  */
 import type { FfuSlotsReport } from '../shared/types.ts';
 
@@ -37,6 +41,8 @@ export function staleSlotsOf(r: FfuSlotsReport | undefined): FfuSlotsReport['slo
 export class FfuSlotAutoSweep {
   /** What warn mode said already (slot, holder), so a slot that stays stale is logged once, not every report. */
   private warned = new Set<string>();
+  /** w6803: unpushed rescue branches warn mode named already. */
+  private warnedRescues = new Set<string>();
   /** The last failure on mode on, so a sweep that keeps failing is logged once until it changes. */
   private lastFail = '';
   private running = false;
@@ -53,8 +59,16 @@ export class FfuSlotAutoSweep {
     const keys = new Set(stale.map((s) => `${s.id}:${s.holder}`));
     for (const k of this.warned) if (!keys.has(k)) this.warned.delete(k);
     const mode = this.d.mode();
-    if (!stale.length || mode === 'off' || this.running) return [];
+    // w6803: a rescue GitHub refused is tried again by a sweep, so one is due even when no slot is stale.
+    const unpushed = r?.unpushedRescues ?? [];
+    const due = unpushed.filter((x) => x.due);
+    for (const b of this.warnedRescues) if (!unpushed.some((x) => x.branch === b)) this.warnedRescues.delete(b);
+    if ((!stale.length && !due.length) || mode === 'off' || this.running) return [];
     if (mode === 'warn') {
+      for (const x of due.filter((x) => !this.warnedRescues.has(x.branch))) {
+        this.warnedRescues.add(x.branch);
+        this.d.log(`ffu slots: auto sweep failed: rescue push of ${x.branch} (${x.holder}'s work from ${x.slot}) is not on origin, and warn-only (ffuSlotSweep warn) does not try it again${x.error ? `: ${x.error}` : ''}`);
+      }
       const fresh = stale.filter((s) => !this.warned.has(`${s.id}:${s.holder}`));
       for (const s of fresh) {
         this.warned.add(`${s.id}:${s.holder}`);
@@ -73,7 +87,11 @@ export class FfuSlotAutoSweep {
         return [];
       }
       this.lastFail = '';
-      for (const l of lines) this.d.log(`ffu slots: auto sweep: ${l.replace(/^ffu-slot:\s*/, '')}`);
+      // w6803: a rescue push that failed is a failure line (the health and review checks read "auto sweep failed").
+      for (const l of lines) {
+        const failed = /^ffu-slot: rescue push failed: /.exec(l);
+        this.d.log(failed ? `ffu slots: auto sweep failed: rescue push of ${l.slice(failed[0].length)}` : `ffu slots: auto sweep: ${l.replace(/^ffu-slot:\s*/, '')}`);
+      }
       return [...new Set(lines.flatMap((l) => /^ffu-slot: freed (slot\d+):/.exec(l)?.[1] ?? []))];
     } catch (e) {
       this.d.log(`ffu slots: auto sweep failed: ${(e as Error).message}`);
