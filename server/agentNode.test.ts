@@ -6,7 +6,7 @@ import { tmpDir } from './testTmp.ts';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseHolders, holdersScript, type Holder } from './agentNodeHolders.ts';
-import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodeHome, agentNodePathDir, agentNodeStamp, ensureAgentNode, labelProblem, treeDiff, treeDigest, firewallCheckScript, parseFirewallCheck, type AgentNodeDeps } from './agentNode.ts';
+import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodeHome, agentNodePathDir, agentNodeStamp, daemonNodeDir, daemonNodeExe, ensureAgentNode, ensureDaemonNode, labelProblem, treeDiff, treeDigest, firewallCheckScript, parseFirewallCheck, type AgentNodeDeps } from './agentNode.ts';
 
 /**
  * w1742: the agents' node lives at one fixed path per Windows worker root, so no worker unpacks its own into a session temp
@@ -798,4 +798,98 @@ test('w5581: firewall.ps1 makes the agent node\'s rule from the tailnet only, an
   assert.match(worker, /return !seen \|\| seen\.wide\.includes\(node\);/, 'an unread rule is kept as it is, never narrowed');
   assert.match(worker, /could not read the rules, so they were not checked \(\$\{raw\.trim\(\)/, 'a failed read says why (the error or its last lines)');
   assert.match(worker, /seen\.peersUnknown\.filter\(\(p\) => seen\.wide\.some/, 'only the wide paths\' unseen peers are listed, not every idle ffu-server');
+});
+
+test("w6603: the daemon's node goes to <root>/daemon/node-<version> from the agents' kept zip, and a pinned copy there is kept as it is", async () => {
+  const root = tmp();
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    const exe = await ensureDaemonNode(root, f.d);
+    assert.equal(exe, daemonNodeExe(root));
+    assert.equal(exe, path.join(root, 'daemon', `node-${AGENT_NODE.version}`, 'node.exe'));
+    assert.equal(fs.readFileSync(exe!, 'utf8'), AGENT_NODE.version);
+    assert.match(f.said.at(-1)!, /^Daemon node: v[\d.]+ put at .* \(none there yet\)\.$/);
+    assert.ok(fs.existsSync(path.join(agentNodeHome(root), AGENT_NODE.zip)), "the zip is kept where the agents' node finds it");
+    // A second run (the next update) keeps the folder the running daemon holds: no unpack, no line.
+    const again = fake(zip);
+    assert.equal(await ensureDaemonNode(root, again.d), exe);
+    assert.deepEqual(again.tarInto, []);
+    assert.deepEqual(again.said, []);
+    assert.deepEqual(fs.readdirSync(path.join(root, 'daemon')).filter((n) => n.startsWith('node-')), [`node-${AGENT_NODE.version}`]);
+  });
+});
+
+test("w6603: a daemon node changed, added to or of another version is replaced; folders of other versions go unless a supervisor names them", async () => {
+  const root = tmp();
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    const exe = (await ensureDaemonNode(root, f.d))!;
+    fs.writeFileSync(path.join(path.dirname(exe), 'evil.dll'), 'x');
+    assert.equal(await ensureDaemonNode(root, f.d), exe);
+    assert.match(f.said.at(-1)!, /^Daemon node: .* \(its 4 files are not the pinned download's/);
+    assert.ok(!fs.existsSync(path.join(path.dirname(exe), 'evil.dll')));
+    fs.writeFileSync(exe, 'v1.0.0');
+    assert.equal(await ensureDaemonNode(root, f.d), exe);
+    assert.match(f.said.at(-1)!, /its node\.exe has SHA-256/);
+    assert.equal(fs.readFileSync(exe, 'utf8'), AGENT_NODE.version);
+    // An older pin's folder: kept while the rollback's supervisor names it, gone once nothing does.
+    const daemon = path.join(root, 'daemon');
+    const older = path.join(daemon, 'node-v22.17.0');
+    fs.mkdirSync(older);
+    fs.writeFileSync(path.join(older, 'node.exe'), 'v22.17.0');
+    fs.mkdirSync(path.join(daemon, 'node-v24.22.1-1.part'));
+    fs.writeFileSync(path.join(daemon, 'run-daemon.ps1.old'), `$node = '${path.join(older, 'node.exe').toUpperCase()}'\n`);
+    await ensureDaemonNode(root, f.d);
+    assert.ok(fs.existsSync(older), 'run-daemon.ps1.old still names it');
+    assert.ok(!fs.existsSync(path.join(daemon, 'node-v24.22.1-1.part')), "an old stage goes");
+    fs.rmSync(path.join(daemon, 'run-daemon.ps1.old'));
+    await ensureDaemonNode(root, f.d);
+    assert.ok(!fs.existsSync(older));
+    assert.ok(fs.existsSync(path.join(daemon, 'agent-node')), "the agents' record folder is not a node folder");
+  });
+});
+
+test("w6603: when the daemon's node cannot be placed the answer is none, the caller keeps the node it had, and no stage is left (lothsahn's lockout rule)", async () => {
+  const root = tmp();
+  const bad = fake(Buffer.from('not the pinned zip'));
+  assert.equal(await ensureDaemonNode(root, bad.d), undefined);
+  assert.match(bad.said.at(-1)!, /^WARNING: Daemon node: could not put .*SHA-256.*the daemon keeps the node it had, and the next update tries again\.$/);
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    assert.equal(await ensureDaemonNode(root, fake(zip, { tarFails: true }).d), undefined);
+    const wrong = fake(zip, { version: 'v1.0.0' });
+    assert.equal(await ensureDaemonNode(root, wrong.d), undefined);
+    assert.match(wrong.said.at(-1)!, /not the pinned download: its node\.exe has SHA-256/);
+    assert.equal(await ensureDaemonNode(root, fake(zip, { version: 'v1.0.0', pinVersion: 'v1.0.0' }).d), undefined, 'its hash is right but it says another version');
+  });
+  assert.deepEqual(fs.readdirSync(path.join(root, 'daemon')).filter((n) => n.startsWith('node-')), []);
+  const f = fake(Buffer.from('x'));
+  assert.equal(await ensureDaemonNode(root, { ...f.d, platform: 'darwin' }), undefined, 'Windows only for now');
+  assert.deepEqual(f.said, []);
+});
+
+test("w6603 (w6655's review): the daemon's node gets its own plain Medium label before it is moved into place, so Low workers' shims can start it before the daemon's label pass; a refused label keeps the node it had", async () => {
+  const root = tmp();
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    const calls: string[][] = [];
+    const exec = f.d.exec;
+    const d: AgentNodeDeps = { ...f.d, exec: async (cmd, args, o) => (cmd === 'icacls' && calls.push(args), exec(cmd, args, o)) };
+    const exe = (await ensureDaemonNode(root, d))!;
+    const grant = calls.findIndex((a) => a[1] === '/grant');
+    const label = calls.findIndex((a) => a[1] === '/setintegritylevel');
+    assert.ok(grant >= 0 && label > grant, 'the account gets Full (WRITE_OWNER) before the label is set');
+    assert.equal(calls[grant][2], 'TEST\\worker:(OI)(CI)F');
+    assert.deepEqual(calls[label].slice(1), ['/setintegritylevel', '(OI)(CI)medium']);
+    assert.equal(path.basename(calls[label][0]), unpackedName, 'set on the unpacked folder, which the rename carries into place');
+    assert.equal(path.dirname(exe), daemonNodeDir(root));
+    const other = tmp();
+    const refused = fake(zip, { icaclsFails: true });
+    assert.equal(await ensureDaemonNode(other, refused.d), undefined);
+    assert.match(refused.said.at(-1)!, /^WARNING: Daemon node: .*could not label .* readable to Low workers: Access is denied\..*the daemon keeps the node it had/);
+    assert.deepEqual(fs.readdirSync(path.join(other, 'daemon')).filter((n) => n.startsWith('node-')), [], 'nothing unlabelled is left in place');
+  });
 });

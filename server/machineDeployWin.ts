@@ -632,8 +632,8 @@ if (-not $t) { 'job=none' } elseif ($t.State -eq 'Running') { 'job=running' } el
 
 /**
  * Put the code that ran before back (w1596, scripts/worker/linkJob.ts): stop the daemon (its agent hosts run on), app ->
- * app.failed, app.old -> app, start it. Only folders in the daemon's own folder move; an earlier app.failed is removed
- * first. Prints `started=True|False`.
+ * app.failed, app.old -> app, and the supervisor it ran with back (run-daemon.ps1.old, w6603), start it. Only files in
+ * the daemon's own folder move; an earlier app.failed is removed first. Prints `started=True|False`.
  */
 export function rollbackScript(appDir: string, service?: WinService): string {
   return `${head({ appDir, service })}
@@ -648,6 +648,14 @@ function Move-Retry($from, $to) {
 if (Test-Path -LiteralPath $failed) { Remove-Item -LiteralPath $failed -Recurse -Force }
 if (Test-Path -LiteralPath $app) { Move-Retry $app $failed }
 Move-Retry $old $app
+# The supervisor the old code ran with (w6603, installScript keeps it): its node with it. The one that failed is kept as
+# run-daemon.ps1.failed. An install from before w6603 kept none: the supervisor there stays.
+$sup = Join-Path $F 'run-daemon.ps1'
+if (Test-Path -LiteralPath ($sup + '.old')) {
+  if (Test-Path -LiteralPath $sup) { Move-Item -LiteralPath $sup -Destination ($sup + '.failed') -Force }
+  Move-Item -LiteralPath ($sup + '.old') -Destination $sup -Force
+  'supervisor=restored'
+}
 if (Test-FFLoggedOn) { Start-FFDaemon; 'started=True' } else { 'started=False' }
 `;
 }
@@ -675,6 +683,10 @@ if (Test-Path -LiteralPath $old) {
   try { Remove-Item -LiteralPath $old -Recurse -Force } catch { Move-Retry $old ($old + '-' + (Get-Date -Format yyyyMMddHHmmss)) }
 }
 if (Test-Path -LiteralPath $app) { Move-Retry $app $old }
+# The supervisor the code in app.old ran with goes beside it as run-daemon.ps1.old (w6603), in the same step: a rollback
+# puts both back, so the old code runs on the node it ran on before. With no supervisor there, none is kept.
+$sup = Join-Path $F 'run-daemon.ps1'
+if (Test-Path -LiteralPath $sup) { Copy-Item -LiteralPath $sup -Destination ($sup + '.old') -Force } elseif (Test-Path -LiteralPath ($sup + '.old')) { Remove-Item -LiteralPath ($sup + '.old') -Force }
 Move-Retry $new $app
 New-Item -ItemType Directory -Force (Join-Path $F 'agents'), (Join-Path $F 'logs') | Out-Null
 function Write-B64($name, $data) { [IO.File]::WriteAllBytes((Join-Path $F $name), [Convert]::FromBase64String($data)) }

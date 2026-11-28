@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { holdersScript, parseHolders, type Holder } from './agentNodeHolders.ts';
 import { currentAccount } from '../machine/lowIntegrity.ts';
+import { AGENT_NODE, DAEMON_NODE_FOLDER } from './agentNodePin.ts';
 
 /**
  * The agents' node on a Windows worker root (w1742; lothsahn, 2026-10-22: "we're making random folders under the temp
@@ -19,18 +20,7 @@ import { currentAccount } from '../machine/lowIntegrity.ts';
  * keeps fitting. Windows only: a Mac or Linux worker has no such prompt.
  */
 
-/**
- * The pinned build: nodejs.org's SHASUMS256.txt for v24.22.1 (fetched and checked 2026-10-22, w1742). `exeSha256` is the
- * node.exe inside that zip and `treeSha256` the digest of all its files (`treeDigest`), both from the zip unpacked with
- * Windows' tar.exe (w5839, 2026-11-25: 1994 files; BEAST's tools\node gave the same two digests).
- */
-export const AGENT_NODE = {
-  version: 'v24.22.1',
-  zip: 'node-v24.22.1-win-x64.zip',
-  sha256: 'd2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5',
-  exeSha256: 'd702daa815eabbff763c7d3808e235cf031cf2ca70211b56847bc72f51e240e5',
-  treeSha256: '3983141a10f864dbf120545a5bb459883bfff0ce450d8831cb0a1e8caddafa7b',
-} as const;
+export { AGENT_NODE, DAEMON_NODE_FOLDER } from './agentNodePin.ts';
 
 /** The firewall group of the node's rule (scripts/worker/firewall.ps1 $NodeGroup). */
 export const NODE_GROUP = 'Final Factory agent node';
@@ -547,6 +537,132 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
     const left = fs.existsSync(path.join(dir, 'node.exe')) ? 'the node there stays' : `${dir} has no node yet; the next rollout tries again`;
     d.say(`WARNING: Agent node: node not reinstalled (${why}): could not put ${AGENT_NODE.version} at ${dir}: ${(e as Error).message}; ${left}.`);
     return 'failed';
+  }
+}
+
+/**
+ * w6603: the daemon's own copy of the agents' pinned node, `<root>\daemon\node-<version>\node.exe`, so every Windows
+ * worker runs its daemon on the same node as its agents, not whatever newest node the machine has (lothsahn: "every
+ * windows box should be the same"). It lives in the daemon's folder, which no daemon version labels Low (`agentNodeHome`),
+ * not in `tools\node`, which every rollout swaps while the agents run from it. One folder per version: a rollback's
+ * supervisor (run-daemon.ps1.old, machineDeployWin.ts) still finds the node it named, and a new pin never replaces the
+ * folder the running daemon holds open.
+ */
+export const daemonNodeDir = (root: string) => path.join(root, 'daemon', DAEMON_NODE_FOLDER);
+export const daemonNodeExe = (root: string) => path.join(daemonNodeDir(root), 'node.exe');
+
+/** Why the node at `dir` is not the pinned download, read by hashing; undefined when it is. Never runs it. */
+function pinnedTreeProblem(dir: string, pin: Pin): string | undefined {
+  if (notAFolder(dir)) return 'it is a link or a file, not a folder';
+  if (!fs.existsSync(path.join(dir, 'node.exe'))) return 'it has no node.exe';
+  const linked: string[] = [];
+  const files = treeHashes(dir, linked);
+  if (files['node.exe'] !== pin.exeSha256) return `its node.exe has SHA-256 ${files['node.exe']}, not the pinned ${pin.exeSha256}`;
+  if (treeDigest(files) !== pin.treeSha256) return `its ${Object.keys(files).length} files are not the pinned download's (digest ${treeDigest(files)})`;
+  if (linked.length) return `${linked.length} of its files have another hard link (${linked.slice(0, 3).join(', ')})`;
+  return undefined;
+}
+
+/**
+ * The daemon folder's node folders of other versions, and stages a run left, deleted unless a supervisor (run-daemon.ps1
+ * or the rollback's run-daemon.ps1.old) names them. One a running daemon holds stays until a later run (Windows refuses
+ * the delete).
+ */
+function sweepDaemonNodes(daemonDir: string, keep: string, now: number): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(daemonDir);
+  } catch {
+    return;
+  }
+  const named = ['run-daemon.ps1', 'run-daemon.ps1.old']
+    .map((n) => {
+      try {
+        return fs.readFileSync(path.join(daemonDir, n), 'utf8').toLowerCase();
+      } catch {
+        return '';
+      }
+    })
+    .join('\n');
+  for (const n of names) {
+    const part = /^node-v[\d.]+-(\d+)\.part$/.exec(n);
+    if (part) {
+      if (now - Number(part[1]) >= STAGE_TTL_MS) remove(path.join(daemonDir, n));
+      continue;
+    }
+    if (/^node-v[\d.]+\.old-\d+$/.test(n)) {
+      remove(path.join(daemonDir, n));
+      continue;
+    }
+    if (!/^node-v[\d.]+$/.test(n) || n === keep) continue;
+    if (named.includes(path.join(daemonDir, n, 'node.exe').toLowerCase())) continue;
+    remove(path.join(daemonDir, n));
+  }
+}
+
+/**
+ * Put the pinned node at `daemonNodeDir` for the daemon to run on (w6603), and answer its node.exe; undefined (with a
+ * WARNING line) when it cannot, and then the caller keeps the node the daemon had (lothsahn's lockout rule: never leave
+ * the machine without a node to run its daemon). A folder whose files hash to the pinned download is kept as it is: the
+ * running daemon holds it open, and the daemon's folder is one no Low worker can write. Anything else there goes aside for
+ * a fresh copy, unpacked from the zip `ensureAgentNode` keeps (`pinnedZip`), hashed and run once before it is put there.
+ */
+export async function ensureDaemonNode(root: string, d: AgentNodeDeps): Promise<string | undefined> {
+  if (d.platform !== 'win32') return undefined;
+  const pin = d.pin ?? { exeSha256: AGENT_NODE.exeSha256, treeSha256: AGENT_NODE.treeSha256 };
+  const dir = daemonNodeDir(root);
+  const exe = path.join(dir, 'node.exe');
+  const daemonDir = path.dirname(dir);
+  const now = (d.now ?? Date.now)();
+  sweepDaemonNodes(daemonDir, path.basename(dir), now);
+  let why = 'none there yet';
+  if (fs.existsSync(dir) || notAFolder(dir)) {
+    const bad = pinnedTreeProblem(dir, pin) ?? ((await versionOf(d, exe)) === AGENT_NODE.version ? undefined : `it does not say ${AGENT_NODE.version}`);
+    if (!bad) return exe;
+    why = bad;
+    const aside = path.join(daemonDir, `${path.basename(dir)}.old-${now}`);
+    try {
+      fs.renameSync(dir, aside);
+    } catch (e) {
+      d.say(`WARNING: Daemon node: ${dir} is not the pinned ${AGENT_NODE.version} (${why}) and could not be put aside (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); the daemon keeps the node it had.`);
+      return undefined;
+    }
+    remove(aside);
+  }
+  const stage = path.join(daemonDir, `node-${AGENT_NODE.version}-${now}.part`);
+  try {
+    fs.mkdirSync(stage, { recursive: true });
+    fs.mkdirSync(agentNodeHome(root), { recursive: true });
+    const zip = path.join(stage, AGENT_NODE.zip);
+    fs.writeFileSync(zip, await pinnedZip(agentNodeHome(root), d));
+    const tar = d.tar ?? path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe');
+    const x = await d.exec(tar, ['-xf', zip, '-C', stage], { timeoutMs: 10 * 60_000 });
+    if (x.code !== 0) throw new Error(`tar could not unpack ${zip}: ${(x.stderr || x.stdout).trim().slice(-300)}`);
+    const unpacked = path.join(stage, AGENT_NODE.zip.replace(/\.zip$/, ''));
+    // Its own plain Medium label (No-Write-Up, no No-Read-Up), which a rename keeps: the read fence closes the daemon's
+    // folder to Low reads and gives this folder back (daemonReads.ts FENCE_READ_ALLOW), but only once the restarted daemon's
+    // label pass reaches it, minutes on LothDesktop (w5980); meanwhile the shims Low workers run start this node.exe, and
+    // starting an exe needs read access (w6655's review). The account gets Full on the stage first, as for the agents' node
+    // (w6068: setting a label needs WRITE_OWNER, which a group's Modify lacks).
+    const account = d.account ?? currentAccount();
+    if (account) {
+      const g = await d.exec('icacls', [stage, '/grant', `${account}:(OI)(CI)F`], { timeoutMs: 60_000 });
+      if (g.code !== 0) throw new Error(`could not give ${account} Full on ${stage}, which labelling it needs: ${(g.stderr || g.stdout).trim().slice(-200)}`);
+    }
+    const lab = await d.exec('icacls', [unpacked, '/setintegritylevel', '(OI)(CI)medium'], { timeoutMs: 30 * 60_000 });
+    if (lab.code !== 0) throw new Error(`could not label ${unpacked} readable to Low workers: ${(lab.stderr || lab.stdout).trim().slice(-200)}`);
+    const bad = pinnedTreeProblem(unpacked, pin);
+    if (bad) throw new Error(`the unpacked node is not the pinned download: ${bad}`);
+    const got = await versionOf(d, path.join(unpacked, 'node.exe'));
+    if (got !== AGENT_NODE.version) throw new Error(`the unpacked node says ${got ?? 'nothing'}, not ${AGENT_NODE.version}`);
+    fs.renameSync(unpacked, dir);
+    remove(stage);
+    d.say(`Daemon node: ${AGENT_NODE.version} put at ${dir} (${why}).`);
+    return exe;
+  } catch (e) {
+    remove(stage);
+    d.say(`WARNING: Daemon node: could not put ${AGENT_NODE.version} at ${dir} (${why}): ${(e as Error).message}; the daemon keeps the node it had, and the next update tries again.`);
+    return undefined;
   }
 }
 
