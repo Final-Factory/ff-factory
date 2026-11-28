@@ -419,3 +419,178 @@ test('w6768 (on): with no computer free for its work a fresh worker waits and is
   assert.equal(starts.length, 1);
   await new Promise((r) => setTimeout(r, 30));
 });
+
+// ---------------------------------------------------------------- w6774: the review nits of w6773
+
+type Sender = { sessions: { send: (id: string, text: string) => string } };
+
+test("w6774 (nit 1): startLost and a start_agent see each other's start", async (t) => {
+  const { agents, request, starts, settled, x } = await moveSetup(t);
+  request();
+  agents.lostCheckIn('e41a69e8', { at: Date.now() - MIN, note: 'x' }, 'is gone');
+  const y = x as unknown as { agentStarting: Map<string, string> };
+  y.agentStarting.set('w6370', 'lothdesktop/agent3');
+  assert.deepEqual(agents.moveAwayWork(Date.now()), [], 'a start_agent under way is a start');
+  assert.equal(starts.length, 0);
+  y.agentStarting.delete('w6370');
+  // The fresh worker's start holds it from start_agent until it settles.
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const real = x.startMoved;
+  x.startMoved = async (...args) => {
+    await gate;
+    return real(...args);
+  };
+  assert.equal(agents.moveAwayWork(Date.now()).length, 1);
+  assert.match(agents.startUnderWay('w6370') ?? '', /FF Factory is starting a fresh worker for its lost check-in now/);
+  release();
+  await settled('e41a69e8');
+  assert.equal(agents.startUnderWay('w6370'), undefined);
+  assert.equal(starts.length, 1);
+});
+
+test('w6774 (nits 2, 3): a worker whose computer is here is woken again where it is with the note, once; the dispatcher is told that route', async (t) => {
+  const { store, agents, told, machine, request, starts, live } = await moveSetup(t);
+  const sent: { id: string; text: string }[] = [];
+  let refuse: string | undefined = 'at the agent limit';
+  (agents as unknown as Sender).sessions.send = (id, text) => {
+    if (refuse) throw new Error(refuse);
+    sent.push({ id, text });
+    return 'u1';
+  };
+  store.putSession(worker('dddd4444', { machineId: 'lothdesktop', machineSandbox: 'slot1' }));
+  request({ id: 'w6500', sessionIds: ['dddd4444'] });
+  assert.deepEqual(agents.lostCheckIn('dddd4444', { at: Date.now() - MIN, note: 'check CI' }, 'could not be woken (at the agent limit)'), ['w6500']);
+  assert.match(told[0]!, /FF Factory wakes its worker dddd4444 again where it is by itself/);
+  assert.doesNotMatch(told[0]!, /moves it off that computer/);
+  assert.match(store.work.get('w6500')!.log.join(' | '), /FF Factory will wake its worker dddd4444 again where it is with the check-in's note/);
+  const now = Date.now();
+  assert.deepEqual(agents.moveAwayWork(now), [], 'still refused: tried again after 10 min');
+  refuse = undefined;
+  assert.deepEqual(agents.moveAwayWork(now + 5 * MIN), []);
+  assert.deepEqual(agents.moveAwayWork(now + 11 * MIN), [['w6500', 'its worker dddd4444 woken again where it is for its lost check-in (w6774)']]);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0]!.text, /^\[wake_me, w6768\] Your check-in at \d\d:\d\dZ could not be delivered then \(could not be woken \(at the agent limit\)\); FF Factory wakes you with it now\. Your note: check CI$/);
+  assert.deepEqual(agents.moveAwayWork(now + 30 * MIN), [], 'woken once per lost check-in');
+  assert.equal(sent.length, 1);
+  assert.equal(starts.length, 0, 'nothing moves');
+  // Its turn ends the lost check-in.
+  store.putSession({ ...store.sessions.get('dddd4444')!, turns: 5 });
+  assert.doesNotMatch(live('w6500')?.why ?? '', /w6768/);
+  // A computer offline within the grace waits.
+  machine('m3', { lastSeen: new Date(Date.now() - 2 * MIN).toISOString() });
+  store.putSession(worker('eeee5555', { machineId: 'm3', machineSandbox: 'slot1' }));
+  request({ id: 'w6501', sessionIds: ['eeee5555'] });
+  agents.lostCheckIn('eeee5555', { at: Date.now() - MIN, note: 'y' }, 'could not be woken (offline)');
+  agents.moveAwayWork(Date.now() + 20 * MIN);
+  assert.equal(sent.length, 1, 'its computer is offline: nothing sent');
+});
+
+test('w6774 (nit 3): the away computer back before a move found room: its worker is woken where it is', async (t) => {
+  const { store, agents, machine, request, starts, x } = await moveSetup(t);
+  const sent: string[] = [];
+  (agents as unknown as Sender).sessions.send = (_id, text) => {
+    sent.push(text);
+    return 'u1';
+  };
+  x.places = () => [pcx('beast', { online: false })]; // no room anywhere else
+  machine('beast', { lastSeen: new Date(Date.now() - 147 * MIN).toISOString() });
+  store.putSession(worker('69908625', { machineId: 'beast', machineSandbox: 'agent1' }));
+  request({ id: 'w6484', sessionIds: ['69908625'] });
+  agents.lostCheckIn('69908625', { at: Date.now() - MIN, note: 'is the build done?' }, agents.waker.awayOf!('69908625')!);
+  assert.deepEqual(agents.moveAwayWork(Date.now()), [], 'no room to move to');
+  assert.equal(starts.length, 0);
+  const machines = (agents as unknown as { machines: { isOnline: (id: string) => boolean } }).machines;
+  machines.isOnline = () => true;
+  machine('beast', { online: true, lastSeen: new Date().toISOString() });
+  assert.equal(agents.longAwayOf('beast'), undefined, 'beast is back');
+  assert.equal(agents.moveAwayWork(Date.now()).length, 1);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0]!, /Your note: is the build done\?$/);
+});
+
+test("w6774 (nit 5): a pinned request's fresh worker starts only on its pin", async (t) => {
+  const { agents, request, starts, settled, x, machine } = await moveSetup(t);
+  machine('m5', { online: true });
+  x.places = () => [pcx('lothdesktop'), pcx('m5', { online: false })];
+  request({ machinePin: { ids: ['m5'], why: 'its setup' } });
+  agents.lostCheckIn('e41a69e8', { at: Date.now() - MIN, note: 'x' }, 'is gone');
+  const now = Date.now();
+  assert.deepEqual(agents.moveAwayWork(now), [], 'm5 is offline: nothing starts on lothdesktop');
+  x.places = () => [pcx('lothdesktop'), pcx('m5')];
+  assert.deepEqual(agents.moveAwayWork(now + 11 * MIN), [['w6370', 'a fresh worker starts on m5 for its lost check-in (w6768)']]);
+  await settled('e41a69e8');
+  assert.deepEqual(starts.map((m) => m.to), ['m5']);
+});
+
+test('w6774 (nit 5): the real startMoved with the ghost worker starts the fresh worker; its handover says it was restarted, not "taken off ... on (removed)"', async (t) => {
+  const { store, agents, machine, request } = await agentsSetup(t);
+  type Start = { sandbox?: string; prompt: string; workId?: string; requestedBy?: Requester };
+  const x = agents as unknown as MoveInternals & { startWorker: (r: Start) => { info: SessionInfo } };
+  machine('lothdesktop', { online: true });
+  x.places = () => [pcx('lothdesktop')];
+  const m = (agents as unknown as { machines: { offersLight: (id: string) => boolean; createLightFolder: (id: string, why: string) => Promise<unknown> } }).machines;
+  m.offersLight = () => true;
+  m.createLightFolder = async () => ({ id: 'agent9', status: 'ready', sessionIds: [], unity: { state: 'stopped' } });
+  const started: Start[] = [];
+  x.startWorker = (r) => {
+    started.push(r);
+    const info = worker('new1', { machineId: 'lothdesktop', machineSandbox: 'agent9', status: 'running', lastActivityAt: new Date().toISOString() });
+    store.putSession(info);
+    return { info };
+  };
+  request({ needs: 'agent' });
+  agents.lostCheckIn('e41a69e8', { at: Date.parse('2026-11-28T09:45:00Z'), note: 'check the follow-up PR' }, 'is gone');
+  assert.equal(agents.moveAwayWork(Date.now()).length, 1);
+  for (let n = 0; n < 200 && x.lostStarting.size; n++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(started.length, 1);
+  assert.equal(started[0]!.sandbox, 'lothdesktop/agent9');
+  assert.equal(started[0]!.workId, 'w6370');
+  assert.equal(started[0]!.requestedBy?.userId, 'ben');
+  assert.match(started[0]!.prompt, /^\[lost check-in, w6768\] FF Factory started you for w6370: its check-in at 09:45Z is due, and worker e41a69e8 is gone/);
+  assert.match(started[0]!.prompt, /Restarted \(w6768\): w6370's worker e41a69e8 no longer exists, so at .* UTC FF Factory started this new worker on lothdesktop: /);
+  assert.doesNotMatch(started[0]!.prompt, /taken off worker e41a69e8 on \(removed\)/);
+  assert.deepEqual(store.work.get('w6370')!.sessionIds, ['new1']);
+  agents.moveAwayWork(Date.now());
+  assert.equal(store.work.get('w6370')!.lostCheckIn, undefined);
+});
+
+test('w6774 (review w6775, B1): a worker on two open requests is woken once for its lost check-in, not once per request', async (t) => {
+  const { store, agents, request, starts } = await moveSetup(t);
+  const sent: string[] = [];
+  (agents as unknown as Sender).sessions.send = (id, text) => {
+    sent.push(`${id}: ${text}`);
+    return 'u1';
+  };
+  store.putSession(worker('dddd4444', { machineId: 'lothdesktop', machineSandbox: 'slot1' }));
+  request({ id: 'w6500', sessionIds: ['dddd4444'] });
+  request({ id: 'w6501', sessionIds: ['dddd4444'] });
+  assert.deepEqual(agents.lostCheckIn('dddd4444', { at: Date.now() - MIN, note: 'check CI' }, 'could not be woken (at the agent limit)').sort(), ['w6500', 'w6501']);
+  const now = Date.now();
+  assert.equal(agents.moveAwayWork(now).length, 1, 'one wake, for the first request');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(agents.moveAwayWork(now + 11 * MIN), []);
+  assert.deepEqual(agents.moveAwayWork(now + 30 * MIN), []);
+  assert.equal(sent.length, 1, 'never a second wake through the other request');
+  assert.equal(starts.length, 0);
+});
+
+test("w6774 (review w6776, R1): a blocked request listed first does not use up the wake of the same worker's active request", async (t) => {
+  const { store, agents, request, starts } = await moveSetup(t);
+  const sent: string[] = [];
+  (agents as unknown as Sender).sessions.send = (id, text) => {
+    sent.push(`${id}: ${text}`);
+    return 'u1';
+  };
+  store.putSession(worker('dddd4444', { machineId: 'lothdesktop', machineSandbox: 'slot1' }));
+  const at = new Date(Date.now() - MIN).toISOString();
+  request({ id: 'w6500', sessionIds: ['dddd4444'], status: 'blocked', blocked: { kind: 'pr', ref: 'Final-Factory/ff-factory#1', what: 'PR #1 merging', at, by: 'worker dddd4444' } as never });
+  request({ id: 'w6501', sessionIds: ['dddd4444'] });
+  assert.deepEqual(agents.lostCheckIn('dddd4444', { at: Date.now() - MIN, note: 'check CI' }, 'could not be woken (at the agent limit)').sort(), ['w6500', 'w6501']);
+  const now = Date.now();
+  assert.deepEqual(agents.moveAwayWork(now), [['w6501', 'its worker dddd4444 woken again where it is for its lost check-in (w6774)']]);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(agents.moveAwayWork(now + 30 * MIN), []);
+  assert.equal(sent.length, 1);
+  assert.equal(starts.length, 0);
+});

@@ -969,8 +969,11 @@ Capacity block's "Next ..." lines.
   check-in at 09:45Z is due, and worker e41a69e8 is gone", and the dispatcher is told once. Unless another worker on
   the request carries it (mid-turn, its own check-in, a CI wait or a job), `moveAwayWork` then resumes it each minute it
   can (`resumeLost`): a stopped worker on an away computer is moved as above with the check-in's note as its message, and
-  a gone worker is replaced by a fresh worker where the work fits (its pin kept), its prompt leading with the note; a
-  start that fails or finds no room is tried again after 10 min. Its next turn or a new worker on the request ends it.
+  a gone worker is replaced by a fresh worker where the work fits (its pin kept, placed as `start_agent` places it: its
+  workflows push, Live view, player build or timed run), its prompt leading with the note and its handover saying it
+  was restarted; a stopped worker whose computer is here (back before a move found room, or its wake refused at the
+  agent limit) is woken again where it is with the note, once (w6774). A start that fails or finds no room, or a wake
+  refused, is tried again after 10 min, and a `start_agent` and FF Factory's own start see each other's (`startUnderWay`). Its next turn or a new worker on the request ends it.
   `lostCheckIns` (set_app_config, owner-only, read live) is `"on"` (unset) or `"warn"`, the recovery switch that only
   shows Stalled and tells the dispatcher. Since w6768, deleting a sandbox no longer removes the workers that released it.
 
