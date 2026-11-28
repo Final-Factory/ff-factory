@@ -754,8 +754,9 @@ export class HostedSession implements SessionHandle {
     this.tail?.close();
     this.timer = undefined;
     this.saveOffsetNow();
-    // w6695: the process exits right after, so commands not yet handed to an append are appended now, as before.
-    if (this.cmdQueue.length) {
+    // w6695: with no append under way, the queued commands are appended now, as before. With one under way they wait
+    // behind it (in order); the daemon waits for flushed() before it exits (Daemon.hostCommandsWritten, w6703's review).
+    if (this.cmdQueue.length && !this.cmdWrite) {
       const text = this.cmdQueue.join('');
       this.cmdQueue = [];
       try {

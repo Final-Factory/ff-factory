@@ -11,6 +11,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { HostedSession, LineTail, type HostDeps } from '../machine/agentHost.ts';
 import { UnitySlots } from '../machine/unitySlots.ts';
+import { Daemon, type Probes } from '../machine/daemon.ts';
 import type { FromDaemon } from './machineProtocol.ts';
 import type { SessionInfo } from '../shared/types.ts';
 
@@ -18,6 +19,11 @@ const tmp = (t: { after: (f: () => void) => void }, name: string) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `w6695-${name}-`));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
   return dir;
+};
+
+const PROBES: Probes = {
+  stats: async () => ({}) as Awaited<ReturnType<Probes['stats']>>,
+  usage: async () => ({ account: { email: 'someone@example.com', plan: 'Claude Max' }, reply: { subscription_type: 'max', rate_limits_available: false } }) as Awaited<ReturnType<Probes['usage']>>,
 };
 
 const until = async (what: string, cond: () => boolean, ms = 20_000) => {
@@ -126,7 +132,7 @@ test("w6695: a message for a new host waits until the old host's last commands a
   assert.equal((JSON.parse(fs.readFileSync(h.inFile(), 'utf8').trim()) as { text: string }).text, 'two');
 });
 
-test('w6695: commands not yet handed to an append are appended when the daemon goes (detach), as the process exits', { timeout: 20_000 }, async (t) => {
+test('w6695: on detach, commands behind an append under way still land, in order (the daemon waits for them, w6703)', { timeout: 20_000 }, async (t) => {
   const root = tmp(t, 'detach');
   const h = hosted(root);
   h.s.send('one', 'orchestrator');
@@ -134,10 +140,40 @@ test('w6695: commands not yet handed to an append are appended when the daemon g
   h.s.decide('r1', true); // being appended, held
   h.s.stop(); // queued behind it
   h.s.detach();
-  assert.deepEqual(h.ops(), ['send', 'stop'], 'the queued stop is written at once');
+  assert.deepEqual(h.ops(), ['send'], 'the queued stop jumped ahead of the decide still being appended');
+  let written = false;
+  void h.s.flushed().then(() => (written = true));
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(written, false, 'flushed() resolved with a command still being appended');
   gate.release();
-  await until('the held one landed too', () => h.ops().length === 3);
+  await until('both landed', () => written);
   gate.restore();
+  assert.deepEqual(h.ops(), ['send', 'decide', 'stop']);
+});
+
+test("w6695: an exiting daemon waits for its hosts' commands still being appended, up to its cap (w6703)", { timeout: 20_000 }, async (t) => {
+  const root = tmp(t, 'exit');
+  const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'mx', token: 't', repoPath: root, appDir: root, tempDir: path.join(root, 'tmp'), maxEventsFile: null }, () => {
+    throw new Error('no sessions here');
+  }, PROBES);
+  const h = hosted(root);
+  t.after(() => h.s.detach());
+  (d as unknown as { entries: Map<string, { s: unknown }> }).entries.set('h1', { s: h.s });
+  h.s.send('one', 'orchestrator');
+  const gate = heldAppend(t);
+  h.s.stop();
+  d.shutdown();
+  let exited = false;
+  void d.exitWhenWritten().then(() => (exited = true));
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(exited, false, 'the daemon exits 500 ms after shutdown with a stop still being appended, and the stop is lost');
+  gate.release();
+  await until('it exits', () => exited);
+  assert.deepEqual(h.ops(), ['send', 'stop']);
+  // A write that never ends holds the exit only up to the cap.
+  const t0 = Date.now();
+  await d.hostCommandsWritten.call({ entries: new Map([['x', { s: Object.assign(Object.create(HostedSession.prototype), { flushed: () => new Promise(() => undefined) }) }]]) } as never, 200);
+  assert.ok(Date.now() - t0 < 2000);
 });
 
 test("w6695: the poll timer's tail opens its file again off the loop and reads on the next poll; a forced poll still opens it at once", { timeout: 20_000 }, async (t) => {
