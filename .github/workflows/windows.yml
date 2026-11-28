@@ -69,6 +69,8 @@ on:
       - 'server/sandboxes.ts'
       - 'server/toolsLabelsWin.test.ts'
       - 'server/sharedLock.test.ts'
+      - 'server/removeTree.test.ts'
+      - 'server/fakeRdTest.ts'
       - 'server/lowRunTest.ts'
       - 'server/fsLink.ts'
       - 'server/agentNode.test.ts'

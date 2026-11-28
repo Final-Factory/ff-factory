@@ -44,6 +44,10 @@ node scripts/instance/update-all.ts --list F:/ffw/instances/instances.json
 4. **Settings:** each instance's `config.json` is compared with its `expect` (settings a shared feature needs switched on per
    portal: `deviceApproval`, `trustProxy`, `machines.keepAgentsOnRestart`) and the differences are logged each time they
    change. The updater never edits a config.
+5. **Start script (w6603, warn only):** each listed instance's `start-portal.sh` (Windows) is checked against the one
+   `scripts/instance/new.ts` writes now, and `update-all.log` says once what it lacks: the portal priority raise (w6221), or
+   the winpid retry ff-factory #1508 added (w6542) in place of the one-shot raise that could raise a bash.exe instead of the
+   portal. It never changes the script; a later stage rewrites it.
 
 State and log: `update-all.json` and `update-all.log` beside the list; a lock file there keeps two passes from overlapping.
 `--dry-run` says what it would roll and changes nothing; `--only a,b` rolls just those instances (a roll by hand).

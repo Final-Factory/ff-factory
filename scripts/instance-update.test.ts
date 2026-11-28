@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { type Deps, type InstanceList, followSelf, listProblem, readState, settingsDiff, stableTarget, tick } from './instance/update-all.ts';
+import { type Deps, type InstanceList, followSelf, listProblem, readState, settingsDiff, stableTarget, startScriptProblem, tick } from './instance/update-all.ts';
 import { tmpDir } from '../server/testTmp.ts';
 
 const A = 'a'.repeat(40);
@@ -287,4 +287,26 @@ test('roll: an instance whose task this user cannot disable is not drained or st
   assert.deepEqual(r.rolled, ['lens']);
   assert.equal(w.head.lens, B);
   assert.equal(s.blocked?.lens, undefined);
+});
+
+test('w6603: start-portal.sh: the one-shot raise and a missing raise are named, the current one is not', () => {
+  assert.match(startScriptProblem('portal=$!\nFF_PORTAL_PID=$(cat "/proc/$portal/winpid") powershell.exe -EncodedCommand x\n')!, /one-shot priority raise ff-factory #1508 replaced/);
+  assert.match(startScriptProblem('#!/bin/bash\nexec node server/index.ts\n')!, /raises no priority/);
+  assert.match(startScriptProblem("read -r -d '' PRIO <<'PS'\nx\nPS\n")!, /without the winpid retry/);
+  assert.equal(startScriptProblem("read -r -d '' PRIO <<'PS'\nx\nPS\nfor try in 1 2 3 4 5; do\n"), undefined);
+});
+
+test('w6603: the updater logs a start-portal.sh that lacks the current raise once, and changes nothing', async () => {
+  const w = world(['lens', 'ben']);
+  const old = 'portal=$!\nFF_PORTAL_PID=$(cat "/proc/$portal/winpid") powershell.exe\n';
+  fs.writeFileSync(path.join(w.root, 'lens', 'start-portal.sh'), old);
+  const s = readState('/no/such/file');
+  await tick(w.list, s, w.d);
+  await tick(w.list, s, w.d);
+  const lines = w.log.filter((l) => l.includes('start-portal.sh'));
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^lens: start-portal.sh has the one-shot priority raise/);
+  assert.equal(fs.readFileSync(path.join(w.root, 'lens', 'start-portal.sh'), 'utf8'), old);
+  assert.equal(s.scripts?.ben, '');
+  assert.match(s.scripts?.lens ?? '', /^has the one-shot priority raise/);
 });
