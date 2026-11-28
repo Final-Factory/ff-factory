@@ -230,3 +230,16 @@ test('w6680: a pair where one commit lacks the backport, or cannot be read, or n
   const many = await pairDataDirAt(reader({}), '718a14689a', Array.from({ length: 9 }, (_, i) => `abc${i}def${i}a`).join(' '), '', '');
   assert.match(many.reads ? '' : many.why, /names 10 commits, more than the 8/);
 });
+
+// w6686 (for lothsahn; w6682's review of PR #1543): the version excuse is only a bare "<sha> (<version>)".
+test('w6686: a version that does not close its bracket, a published word before the sha, or a v-prefixed version keeps the mark', () => {
+  const read = ['718a14689a', 'dc4643b4c2'];
+  assert.equal(otherPlayerIn(W6678_LEGACY, '718a14689a', 'legacy_data', read), undefined, "w6678's real legacy_data still clears");
+  assert.equal(otherPlayerIn('the host runs dc4643b4c2 ( 0.50.0.120 ) built here', '718a14689a', 'legacy_data', read), undefined);
+  assert.match(otherPlayerIn('dc4643b4c2 (0.50.0.47 installed)', '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.47/);
+  assert.match(otherPlayerIn('client runs the published dc4643b4c2 (0.50.0.47)', '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.47/);
+  assert.match(otherPlayerIn('the Steam pre-1.0 dc4643b4c2 (0.50.0.47)', '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.47/);
+  assert.match(otherPlayerIn('the downloaded dc4643b4c2 (0.50.0.47)', '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.47/);
+  assert.match(otherPlayerIn(`${W6678_A}${' '.repeat(20)}(0.50.0.120)`, '718a14689a', 'legacy_data', read) ?? '', /names build 0\.50\.0\.120/, 'a sha far from the bracket keeps it (w6688)');
+  assert.match(otherPlayerIn('client is v0.50.0.47', '718a14689a', 'legacy_data', read) ?? '', /names build v0\.50\.0\.47/);
+});
