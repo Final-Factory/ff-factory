@@ -285,6 +285,38 @@ test('w5924: the release pass never releases a light folder; it deletes an empty
   assert.equal(k.reports.filter((t) => /agent4/.test(t)).length, 1);
 });
 
+test('w6769: the light sweep reads the sessions once per pass, not once per folder, with the same verdicts', async () => {
+  const run = async (folders: number) => {
+    const sessions: SessionInfo[] = [];
+    const sbs: MachineSandbox[] = [sandbox('slot1')];
+    for (let i = 1; i <= folders; i++) {
+      sbs.push(light(`agent${i}`));
+      // Odd folders: their worker's work is over. Even ones: open work. Every third: a second worker that still runs there.
+      sessions.push(worker(`s${i}`, { machineSandbox: `agent${i}`, wakeAt: iso(NOW + 9 * 3600_000) }));
+      if (i % 3 === 0) sessions.push(worker(`r${i}`, { machineSandbox: `agent${i}`, status: 'running' }));
+      // The same folder name on another computer, running: never counted for this one's folder.
+      sessions.push(worker(`x${i}`, { machineId: 'pc2', machineSandbox: `agent${i}`, status: 'running' }));
+    }
+    const k = kit(sessions, sbs, { workOver: (s) => (Number(s.id.slice(1)) % 2 ? 'its request is closed' : undefined), dropLight: async () => undefined });
+    let reads = 0;
+    (k.p as unknown as { d: { sessions: () => Iterable<SessionInfo> } }).d.sessions = () => {
+      reads++;
+      return sessions;
+    };
+    const did = k.p.tick().filter((l) => /light agent folder/.test(l));
+    await new Promise((r) => setTimeout(r, 10));
+    return { did, reads };
+  };
+  const few = await run(3);
+  const many = await run(30);
+  // Odd folders with no running second worker are deleted: 1, 5, 7, 11, ... (3, 9, 15, ... hold a running one).
+  const want = Array.from({ length: 30 }, (_, k) => k + 1).filter((i) => i % 2 === 1 && i % 3 !== 0);
+  assert.deepEqual(many.did.map((l) => Number(/pc\/agent(\d+)/.exec(l)?.[1])), want);
+  assert.ok(many.did.every((l) => /its worker s\d+ stopped with its work over/.test(l)));
+  assert.deepEqual(few.did.map((l) => /pc\/agent(\d+)/.exec(l)?.[1]), ['1']);
+  assert.equal(many.reads, few.reads, `the sessions are read as often for 30 folders as for 3 (${few.reads} and ${many.reads})`);
+});
+
 // ---------------------------------------------------------------- the portal and a real daemon (machineSandboxesTestKit)
 
 test('w5924: through a real daemon: its hello offers light folders; the portal makes one, sees it apart from the game sandboxes, and deletes it', async (t) => {
