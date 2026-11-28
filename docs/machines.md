@@ -1455,7 +1455,13 @@ diff `textconv`, a merge driver, a credential helper, `core.sshCommand`, git-lfs
 call and set back to the user's or system's value, else a neutral one (git-lfs's own filter for `filter.lfs.*`).
 That last part has a race: a key written between the scan and the call wins, so it narrows the gap without closing it.
 A repository-set `url.<base>.insteadOf` cannot be overridden by value (the longest prefix wins and the repository's entry
-wins a tie), so a fetch, push, clone or ls-remote in a checkout that sets one is refused (w5573). Not covered: `lfs.url`
+wins a tie), so a fetch, push, clone or ls-remote in a checkout that sets one is refused (w5573). git keeps the first value
+of `remote.<name>.uploadpack`, `remote.<name>.receivepack` and `core.gitProxy` (w6570), so an override does nothing for them:
+fetch, pull and ls-remote of one remote get `--upload-pack=` and push `--receive-pack=` instead, and the calls no option
+reaches are refused in a checkout whose own config sets uploadpack (`--all`, `--multiple`, a remote group, `fetch.all`,
+push, whose git-lfs pre-push hook runs `ls-remote`, `remote show|prune|update`, submodule and git-lfs's transfers), or any call
+that reaches a remote with `core.gitProxy` set; every other call there runs with `GIT_NO_LAZY_FETCH=1`. A refusal names the
+`git config --local` (or `--worktree`) command that removes the key. Not covered: `lfs.url`
 in a repository's config (git-lfs would send LFS objects there; the GitHub token's helper answers only github.com).
 
 `worker.ts tools` (w5573, `server/agentTools.ts`) still brings `<root>/tools-medium/final-factory-agents` (w5597: in a root child only Medium writes; it was `<root>/tools`, which workers write) to origin/master with every hook off, but
