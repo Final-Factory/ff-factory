@@ -136,6 +136,14 @@ Its `ssh`, `scp`, `sftp`, `fffctl` and `fff-machine-ssh` are wrappers on its PAT
 `list_sandboxes` and `system_status` (read only), its own `wake_me`, and its own timers (`set_timer`, `list_timers`,
 `update_timer`, `cancel_timer`; [Polls and waits](#polls-and-waits-timers-w1106)). `ops_worker status` lists its timers.
 
+### Starting Steam on a Windows PC (w6727)
+
+Action **`steam_start`**, with `machine` and exactly one `work_ids` entry (one of the caller's person's own open requests,
+as for `machine_update`), asks that PC's daemon to start the installed Steam client in the desktop session. It opens no
+job and runs no command of the caller's: the daemon does one named thing and answers in the same call (already running,
+started and signed in as whom, refused and why, or failed and what was up). Windows PCs only. What it does and refuses:
+[machines.md](machines.md), "Starting the Steam client".
+
 ## Git and GitHub jobs (w1869)
 
 lothsahn, 2026-10-23: "Analyze your recent tool failures and make it so they don't happen in the future." The job that

@@ -958,6 +958,13 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   const win = store.readTranscript(OPS_ID, 40).filter((e) => e.kind === 'user').at(-1) as { text: string };
   assert.ok(win.text.includes(`-Update -Ref 3f1c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a -Root C:\\ffw"'`), win.text);
   assert.match(win.text, /with no setting changed/);
+  // w6727: steam_start has the same gates, Windows only, and carries only who asked and for which request.
+  assert.throws(() => ops.steamStartCheck(orch('d', undefined, 'dispatcher'), { machine: 'beast', workId: 'w847' }), /only from Lothsahn's and Ben's/);
+  assert.throws(() => ops.steamStartCheck(orch('lo', LOTH), { machine: 'beast', workId: 'w847' }), /not one of their own requests/);
+  assert.throws(() => ops.steamStartCheck(ben, { machine: 'beast', workId: '847' }), /request id like "w847"/);
+  assert.throws(() => ops.steamStartCheck(ben, { machine: 'nope', workId: 'w847' }), /no machine "nope"/);
+  assert.throws(() => ops.steamStartCheck(ben, { machine: 'biscuit', workId: 'w847' }), /not a Windows PC/);
+  assert.deepEqual(ops.steamStartCheck(ben, { machine: 'BEAST', workId: 'W847' }), { machine: 'beast', why: "Ben's orchestrator for w847" });
   assert.doesNotMatch(win.text, /Dev Drive/, 'an update without the flags says nothing of a drive, so the automatic rollout (w887) never makes one');
   // The Dev Drive (w900): Windows only, the flags the installer takes and nothing free-form.
   assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', devDrive: true }), /Windows feature/);
