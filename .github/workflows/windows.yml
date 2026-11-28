@@ -58,6 +58,7 @@ on:
       - 'server/ownLeftovers.test.ts'
       - 'server/ownLeftovers.ts'
       - 'server/proc.ts'
+      - 'server/readLog.test.ts'
       - 'server/remoteGuard.test.ts'
       - 'server/remoteGuard.ts'
       - 'server/republish.test.ts'

@@ -158,6 +158,8 @@ export interface LinkUpdateFlags {
   longRuns?: 'off' | 'warn' | 'on';
   /** w6378: daemon.json `liveRunGuard`, off or warn (the default): whether a sandbox trim, release or delete logs a WARNING when a run of its worker still lives; any OS; unset: carried. A daemon that predates it ignores it. */
   liveRunGuard?: 'off' | 'warn';
+  /** w6599: daemon.json `readLog`, off or warn (the default): the worker read log, which records what workers open outside the work folder and refuses nothing; Windows only; unset: carried. A daemon that predates it ignores it. */
+  readLog?: 'off' | 'warn';
   /** w6412: daemon.json editorGitPackages: how a sandbox editor gets a git package its Packages/manifest.json names that Library/PackageCache lacks (machine/gitPackages.ts). warn (the default) only names the missing packages in the start note, unity status and the Package Manager dialog notice; on also fetches each into a mirror under <root>/cache-medium/git-packages with the daemon's own git and credential, and gives a Windows Low-integrity editor the workers' Git on PATH and a url.insteadOf to that mirror, so its Package Manager fetches without a credential; off looks at nothing (the way back). Takes effect at the editor's next start. Any OS; unset: carried. A daemon that predates it ignores it. */
   editorGitPackages?: 'off' | 'warn' | 'on';
 }

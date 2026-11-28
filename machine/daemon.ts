@@ -64,6 +64,7 @@ import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './
 import { describeCounted, type AgentCensus, type CensusAgent } from '../server/agentCensus.ts';
 import { batchUnityIn, holdParts, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
 import { liveRunGuardModeOf } from './liveRunGuard.ts';
+import { ReadLog, readLogModeOf } from './readLog.ts';
 import { gitPackagesModeOf } from './gitPackages.ts';
 import { UnitySlots, editorInstancePid, editorInstancePidAsync, gamePlayers, unityProcesses, writeShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
 import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
@@ -369,6 +370,11 @@ export interface DaemonConfig {
    * batchmode Unity): "warn" (default) logs a WARNING and goes ahead; "off" looks at nothing (machine/liveRunGuard.ts).
    */
   liveRunGuard?: 'off' | 'warn';
+  /**
+   * w6599: the worker read log, Windows only (machine/readLog.ts): "warn" (default) records what workers open outside the work
+   * folder and not on its allowlist, refusing nothing; "off" runs no ETW session and stops one an earlier daemon left.
+   */
+  readLog?: 'off' | 'warn';
   /**
    * w6412: a git package a sandbox's Packages/manifest.json names that its Library/PackageCache lacks (machine/gitPackages.ts):
    * "warn" (default) names it, the cause and the route in the start note, `unity status`, the switch's notes and the
@@ -759,6 +765,7 @@ export class Daemon {
   readonly ciFirst: CiFirst;
   /** w6110: the same on a Windows CI-first machine (WIN_CI_FIRST: lothdesktop), by priority class; warn only so far: it logs. */
   readonly winCiFirst: WinCiFirst;
+  readonly readLog: ReadLog;
   readonly runnerPriority: RunnerPriority;
   /** w1829: what a worker's next message hears about its player a timed run's turn asked to quit. */
   private readonly benchPlayerNotes = new Map<string, string>();
@@ -1374,6 +1381,19 @@ export class Daemon {
       setWeights: async (unit, cpu, io) => void (await userctl(['set-property', '--runtime', unit, `CPUWeight=${cpu}`, `IOWeight=${io}`])),
       ...linuxReads,
       census: async () => runnerCensus(await pd.procs()),
+      log: (line) => log(line),
+    });
+    // w6599: the worker read log (machine/readLog.ts): what workers open outside the work folder, logged, never refused
+    this.readLog = new ReadLog({
+      appDir: appDirOfConfig(cfg),
+      root: cfg.root,
+      mode: readLogModeOf(cfg.readLog),
+      platform: real ? process.platform : 'linux',
+      hosts: () => [...this.hostSessions].filter(([, h]) => h.live && h.hostPid).map(([session, h]) => {
+        const sandbox = hostPlace(h.dir)?.sandbox;
+        // w6728: the time its host record says it started, so the helper takes the pid only for the process that started then
+        return { session, pid: h.hostPid!, startedAt: hostStartedAt(h.dir), ...(sandbox ? { sandbox } : {}) };
+      }),
       log: (line) => log(line),
     });
     // w6110: on Windows the agents' processes go below the CI runners' jobs by priority class (machine/ciFirstWin.ts)
@@ -2324,6 +2344,8 @@ export class Daemon {
       this.timers.push(setInterval(loopLabel('timer runnerPriority.tick', tick), 60_000));
       setTimeout(tick, 15_000).unref();
     }
+    this.readLog.start();
+    if (this.readLog.enabled) this.timers.push(setInterval(loopLabel('timer readLog.tick', () => this.readLog.tick()), 15_000));
     if (this.winCiFirst.enabled) {
       const tick = () => void this.winCiFirst.tick().catch((e) => log(`ci first: the tick failed: ${(e as Error).message}`));
       this.timers.push(setInterval(loopLabel('timer winCiFirst.tick', tick), 60_000));
@@ -2563,6 +2585,7 @@ export class Daemon {
     this.cliScrub?.stop();
     clearTimeout(this.usageTimer);
     for (const t of this.timers) clearInterval(t);
+    this.readLog.stop();
     this.loopWatch?.stop();
     this.stallProfiler?.stop();
     this.freezeWatch?.stop();

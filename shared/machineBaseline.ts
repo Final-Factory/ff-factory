@@ -48,6 +48,7 @@ export const FEATURE_KEYS = [
   'sharedLock',
   'hostRestage',
   'liveRunGuard',
+  'readLog',
   'editorGitPackages',
   'longRuns',
   'sandboxCacheTrim',
