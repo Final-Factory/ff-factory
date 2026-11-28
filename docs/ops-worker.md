@@ -875,9 +875,10 @@ plugin's version before and after, per machine.
 - **Running agents keep running**: a plugin update leaves their cached copy on disk and they keep the version they
   started with; new sessions load the new one. No drain, no wait.
 - **The report line**, for example: `- beast: updated. 494f867 → 30482ef. Limits unchanged. Agents: 2 of 2 adopted by the
-  new daemon, none ended. Agent tools: ff-agents 1.29.19 → 1.29.20, ff-speckit 1.0.2, ff-discord not installed
-  (final-factory-agents a8449abd8); every installed plugin on master.` ff-discord is installed only where a person asked
-  for it (`registerAgents.sh --plugin ff-discord`); "not installed" there is not a failure.
+  new daemon, none ended. Agent tools: ff-agents 1.29.19 → 1.29.20, ff-speckit 1.0.2, ff-discord 1.17.7
+  (final-factory-agents a8449abd8); every installed plugin on master.` Every machine has all three plugins (w6603;
+  lothsahn, 2026-11-27: "Install the Discord plugin on every machine through the installer"), so a "not installed" is a
+  failure.
 - Off with config `machines.publishAgentToolsAfterDeploy: false` (the daemon updates go on); a rollout state written
   before this change never publishes. Tests: `server/machineRollout.test.ts` (the `w1476:` cases) and
   `server/agentTools.test.ts`.

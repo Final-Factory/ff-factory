@@ -654,8 +654,9 @@ What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):
 4. Runs `sh registerAgents.sh --claude` from a fresh `--depth 1` clone made in a new folder beside the checkout and removed
    after (w5573; Git Bash's `sh.exe` on Windows, found from `git --exec-path`), with the
    daemon's Claude Code (`daemon.json` `claude`) first on PATH: the marketplace pulled, every plugin the machine remembers
-   updated. That is ff-agents and ff-speckit everywhere, and ff-discord only where a person ran `--plugin ff-discord`
-   (registerAgents.sh's `~/.claude/final-factory-agents-plugins`); a bare run never adds it. Codex is not touched.
+   updated. The run passes `--plugin ff-discord` (`REGISTER_EXTRA`), so every machine has ff-agents, ff-speckit and
+   ff-discord (w6603; lothsahn, 2026-11-27: "Install the Discord plugin on every machine through the installer");
+   registerAgents.sh also remembers it in `~/.claude/final-factory-agents-plugins`. Codex is not touched.
    Claude Code fetches the marketplace over HTTPS only (`CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`) with a five-minute git
    timeout (`CLAUDE_CODE_PLUGIN_GIT_TIMEOUT_MS=300000`), and a run that fails (but did not time out) is run once more
    (w1895, `REGISTER_ENV` in `server/agentTools.ts`). Without that, Claude Code picks SSH wherever `ssh -T git@github.com`
@@ -670,8 +671,8 @@ What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):
 6. In an elevated Windows session (an administrator's ssh, BEAST), gives the checkout and Claude Code's
    final-factory-agents marketplace and cache folders to the daemon task's user (`icacls /setowner`), as the update does,
    so the non-elevated git there does not refuse them.
-7. Prints `Agent tools after:` and exits 0 only when every installed plugin is on master's version and ff-agents and
-   ff-speckit are installed; else `FAILED: ...` and exit 1.
+7. Prints `Agent tools after:` and exits 0 only when every installed plugin is on master's version and ff-agents,
+   ff-speckit and ff-discord are installed; else `FAILED: ...` and exit 1.
 8. Windows: puts the agents' node, the pinned `AGENT_NODE` build (`server/agentNode.ts`, v24.22.1, its SHA-256 checked),
    at `<root>\tools\node\node.exe` unless that one is there (`Agent node: ... (current)`), and the daemon puts that folder
    first on its agents' PATH after `unity-slot` (w1742). FF Factory's own tests need node 23.6+; before this, workers on a

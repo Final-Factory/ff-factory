@@ -110,7 +110,7 @@ function machine(o: Machine = {}) {
       const fails = mediumRun ? o.mediumShCode !== undefined : o.shCode !== undefined && (o.shFails === undefined || calls.filter((c) => c.cmd === 'sh').length <= o.shFails);
       if (!fails) {
         fs.mkdirSync(path.join(into, 'plugins'), { recursive: true });
-        fs.writeFileSync(path.join(into, 'plugins', 'installed_plugins.json'), JSON.stringify(installedJson(o.installs ?? { 'ff-agents': '1.29.20', 'ff-speckit': '1.0.2' })));
+        fs.writeFileSync(path.join(into, 'plugins', 'installed_plugins.json'), JSON.stringify(installedJson(o.installs ?? { 'ff-agents': '1.29.20', 'ff-speckit': '1.0.2', ...(args.join(' ').includes('--plugin ff-discord') ? { 'ff-discord': '1.17.7' } : {}) })));
       }
       const code = fails ? (mediumRun ? o.mediumShCode! : o.shCode!) : 0;
       return { code, stdout: "== Claude Code ==\nmarketplace 'final-factory-agents' already registered — refreshing from GitHub\nchecking 'ff-agents@final-factory-agents' for updates\n", stderr: code ? 'claude CLI not on PATH — skipping Claude Code' : '' };
@@ -159,7 +159,7 @@ test("a first run clones FF Factory's own checkout in the root, runs registerAge
   assert.deepEqual(clone.args.slice(0, 4), ['-c', 'credential.helper=', '-c', 'credential.interactive=never'], 'anonymous: an ssh session reaches no keychain');
   assert.equal(clone.env?.GIT_TERMINAL_PROMPT, '0');
   const sh = m.calls.find((c) => c.cmd === 'sh')!;
-  assert.deepEqual(sh.args, ['registerAgents.sh', '--claude']);
+  assert.deepEqual(sh.args, ['registerAgents.sh', '--claude', '--plugin', 'ff-discord'], 'w6603: ff-discord on every machine');
   assert.notEqual(sh.cwd, m.co, 'w5573: not from the checkout a worker can write');
   assert.equal(path.dirname(path.dirname(sh.cwd!)), m.tmpdir);
   assert.equal(fs.existsSync(sh.cwd!), false, 'the fresh clone is removed after the run');
@@ -169,7 +169,7 @@ test("a first run clones FF Factory's own checkout in the root, runs registerAge
     'Agent tools before: ff-agents 1.29.19, ff-speckit 1.0.2, ff-discord not installed',
     'Agent tools latest: final-factory-agents a8449abd8457: ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord 1.17.7',
     `Agent tools checkout: ${m.co} at a8449abd8457`,
-    'Agent tools after: ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord not installed',
+    'Agent tools after: ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord 1.17.7',
     'Agent tools published: every installed plugin is on master. Running agents keep the version they started with; new sessions load these.',
   ]);
   assert.ok(m.lines.includes('  == Claude Code =='), "registerAgents.sh's own output is passed on");
@@ -195,7 +195,7 @@ test('w5597: its checkout dirty, on another branch, from another repo or diverge
     assert.equal(await m.run(), EXIT.ok);
     assert.match(m.lines.find((l) => l.startsWith('WARNING:'))!, why);
     assert.match(m.lines.find((l) => l.startsWith('WARNING:'))!, /nothing in it was overwritten; this run publishes from a fresh clone/);
-    assert.ok(m.lines.includes('Agent tools after: ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord not installed'));
+    assert.ok(m.lines.includes('Agent tools after: ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord 1.17.7'));
     assert.equal(m.calls.filter((c) => c.cmd === 'sh').length, 1);
     assert.equal(toolsResult(0, m.lines.join('\n')).warnings?.length, 1, 'the rollout report carries the warning');
     assert.equal(ran(m, 'reset').length + ran(m, 'stash').length + ran(m, 'checkout').length + ran(m, 'clean').length, 0);
@@ -393,8 +393,8 @@ test('the version helpers', () => {
   assert.equal(formatVersions(v), 'ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord not installed');
   assert.deepEqual(parseVersions(formatVersions(v)), v);
   assert.deepEqual(parseVersions(' ff-agents 1.29.19, ff-speckit 1.0.2, ff-discord 1.17.7 (unchanged)'), { 'ff-agents': '1.29.19', 'ff-speckit': '1.0.2', 'ff-discord': '1.17.7' });
-  assert.deepEqual(staleAfter(v, LATEST), [], 'ff-discord only where a person asked for it: not installed is fine');
-  assert.deepEqual(staleAfter({ 'ff-speckit': '1.0.2' }, LATEST), ['ff-agents not installed (master: 1.29.20)']);
+  assert.deepEqual(staleAfter(v, LATEST), ['ff-discord not installed (master: 1.17.7)'], 'w6603: ff-discord is on every machine, so a missing one is behind');
+  assert.deepEqual(staleAfter({ 'ff-speckit': '1.0.2', 'ff-discord': '1.17.7' }, LATEST), ['ff-agents not installed (master: 1.29.20)']);
   assert.equal(checkoutProblem({ porcelain: '', branch: 'master', origin: 'git@github.com:Final-Factory/final-factory-agents.git' }), undefined);
   assert.equal(checkoutProblem({ porcelain: '', branch: '', origin: 'https://github.com/Final-Factory/final-factory-agents' }), 'is on a detached HEAD, not master');
 });
@@ -429,7 +429,7 @@ test("w5543: one run installs the plugins into the workers' folder and the Mediu
   assert.equal(new Set(sh.map((c) => c.cwd)).size, 1);
   assert.notEqual(sh[0].cwd, m.co);
   assert.equal(ran(m, '--depth').length, 1, 'one fresh clone for both folders');
-  assert.deepEqual(installedVersions(JSON.parse(fs.readFileSync(path.join(m.mediumDir, 'plugins', 'installed_plugins.json'), 'utf8'))), { 'ff-agents': '1.29.20', 'ff-speckit': '1.0.2', 'ff-discord': undefined });
+  assert.deepEqual(installedVersions(JSON.parse(fs.readFileSync(path.join(m.mediumDir, 'plugins', 'installed_plugins.json'), 'utf8'))), { 'ff-agents': '1.29.20', 'ff-speckit': '1.0.2', 'ff-discord': '1.17.7' });
   assert.ok(m.lines.includes(`Agent tools before (Medium agents, ${m.mediumDir}): ff-agents not installed, ff-speckit not installed, ff-discord not installed`));
   assert.equal(m.lines.filter((l) => l.startsWith('Agent tools after:')).length, 1, "the rollout reads the workers' folder's line");
   const bad = machine({ claudeConfigDir: true, medium: true, mediumShCode: 1 });
