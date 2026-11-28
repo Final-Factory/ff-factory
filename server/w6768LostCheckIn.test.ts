@@ -574,3 +574,23 @@ test('w6774 (review w6775, B1): a worker on two open requests is woken once for 
   assert.equal(sent.length, 1, 'never a second wake through the other request');
   assert.equal(starts.length, 0);
 });
+
+test("w6774 (review w6776, R1): a blocked request listed first does not use up the wake of the same worker's active request", async (t) => {
+  const { store, agents, request, starts } = await moveSetup(t);
+  const sent: string[] = [];
+  (agents as unknown as Sender).sessions.send = (id, text) => {
+    sent.push(`${id}: ${text}`);
+    return 'u1';
+  };
+  store.putSession(worker('dddd4444', { machineId: 'lothdesktop', machineSandbox: 'slot1' }));
+  const at = new Date(Date.now() - MIN).toISOString();
+  request({ id: 'w6500', sessionIds: ['dddd4444'], status: 'blocked', blocked: { kind: 'pr', ref: 'Final-Factory/ff-factory#1', what: 'PR #1 merging', at, by: 'worker dddd4444' } as never });
+  request({ id: 'w6501', sessionIds: ['dddd4444'] });
+  assert.deepEqual(agents.lostCheckIn('dddd4444', { at: Date.now() - MIN, note: 'check CI' }, 'could not be woken (at the agent limit)').sort(), ['w6500', 'w6501']);
+  const now = Date.now();
+  assert.deepEqual(agents.moveAwayWork(now), [['w6501', 'its worker dddd4444 woken again where it is for its lost check-in (w6774)']]);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(agents.moveAwayWork(now + 30 * MIN), []);
+  assert.equal(sent.length, 1);
+  assert.equal(starts.length, 0);
+});

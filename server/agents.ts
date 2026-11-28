@@ -4821,6 +4821,10 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    */
   private wakeLost(w: WorkItem, l: LostCheckIn, info: SessionInfo, now: number): { did: string } | undefined {
     if (info.machineId && !this.machines.isOnline(info.machineId)) return undefined;
+    // Not for a request blocked or waiting on a person (review w6776, R1): its gate's own resume wakes the worker for it,
+    // and a wake sent for it is held there (staleResume) without reaching the worker, which would use up the once-only
+    // wake below for the worker's other, active request.
+    if (w.status === 'blocked' || w.status === 'question') return undefined;
     // Keyed by the worker, not the request (review w6775, B1): a worker on two open requests holds the same lost check-in on
     // each, and is woken once for both. In memory only: a portal restart while a send is held could send it once more.
     const key = `${info.id}@${l.due}`;
