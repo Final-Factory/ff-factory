@@ -238,6 +238,7 @@ export function updateFlagsOf(source: string, f: LinkUpdateFlags): UpdateFlags {
     ...(f.hostRestage === 'warn' || f.hostRestage === 'on' ? { hostRestage: f.hostRestage } : {}),
     ...(f.longRuns === 'off' || f.longRuns === 'warn' || f.longRuns === 'on' ? { longRuns: f.longRuns } : {}),
     ...(f.liveRunGuard === 'off' || f.liveRunGuard === 'warn' ? { liveRunGuard: f.liveRunGuard } : {}),
+    ...(f.readLog === 'off' || f.readLog === 'warn' ? { readLog: f.readLog } : {}),
     ...(f.editorGitPackages === 'off' || f.editorGitPackages === 'warn' || f.editorGitPackages === 'on' ? { editorGitPackages: f.editorGitPackages } : {}),
   };
 }

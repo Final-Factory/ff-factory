@@ -461,6 +461,36 @@ Limits:
 - Same as the write half: the guard (server/daemonReads.ts) still decides what a worker's own tools may read; the fence
   is what holds for every process the worker starts.
 
+## The read log: what workers open outside the work folder (w6599, Windows)
+
+lothsahn, 2026-11-27, choosing after w6599's research (r398: every Windows route that refuses reads by default and keeps Git
+Bash, node, editors and players working needs a third-party driver): "Keep today's fence and add read logging only". So the
+fences above stay as they are, nothing changes on any system drive, and the daemon records what workers read outside the work
+folder and flags it, refusing nothing. It logs paths and the reading program only, never a file's contents or a credential.
+
+- `machine/winReadLog.cs`, built with Add-Type into `<appDir>/bin/ffreadlog-<hash>.exe` like the job helper, runs one
+  real-time ETW session a machine, `ffw-readlog`, on Windows' own Kernel-Process (process start and stop) and Kernel-File
+  (event 12, Create) providers. The daemon (Medium) may start it as a member of Administrators or Performance Log Users; a
+  Low worker may not (measured on BEAST: "Access is denied").
+- It follows every process below a live agent host (the daemon sends the hosts every 15 s; the host's own opens are not
+  counted) and reports each file one of them opens outside the allowlist, `readAllowWin` in `machine/readLog.ts`. An open is
+  what Kernel-File sees: a stat, a directory listing and an open for writing count as well as a read.
+- Each report goes to `<appDir>/logs/read-log-<UTC date>.jsonl` (`t`, `session`, `sandbox`, `pid`, `image`, `path`; at most
+  50 MB a day, kept 14 days) and, once a day per worker and folder (a path's first three parts), to daemon.log as
+  `read log: <session> (<sandbox>): <program> read <path>, outside the work folder and not on the allowlist (warn only:
+  nothing was refused)`, at most 300 such lines a day. Its first minute says how many file opens it saw, so a session that
+  sees nothing shows.
+- The allowlist: the work folder; `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` and `%ProgramData%` (lothsahn's
+  w6599 answer kept ProgramData readable); a drive's root and the folders above the work folder, as paths only. Each entry
+  carries its reason in the code. Profiles (`C:\Users\...`) and Public are not on it: a read there is what the log is for. A
+  new entry comes by a harness PR with its reason (lothsahn: "Workers should have to justify allowlists for files or folders
+  they can access--then have those added to the harness as needed"), never granted ad hoc.
+- daemon.json `readLog`: `warn` (unset: the default) or `off`, which starts no session and stops one an earlier daemon left
+  behind; the way back with nobody at the machine is `ops_worker machine_update read_log off`, or the installer's
+  `--read-log` / `-ReadLog`. A helper that cannot start (no rights, no compiler) logs `read log: off for now, <why>` and is
+  tried again hourly.
+- macOS and Linux are later stages.
+
 ## Owner secrets: gh login, ~/.ssh, browsers, the Keychain (w5548, w5553, w5560)
 
 Before this, a fenced Mac worker read everything in the owner's home outside the root: measured on m5 (2026-11-25), a

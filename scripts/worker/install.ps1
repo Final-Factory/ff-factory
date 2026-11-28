@@ -70,6 +70,10 @@
   With -Update (w6378): set daemon.json's liveRunGuard, as ops_worker machine_update live_run_guard does: warn (the
   default) logs a WARNING when a sandbox trim, release or delete would hit a sandbox where a run of its worker still
   lives; off looks at nothing (the way back). Left out: the install keeps what it has.
+.PARAMETER ReadLog
+  With -Update (w6599): set daemon.json's readLog, as ops_worker machine_update read_log does: warn (the default)
+  records what workers open outside the work folder and not on its allowlist, refusing nothing; off runs no ETW
+  session (the way back). Left out: the install keeps what it has.
 .PARAMETER EditorGitPackages
   With -Update (w6412): set daemon.json's editorGitPackages, as ops_worker machine_update editor_git_packages does: how a
   sandbox editor gets a git package its Packages/manifest.json names that Library/PackageCache lacks (machine/gitPackages.ts).
@@ -161,6 +165,7 @@ param(
     [ValidateSet('warn', 'on')][string]$HostRestage,
     [ValidateSet('off', 'warn', 'on')][string]$LongRuns,
     [ValidateSet('off', 'warn')][string]$LiveRunGuard,
+    [ValidateSet('off', 'warn')][string]$ReadLog,
     [ValidateSet('off', 'warn', 'on')][string]$EditorGitPackages,
     [ValidateSet('warn', 'on')][string]$MediumAgentFolders,
     [ValidateSet('on', 'off')][string]$DaemonTmpdir,
@@ -338,6 +343,7 @@ if ($Update) {
     if ($HostRestage) { $argv += @('--host-restage', $HostRestage) }
     if ($LongRuns) { $argv += @('--long-runs', $LongRuns) }
     if ($LiveRunGuard) { $argv += @('--live-run-guard', $LiveRunGuard) }
+    if ($ReadLog) { $argv += @('--read-log', $ReadLog) }
     if ($EditorGitPackages) { $argv += @('--editor-git-packages', $EditorGitPackages) }
     if ($MediumAgentFolders) { $argv += @('--medium-agent-folders', $MediumAgentFolders) }
     if ($DaemonTmpdir) { $argv += @('--daemon-tmpdir', $DaemonTmpdir) }

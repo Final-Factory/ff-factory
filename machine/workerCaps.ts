@@ -308,15 +308,23 @@ const JOB_SOURCE = path.join(import.meta.dirname, 'winJob.cs');
  * Framework compiler every Windows has. Undefined when it cannot be built.
  */
 export function jobHelper(appDir: string, log: (s: string) => void = () => undefined): string | undefined {
+  return csHelper(appDir, JOB_SOURCE, 'ffjob', 'worker caps: the job helper', log);
+}
+
+/**
+ * A C# helper's exe (`<prefix>-<source hash>.exe`), built from `source` into `<appDir>/bin` as jobHelper says (w6599: the read
+ * log's helper too, machine/readLog.ts). Undefined, after a line to `log` naming `what`, when it cannot be built.
+ */
+export function csHelper(appDir: string, source: string, prefix: string, what: string, log: (s: string) => void = () => undefined): string | undefined {
   let src: string;
   try {
-    src = fs.readFileSync(JOB_SOURCE, 'utf8');
+    src = fs.readFileSync(source, 'utf8');
   } catch (e) {
-    log(`worker caps: no job helper source: ${(e as Error).message}`);
+    log(`${what}: no source: ${(e as Error).message}`);
     return undefined;
   }
   const bin = path.join(appDir, 'bin');
-  const exe = path.join(bin, `ffjob-${createHash('sha256').update(src).digest('hex').slice(0, 12)}.exe`);
+  const exe = path.join(bin, `${prefix}-${createHash('sha256').update(src).digest('hex').slice(0, 12)}.exe`);
   if (fs.existsSync(exe)) return exe;
   try {
     fs.mkdirSync(bin, { recursive: true });
@@ -329,7 +337,7 @@ export function jobHelper(appDir: string, log: (s: string) => void = () => undef
     const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps], { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
     fs.rmSync(cs, { force: true });
     if (r.status !== 0 || !fs.existsSync(part)) {
-      log(`worker caps: could not build the job helper: ${(r.stderr || r.stdout || String(r.error ?? '')).trim().slice(0, 400)}`);
+      log(`${what}: could not build: ${(r.stderr || r.stdout || String(r.error ?? '')).trim().slice(0, 400)}`);
       fs.rmSync(part, { force: true });
       return undefined;
     }
@@ -341,7 +349,7 @@ export function jobHelper(appDir: string, log: (s: string) => void = () => undef
     }
     return fs.existsSync(exe) ? exe : undefined;
   } catch (e) {
-    log(`worker caps: could not build the job helper: ${(e as Error).message}`);
+    log(`${what}: could not build: ${(e as Error).message}`);
     return undefined;
   }
 }

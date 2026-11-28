@@ -786,6 +786,7 @@ export function workerUpdateFlags(
   longRuns?: 'off' | 'warn' | 'on',
   liveRunGuard?: 'off' | 'warn',
   editorGitPackages?: 'off' | 'warn' | 'on',
+  readLog?: 'off' | 'warn',
 ): string[] {
   const win = platform === 'win32';
   return (
@@ -811,6 +812,7 @@ export function workerUpdateFlags(
           longRuns && `-LongRuns ${longRuns}`,
           liveRunGuard && `-LiveRunGuard ${liveRunGuard}`,
           editorGitPackages && `-EditorGitPackages ${editorGitPackages}`,
+          readLog && `-ReadLog ${readLog}`,
         ]
       : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`, workerFence && `--worker-fence ${workerFence}`, workerCaps && `--worker-caps ${workerCaps}`, transcriptLock && `--transcript-lock ${transcriptLock}`, storeLock && `--store-lock ${storeLock}`, editorTmpdir && `--editor-tmpdir ${editorTmpdir}`, pathFence && `--path-fence ${pathFence}`, mediumAgentFolders && `--medium-agent-folders ${mediumAgentFolders}`, daemonTmpdir && `--daemon-tmpdir ${daemonTmpdir}`, sharedLock && `--shared-lock ${sharedLock}`, hostRestage && `--host-restage ${hostRestage}`, longRuns && `--long-runs ${longRuns}`, liveRunGuard && `--live-run-guard ${liveRunGuard}`, editorGitPackages && `--editor-git-packages ${editorGitPackages}`]
   ).filter((f): f is string => !!f);
@@ -1050,7 +1052,7 @@ export class OpsWorker {
    */
   machineInstall(
     caller: SessionInfo | undefined,
-    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off'; workerCaps?: 'off' | 'warn' | 'enforce'; transcriptLock?: 'on' | 'off'; storeLock?: 'off' | 'warn' | 'on'; editorTmpdir?: 'on' | 'off'; pathFence?: 'off' | 'warn' | 'on'; mediumAgentFolders?: 'warn' | 'on'; daemonTmpdir?: 'on' | 'off'; toolsDiskLock?: 'warn' | 'on'; winCiFirst?: 'off' | 'warn' | 'enforce'; sharedLock?: 'off' | 'warn' | 'on'; runnerPriority?: 'off' | 'warn' | 'enforce'; hostRestage?: 'warn' | 'on'; longRuns?: 'off' | 'warn' | 'on'; liveRunGuard?: 'off' | 'warn'; editorGitPackages?: 'off' | 'warn' | 'on' },
+    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off'; workerCaps?: 'off' | 'warn' | 'enforce'; transcriptLock?: 'on' | 'off'; storeLock?: 'off' | 'warn' | 'on'; editorTmpdir?: 'on' | 'off'; pathFence?: 'off' | 'warn' | 'on'; mediumAgentFolders?: 'warn' | 'on'; daemonTmpdir?: 'on' | 'off'; toolsDiskLock?: 'warn' | 'on'; winCiFirst?: 'off' | 'warn' | 'enforce'; sharedLock?: 'off' | 'warn' | 'on'; runnerPriority?: 'off' | 'warn' | 'enforce'; hostRestage?: 'warn' | 'on'; longRuns?: 'off' | 'warn' | 'on'; liveRunGuard?: 'off' | 'warn'; editorGitPackages?: 'off' | 'warn' | 'on'; readLog?: 'off' | 'warn' },
   ): string {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
@@ -1102,6 +1104,9 @@ export class OpsWorker {
     if (o.longRuns !== undefined && o.longRuns !== 'off' && o.longRuns !== 'warn' && o.longRuns !== 'on') throw new Error('long_runs: off, warn or on');
     // w6378: the live-run guard of a sandbox trim, release or delete (daemon.json `liveRunGuard`), every OS.
     if (o.liveRunGuard !== undefined && o.liveRunGuard !== 'off' && o.liveRunGuard !== 'warn') throw new Error('live_run_guard: off or warn');
+    // w6599: the worker read log (daemon.json `readLog`), Windows only: the ETW session it reads is Windows'.
+    if (o.readLog !== undefined && o.readLog !== 'off' && o.readLog !== 'warn') throw new Error('read_log: off or warn');
+    if (o.readLog !== undefined && m.platform !== 'win32') throw new Error(`read_log: Windows only, and ${m.id} is not a Windows PC`);
     // w6412: how a sandbox editor gets a git package Library/PackageCache lacks (daemon.json `editorGitPackages`), every OS.
     if (o.editorGitPackages !== undefined && o.editorGitPackages !== 'off' && o.editorGitPackages !== 'warn' && o.editorGitPackages !== 'on') throw new Error('editor_git_packages: off, warn or on');
     // w6163: the ffu CI runners' scheduled tasks and listeners at Normal priority (daemon.json `runnerPriority`), Windows only: the priorities it sets are Windows'.
@@ -1121,7 +1126,7 @@ export class OpsWorker {
       recorded = ` The portal's record of ${m.id} now says ${Object.entries(rec).map(([k, v]) => `${k} ${v}`).join(', ')} (what its daemon runs by; it has it already, and list_machines shows it).`;
     }
     // Over the machine's own daemon link (w1596) when it takes one: the portal runs it, no ssh and no worker job.
-    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence, workerCaps: o.workerCaps, transcriptLock: o.transcriptLock, storeLock: o.storeLock, editorTmpdir: o.editorTmpdir, pathFence: o.pathFence, mediumAgentFolders: o.mediumAgentFolders, daemonTmpdir: o.daemonTmpdir, toolsDiskLock: o.toolsDiskLock, winCiFirst: o.winCiFirst, sharedLock: o.sharedLock, runnerPriority: o.runnerPriority, hostRestage: o.hostRestage, longRuns: o.longRuns, liveRunGuard: o.liveRunGuard, editorGitPackages: o.editorGitPackages }).filter(([, v]) => v !== undefined && v !== false));
+    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence, workerCaps: o.workerCaps, transcriptLock: o.transcriptLock, storeLock: o.storeLock, editorTmpdir: o.editorTmpdir, pathFence: o.pathFence, mediumAgentFolders: o.mediumAgentFolders, daemonTmpdir: o.daemonTmpdir, toolsDiskLock: o.toolsDiskLock, winCiFirst: o.winCiFirst, sharedLock: o.sharedLock, runnerPriority: o.runnerPriority, hostRestage: o.hostRestage, longRuns: o.longRuns, liveRunGuard: o.liveRunGuard, editorGitPackages: o.editorGitPackages, readLog: o.readLog }).filter(([, v]) => v !== undefined && v !== false));
     // w6287: the agents the new daemon adopts keep the environment their host started with.
     const lockNote = o.sharedLock !== undefined ? ` ${SHARED_LOCK_DELAY_NOTE}` : '';
     const viaLink = this.d.linkUpdate?.(m.id, flags);
@@ -1138,7 +1143,7 @@ export class OpsWorker {
     const why = this.d.linkProblem?.(m.id);
     if (why) throw new Error(`machine: ${why}. Nothing was run`);
     if (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root)) throw new Error(`machine: ${m.id}'s ssh target or root folder has characters this job will not pass to a shell`);
-    const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence, o.workerCaps, o.transcriptLock, o.storeLock, o.editorTmpdir, o.pathFence, o.mediumAgentFolders, o.daemonTmpdir, o.toolsDiskLock, o.winCiFirst, o.sharedLock, o.runnerPriority, o.hostRestage, o.longRuns, o.liveRunGuard, o.editorGitPackages).join(' ');
+    const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence, o.workerCaps, o.transcriptLock, o.storeLock, o.editorTmpdir, o.pathFence, o.mediumAgentFolders, o.daemonTmpdir, o.toolsDiskLock, o.winCiFirst, o.sharedLock, o.runnerPriority, o.hostRestage, o.longRuns, o.liveRunGuard, o.editorGitPackages, o.readLog).join(' ');
     const commit = (this.d.portalCommit ?? portalCommit)();
     if (!commit) throw new Error('machine: the portal does not know its own full commit (git rev-parse HEAD in its release), so there is no verified commit to install; nothing was run');
     const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, commit, extra)}'`;
