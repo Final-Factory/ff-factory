@@ -99,6 +99,15 @@ export const LEFTOVER = {
   TERM_WAIT_MS: 5_000,
   STUCK_RETRY_MS: 60 * MIN,
   LOOK_EVERY_MS: MIN,
+  /**
+   * w6737: on how many looks in a row a game must be no worker's before it counts as a person's (machine/personPlay.ts).
+   * One look is not enough: a dying game (Windows shows an exiting process's name with no command line) and the first
+   * look after a daemon start (nothing remembered yet) cannot be told from a person's. A real game runs for minutes; the
+   * second look, a minute on, still sees it.
+   */
+  PERSON_LOOKS: 2,
+  /** w6737: the same for a game whose program path cannot be read (no command line): a person's only if it stays so this long. */
+  PERSON_PATHLESS_LOOKS: 3,
 } as const;
 
 /** What a process is, for what may end it. */
@@ -322,11 +331,14 @@ export const slotSandbox = (slot: string | undefined) => /^(slot\d+)-[01]$/i.exe
  * orphans are reparented to), and trusts a link only when the parent started before the child (`born`, where known: a
  * dead parent's pid reused on Windows names an unrelated process).
  */
-export function personGames(procs: Proc[], cands: { p: Proc }[], env: Map<number, ProcEnv>, o: { platform: UnityPlatform; self: Set<number>; places: string[]; tempRoot?: string; slotRoots?: string[]; leasePids?: Set<number>; born?: Map<number, number> }): number[] {
+export function personGames(procs: Proc[], cands: { p: Proc }[], env: Map<number, ProcEnv>, o: { platform: UnityPlatform; self: Set<number>; places: string[]; tempRoot?: string; slotRoots?: string[]; leasePids?: Set<number>; born?: Map<number, number>; known?: Set<number> }): number[] {
   const taken = new Set(cands.map((c) => c.p.pid));
   const folders = [...o.places, ...(o.tempRoot ? [o.tempRoot] : [])].filter(Boolean).map((f) => names(key(f, o.platform)));
   return gamePlayers(procs, o.platform)
     .filter((p) => p.pid > 0 && !taken.has(p.pid) && !o.self.has(p.pid) && !env.get(p.pid)?.session)
+    // w6737: a game a lease on this host names by its own pid (the players broker's and player_slots.py launch's leases do),
+    // and one an earlier look already knew as a worker's, are never a person's, whatever its command line reads now.
+    .filter((p) => !o.leasePids?.has(p.pid) && !o.known?.has(p.pid))
     .filter((p) => {
       const c = o.platform === 'win32' ? posix(p.cmd).toLowerCase() : p.cmd;
       return !folders.some((re) => re.test(c));
@@ -334,6 +346,27 @@ export function personGames(procs: Proc[], cands: { p: Proc }[], env: Map<number
     .filter((p) => !slotOf(p.cmd, o.slotRoots ?? [], o.platform))
     .filter((p) => !workerAncestor(p, procs, env, { platform: o.platform, self: o.self, leasePids: o.leasePids, born: o.born }))
     .map((p) => p.pid);
+}
+
+/**
+ * w6737: a game whose program path the listing does not show: Windows' Win32_Process gives an exiting process (and one it
+ * may not read) its name and no command line, so neither its slot folder nor its lease can be matched by path.
+ */
+export function pathlessGame(p: Proc, platform: UnityPlatform): boolean {
+  const prog = platform === 'win32' ? (splitArgs(p.cmd)[0] ?? '') : (p.cmd.trim().split(/\s+/)[0] ?? '');
+  return !/[\\/]/.test(prog);
+}
+
+/**
+ * w6737: the person's games of this look, from its candidates (`raw`, personGames) and how many looks in a row each was one
+ * before (`looks`): a game counts once it has been one on LEFTOVER.PERSON_LOOKS looks in a row (PERSON_PATHLESS_LOOKS for
+ * one with no readable path). Answers the counts to keep for the next look; a game missing from a look starts again at one.
+ */
+export function confirmPersons(raw: number[], looks: Map<number, number>, pathless: Set<number>): { persons: number[]; looks: Map<number, number> } {
+  const next = new Map<number, number>();
+  for (const pid of raw) next.set(pid, (looks.get(pid) ?? 0) + 1);
+  const persons = raw.filter((pid) => next.get(pid)! >= (pathless.has(pid) ? LEFTOVER.PERSON_PATHLESS_LOOKS : LEFTOVER.PERSON_LOOKS));
+  return { persons, looks: next };
 }
 
 /** w2994: the first ancestor of `p` a worker runs (FF_SESSION_ID in its environment, or a local lease's holder pid), or undefined. */
@@ -507,6 +540,10 @@ export class LeftoverReaper {
   private players: PlayerLine[] = [];
   /** w1894: the game players of the last look that no worker started (a person's: machine/personPlay.ts). */
   private persons: number[] = [];
+  /** w6737: the game pids a look knew as a worker's (candidate, slot path, FF_SESSION_ID, own lease), kept while they run. */
+  private agentGames = new Set<number>();
+  /** w6737: how many looks in a row each game was no worker's (confirmPersons). */
+  private personLooks = new Map<number, number>();
   private others = 0;
   private lastAt?: number;
   /** w4589: the CPU time of each worker's own job at the last look (by pid and command line), and the busy ones of the last look. */
@@ -531,7 +568,22 @@ export class LeftoverReaper {
   private async personsOf(procs: Proc[], cands: Candidate[], env: Map<number, ProcEnv>, self: Set<number>, roots: string[], leases: PlayerLease[]): Promise<number[]> {
     const d = this.d;
     const leasePids = new Set(leases.filter((l) => String(l.host ?? '').toLowerCase() === d.host.toLowerCase()).map((l) => Number(l.pid)).filter((pid) => pid > 0));
-    const o = { platform: d.platform, self, places: d.places().map((x) => x.path), tempRoot: d.tempRoot(), slotRoots: roots, leasePids };
+    // w6737: remember the games this look knows as a worker's, so a later look that cannot read one (it is exiting) still knows.
+    const games = gamePlayers(procs, d.platform);
+    const live = new Set(games.map((p) => p.pid));
+    for (const pid of [...this.agentGames]) if (!live.has(pid)) this.agentGames.delete(pid);
+    const taken = new Set(cands.map((c) => c.p.pid));
+    for (const p of games) if (taken.has(p.pid) || env.get(p.pid)?.session || leasePids.has(p.pid) || slotOf(p.cmd, roots, d.platform)) this.agentGames.add(p.pid);
+    const o = { platform: d.platform, self, places: d.places().map((x) => x.path), tempRoot: d.tempRoot(), slotRoots: roots, leasePids, known: this.agentGames };
+    const raw = await this.rawPersons(procs, cands, env, o);
+    const pathless = new Set(games.filter((p) => pathlessGame(p, d.platform)).map((p) => p.pid));
+    const c = confirmPersons(raw, this.personLooks, pathless);
+    this.personLooks = c.looks;
+    return c.persons;
+  }
+
+  private async rawPersons(procs: Proc[], cands: Candidate[], env: Map<number, ProcEnv>, o: Parameters<typeof personGames>[3]): Promise<number[]> {
+    const d = this.d;
     const first = personGames(procs, cands, env, o);
     if (!first.length) return first;
     // Start times only for the few games left and their ancestors, so a reused pid is no worker's ancestor.
@@ -815,6 +867,7 @@ export class LeftoverReaper {
     for (const s of [...this.stopped.keys()]) if (!sessions.has(s)) this.stopped.delete(s);
     this.players = players;
     this.others = others;
+    if (!personOn) this.personLooks.clear();
     this.persons = personOn ? await this.personsOf(procs, cands, env, self, roots, leases) : [];
     this.lastAt = now;
     const out: Ended[] = [];

@@ -634,12 +634,24 @@ the holder pid of a lease on this host. The walk stops at init/systemd/launchd a
 link only when the parent started before the child (a dead parent's pid reused on Windows). A slot player with no lease
 of its own is then judged as an orphan, as with the look off (w1196).
 
+**A game exiting, and the first look after a start (w6737).** On LothDesktop, 2026-11-28, two agents' slot players counted
+as lothsahn playing and held the machine 10+ min each: w6684's (`V:\ffw\players\slot1-0\player\finalfactory.exe`, pid
+53744) at 05:57:51Z, while `ff-leftovers end` was ending it and just after a daemon restart, and the players broker's
+(`V:\ffw\players\slot3-0\player\finalfactory.exe`, pid 100716) at 06:10:00Z, which was gone by 06:10:52Z. Windows'
+Win32_Process lists an exiting process by its name with no command line, so the slot path, and the lease (matched by slot),
+were both lost. So three more rules: a game a lease on this host names by its own pid (the broker's and `player_slots.py
+launch`'s leases do) is never a person's; one an earlier look knew as a worker's stays a worker's while its pid runs; and a
+game counts as a person's only once two looks in a row (`LEFTOVER.PERSON_LOOKS`, a minute apart) found it so, three for
+one listed with no command line (`PERSON_PATHLESS_LOOKS`). The first look after a daemon start holds nothing new; a person's
+game is found a minute later, and a hold kept from before the restart stays (it goes into its grace on that look and back
+to playing on the next).
+
 **Checking it without a person.** Start a game from outside the player pool with no worker in it or above it: no
 `FF_SESSION_ID`, `FF_SANDBOX_ID` or `FF_MACHINE_ID` in its environment or its parents', and no temp folder or sandbox in
 its command line. On Windows, `explorer.exe <exe>` makes Explorer its parent and its environment the desktop's; a new exe
 path raises the Windows Firewall prompt, so use a path whose rule exists (the Steam install's).
 
-Tests: `server/personPlay.test.ts`, the w1894 and w2994 cases in `server/leftovers.test.ts`.
+Tests: `server/personPlay.test.ts`, the w1894, w2994 and w6737 cases in `server/leftovers.test.ts`.
 
 ## Orphaned and hung batch builds are ended (w791)
 
