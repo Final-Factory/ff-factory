@@ -76,19 +76,40 @@ before redeploying by hand.
 user code running and its handle never signalled: on 2026-11-28 BEAST's daemon was frozen 181 s at 07:41:20Z, the freeze
 watch ended it at 07:41:25Z, and pid 16100 was still there hours later (two threads), with `run-daemon.ps1` waiting on it and
 so starting nothing, about 15 WMI and perf-counter PowerShells hung beside it, and `machine_daemon start` answering
-"started". What now happens, warn-only first (lothsahn's lockout rule; the enforcing stage is a separate change):
+"started". What now happens (stage 1, warn only, #1570; stage 2, the recovery, w6784's second change):
 - The daemon writes `logs\daemon-ending.json` (`{pid, at, why}`, `machine/freezeWatch.ts` `DAEMON_ENDING_MARKER`) just
   before the freeze watch's SIGKILL and at every exit it runs. The freeze watch's thread says
-  `event loop: the daemon (pid N) is still running N s after its SIGKILL; trying it again` every 10 s if it is still there to
-  say it.
+  `event loop: the daemon (pid N) is still running N s after its SIGKILL; trying it again` every 10 s (one timer) if it is
+  still there to say it.
 - `run-daemon.ps1` removes that file before each start and waits for the daemon in 5 s steps instead of one unbounded
-  `WaitForExit()`. When the file names the running pid and is `SUPERVISOR_STUCK_AFTER_S` (120) s old, it writes once to
-  `logs\supervisor.log`: `the daemon, pid N, said it ends (why) N s ago and has still not exited: it is stuck mid-exit; this
-  supervisor goes on waiting for it (w6784, warn only)`, then `has exited after all` if it does.
-- `machine_daemon start` on Windows reads the task's state and the supervisor's last daemon first. A task already running
-  answers `the FFFactoryDaemon task was already running, so this start changed nothing; its supervisor's last daemon is pid N,
-  still running|gone` (Task Scheduler runs one instance), and with no daemon connected it adds that its supervisor or daemon
-  is stuck.
+  `WaitForExit()`. When the file names the running pid and is `SUPERVISOR_STUCK_AFTER_S` (120) s old, the supervisor ends
+  the daemon again itself (Stop-Process, then 15 s to go: the supervisor owns the kill and its check), and if it is still there
+  writes `the daemon, pid N, is still there: it is stuck mid-exit; left behind, a fresh one starts beside it (w6784)` and
+  starts a fresh daemon 10 s later. A left-behind pid is listed in `logs\supervisor.json` (`abandoned`) while it is there.
+  Off switch, no reinstall: a file `supervisor-warn-only` in the daemon's folder; then it only logs `... it is stuck mid-exit;
+  ... says warn only, so this supervisor goes on waiting for it` (stage 1's behaviour), and `has exited after all` if it does.
+- A stuck process keeps its handles, daemon.log among them. A log the supervisor cannot move aside is left, and the next
+  daemon writes `daemon.held1.log` (`daemon.err.held1.log`; `held2` and on for more), said in supervisor.log; the next
+  rotation that can move them files every one as `daemon.log.<stamp>`, which log retention keeps and prunes as usual.
+- **A start route without the Task Scheduler or WMI.** On BEAST both hung (`Get-ScheduledTask`, `schtasks` and the task's
+  start all hung), and every other route went through them. The supervisor already runs in the user's interactive session
+  (which Unity needs) and now rewrites `logs\supervisor.json` (`{pid, daemonPid, abandoned, at}`) every 5 s step, its back-off
+  included. A `machine_daemon restart` over ssh (a daemon without a link) first asks a live supervisor (that file under 30 s
+  old and its pid running) by writing `logs\daemon-restart-request.json`: the supervisor takes it at its next step, ends its
+  daemon (left behind as above if it does not go) and starts a fresh one at once, and the restart answers `its supervisor (pid
+  S) started a fresh daemon, pid N, in place of pid M, without the Task Scheduler`. A start asks it only while it has no
+  daemon (it skips its back-off), else answers that the supervisor is live and has daemon pid M, and that a restart asks it for
+  a fresh one. Only with no live supervisor, or none that answered in 60 s, does it go the old way (Stop-FFDaemon and the
+  task). A machine whose supervisor is gone too still needs the task, or a logon: nothing else may start a program in a
+  user's interactive session from an ssh session.
+- `machine_daemon start` on Windows reads the task's state (in a child given 15 s, `Invoke-FFBounded`: `Get-ScheduledTask`
+  is CIM) and the supervisor's last daemon first. A task already running answers `the FFFactoryDaemon task was already
+  running, so this start changed nothing; its supervisor's last daemon is pid N, still running|gone` (Task Scheduler runs one
+  instance), and with no daemon connected it adds that its supervisor or daemon is stuck.
+- Stop-FFDaemon (stop, restart, deploy) no longer refuses over a process that took its Stop-Process and is still there 15 s
+  later: that process is stuck in the kernel and runs no code, so it cannot answer beside the next daemon (the w1918 refusal
+  stays for one that refused Stop-Process). It is named in the answer: `pid(s) N took Stop-Process and are still there, stuck
+  mid-exit (they run no code); left behind`.
 - A fresh daemon beside a stuck one would not yield to it: the newer-twin handshake (`machine/unitySlots.ts`, w1918) yields
   only to a twin with a later start whose `arbiter.json` is fresh (`ARBITER_FRESH_MS`), and a stuck process writes nothing;
   daemonRpc and the live port listen on port 0 (OS-picked), so nothing to bind twice.

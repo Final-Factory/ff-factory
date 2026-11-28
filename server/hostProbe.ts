@@ -103,9 +103,19 @@ export function runOffThread(cmd: string, args: string[], timeoutMs: number, opt
       clearTimeout(timer);
       resolve(r);
     });
-    const w = probeWorker();
-    w.ref();
-    w.postMessage({ id, cmd, args, timeoutMs, ...(opts.cwd ? { cwd: opts.cwd } : {}), ...(opts.env ? { env: { ...opts.env } } : {}), ...(opts.maxBuffer ? { maxBuffer: opts.maxBuffer } : {}) });
+    try {
+      const w = probeWorker();
+      w.ref();
+      w.postMessage({ id, cmd, args, timeoutMs, ...(opts.cwd ? { cwd: opts.cwd } : {}), ...(opts.env ? { env: { ...opts.env } } : {}), ...(opts.maxBuffer ? { maxBuffer: opts.maxBuffer } : {}) });
+    } catch (e) {
+      // w6784 (w6785's review): a thread that cannot start or a message it cannot take ends the ticket, or the kind lingers for good.
+      clearTimeout(timer);
+      pending.delete(id);
+      tickets.get(id)?.done();
+      tickets.delete(id);
+      idle();
+      resolve({ code: -1, stdout: '', stderr: `${cmd}: the probe thread could not take it: ${(e as Error).message}` });
+    }
   });
 }
 

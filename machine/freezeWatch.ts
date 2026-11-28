@@ -72,6 +72,7 @@ let session;
 let wokeAt = 0;
 const frozenFor = (now) => now - Math.max(Number(Atomics.load(beat, 0)), wokeAt);
 let ending; // the kill's timer, once the freeze reached exitMs
+let still; // w6784: the one retry timer after a kill that did not end this process (w6785's review: one per end() stacked)
 // The last look before the kill: a loop that came free meanwhile is left running.
 const end = () => {
   ending = undefined;
@@ -86,7 +87,8 @@ const end = () => {
   const killedAt = Date.now();
   try { process.kill(process.pid, 'SIGKILL'); } catch (e) { out('event loop: could not end ' + who + ': ' + ((e && e.message) || e)); }
   // w6784: a kill that worked runs nothing more here. Still running: say so (the supervisor's own bounded wait acts on it).
-  const still = setInterval(() => {
+  if (still) return;
+  still = setInterval(() => {
     out('event loop: ' + who + ' (pid ' + process.pid + ') is still running ' + Math.round((Date.now() - killedAt) / 1000) + ' s after its SIGKILL; trying it again (w6784)');
     try { process.kill(process.pid, 'SIGKILL'); } catch {}
   }, 10000);

@@ -162,3 +162,19 @@ test('w6784: a probe is named in the log by its program and the start of its scr
   assert.match(probeLabel('schtasks', ['/Query', '/TN', 'FFFactoryDaemon']), /^schtasks "\/Query \/TN FFFactoryDaemon"$/);
   assert.ok(probeLabel('powershell.exe', ['-Command', 'x'.repeat(200)]).endsWith('..."'));
 });
+
+test('w6784 (w6785\'s review): a probe the host probe thread cannot take ends its ticket, so its kind does not linger for good', async () => {
+  setUp('enforce');
+  try {
+    // A function in env cannot be cloned to the thread: postMessage throws (DataCloneError).
+    const r = await runOffThread(node, QUICK, 1, { probe: 'uncloneable', env: { X: (() => 1) as unknown as string } });
+    assert.equal(r.code, -1);
+    assert.match(r.stderr, /the probe thread could not take it/);
+    await sleep(400);
+    assert.deepEqual(lingeringProbes(), []);
+    assert.ok(probeBegin({ cmd: 'x', args: [], timeoutMs: 1000, probe: 'uncloneable' }).ticket?.done() === undefined, 'not refused');
+  } finally {
+    resetProbeGuardForTest();
+    useProbeGuard('warn');
+  }
+});
