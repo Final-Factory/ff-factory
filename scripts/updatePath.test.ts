@@ -158,7 +158,7 @@ test('w5573: worker.ts tools clones, then fast-forwards, the tools checkout and 
         const cwd = o.cwd ?? '';
         runs.push({ cwd, script: fs.existsSync(path.join(cwd, 'registerAgents.sh')) });
         const latest = marketplaceVersions(JSON.parse(fs.readFileSync(path.join(cwd, '.claude-plugin', 'marketplace.json'), 'utf8')));
-        const plugins = Object.fromEntries(['ff-agents', 'ff-speckit'].map((p) => [`${p}@${MARKETPLACE}`, [{ scope: 'user', version: latest[p] }]]));
+        const plugins = Object.fromEntries(['ff-agents', 'ff-speckit', ...(args.includes('ff-discord') ? ['ff-discord'] : [])].map((p) => [`${p}@${MARKETPLACE}`, [{ scope: 'user', version: latest[p] }]]));
         fs.mkdirSync(path.join(claudeDir, 'plugins'), { recursive: true });
         fs.writeFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), JSON.stringify({ version: 2, plugins }));
         return { code: 0, stdout: '', stderr: '' };
@@ -217,7 +217,7 @@ test("w5597: an old-layout machine publishes from the new checkout; hooks and sc
         const cwd = o.cwd ?? '';
         runs.push(cwd);
         const latest = marketplaceVersions(JSON.parse(fs.readFileSync(path.join(cwd, '.claude-plugin', 'marketplace.json'), 'utf8')));
-        const plugins = Object.fromEntries(['ff-agents', 'ff-speckit'].map((p) => [`${p}@${MARKETPLACE}`, [{ scope: 'user', version: latest[p] }]]));
+        const plugins = Object.fromEntries(['ff-agents', 'ff-speckit', ...(args.includes('ff-discord') ? ['ff-discord'] : [])].map((p) => [`${p}@${MARKETPLACE}`, [{ scope: 'user', version: latest[p] }]]));
         fs.mkdirSync(path.join(claudeDir, 'plugins'), { recursive: true });
         fs.writeFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), JSON.stringify({ version: 2, plugins }));
         return { code: 0, stdout: '', stderr: '' };
