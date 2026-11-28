@@ -117,24 +117,41 @@ so starting nothing, about 15 WMI and perf-counter PowerShells hung beside it, a
   only to a twin with a later start whose `arbiter.json` is fresh (`ARBITER_FRESH_MS`), and a stuck process writes nothing;
   daemonRpc and the live port listen on port 0 (OS-picked), so nothing to bind twice.
 
-**A machine that reboots itself when its daemon stays stuck (w6792, warn only for now).** lothsahn, 2026-11-28: "If the
-daemon is stuck, can we reboot after 15minutes? That way it fixes any stuck issues?" When the recovery above has not brought
-back a working daemon, a reboot is the one fix left that needs nobody at the machine, but only on a machine that comes back
-by itself. Stage 1 (this one) only says what it would do; the reboot itself comes in its own reviewed change once the warn
-lines on the real machines look right (lothsahn's lockout rule).
+**A machine that reboots itself when its daemon stays stuck (w6792).** lothsahn, 2026-11-28: "If the daemon is stuck, can
+we reboot after 15minutes? That way it fixes any stuck issues?" When the recovery above has not brought back a working
+daemon, a reboot is the one fix left that needs nobody at the machine, but only on a machine that comes back by itself.
+It came in two reviewed stages (lothsahn's lockout rule): stage 1 only logged `would reboot now (warn only)`; stage 2
+reboots ("Build the live stage now; it gets its own independent review before it merges", lothsahn). The switch is
+`SUPERVISOR_REBOOT_LIVE` in `server/machineDeployWin.ts`; set to false, the supervisor goes back to warn only.
 - **A stuck episode** begins when `run-daemon.ps1` finds its daemon stuck mid-exit (its marker named it and it is still there,
   counted from the marker's time) or a restart asked of it ends nothing. It ends when the daemon running then says it works:
   every 30 s the daemon writes `logs\daemon-alive.json` (`{pid, at, linked}`, `machine/selfReboot.ts`), and one from the
   supervisor's current daemon, linked to the portal and at most 90 s old, ends it (`self-reboot: the daemon, pid N, works
   (linked to the portal) N min after the stuck state began: the episode is over, no reboot (w6792)`). A fresh daemon that
-  starts but never links (BEAST's hung WMI and Task Scheduler, 2026-11-28) does not end it.
+  starts but never links (BEAST's hung WMI and Task Scheduler, 2026-11-28) does not end it. "Linked" means the portal
+  welcomed this link, not only that a socket opened.
 - **After 15 minutes** (`SUPERVISOR_REBOOT_AFTER_S`, from when the stuck state began) of an episode still going, the
-  supervisor logs, once per episode, `self-reboot: would reboot now (warn only), reason: the daemon was stuck N min (...)
-  and this supervisor's own recovery brought back no working daemon (w6792)`, unless a guard holds it, said once per guard:
-  `self-reboot: stuck N min, no reboot: <why> (w6792)`. The guards, in order: a file `supervisor-no-reboot` in the daemon's
-  folder (the off switch); the machine would not come back by itself, or that is not read yet (below); another session at the console, or the
-  console's idle time unreadable; keyboard or mouse input at the console in the last 30 minutes (`GetLastInputInfo`, the
-  console session's own reading); a reboot of its own in the last 6 hours (`lastLiveAt`, kept across reboots).
+  supervisor reboots the machine, once per episode, unless a guard holds it, said once per guard: `self-reboot: stuck N
+  min, no reboot: <why> (w6792)`. The guards, in order: a file `supervisor-no-reboot` in the daemon's folder (the off
+  switch); the machine would not come back by itself, or that is not read yet (below); a daemon started under 2 minutes
+  ago (it gets as long as a link takes); a daemon that works but cannot reach the portal (below); another session at the
+  console; the console's idle time unreadable; keyboard or mouse input at the console in the last 30 minutes
+  (`GetLastInputInfo`, the console session's own reading); a reboot of its own in the last 6 hours (`lastLiveAt`, kept
+  across reboots).
+- **The portal down is no reason to reboot** (w6809's review). The heartbeat carries `portalUnreachable {at, why}`: the
+  last try to link that got no HTTP answer, or a 502, 503 or 504, cleared when a link is welcomed. While that try is under
+  2 minutes old (`SUPERVISOR_PORTAL_HOLD_S`) the reboot waits (`no reboot: the daemon works but cannot reach the portal
+  (...)`): every machine would otherwise reboot during a portal outage, and none of them would bring it back. A daemon the
+  portal answers but never welcomes stops holding it 2 minutes after its last failed try.
+- **The reboot.** It logs `self-reboot: rebooting now, reason: the daemon was stuck N min (...) and this supervisor's own
+  recovery brought back no working daemon (w6792)` and writes the reason to `logs\supervisor-reboot.json` first, then runs
+  `%SystemRoot%\System32\shutdown.exe /r /f /t 0 /d u:0:5 /c "FF Factory: ..."` (apps closed without asking, reason "Other
+  Failure: System Unresponsive" in the System event log, event 1074), which needs neither the Task Scheduler nor WMI, both
+  hung on BEAST. If shutdown.exe answers anything but 0, or nothing in 60 s, or the machine is still up 10 minutes after it
+  said yes (`SUPERVISOR_REBOOT_FALLBACK_S`; not when the daemon works again or someone used the console since, who may
+  have called it off with `shutdown /a`), the supervisor calls `NtShutdownSystem` (ntdll, after enabling the user's own
+  shutdown privilege), which reboots at once without asking any service (nothing running is told first). A failure of that too is logged (`self-reboot: this
+  machine did not reboot: ...`) and kept as `last.failed`; the rate guard counts the try either way.
 - **Comes back by itself** is detected, never configured by machine name, at the supervisor's start and every hour after
   (never during an episode), in a runspace so a hung schtasks cannot stop the supervisor: Winlogon `AutoAdminLogon` is 1;
   `AutoLogonSID`, when set, is this daemon's user; `DefaultUserName` names this user (a Microsoft account's address is
@@ -143,19 +160,23 @@ lines on the real machines look right (lothsahn's lockout rule).
   see, the last boot logged this user on by itself (within 120 s of the boot and 5 s of the console connecting) with
   `AutoAdminLogon` still 1 (Windows sets it to 0 when it finds no password, KB 324737); and `schtasks /query` finds the
   `FFFactoryDaemon` logon task (15 s bound; a hung Task Scheduler keeps the last answer). Logged when it changes:
-  `self-reboot: eligible|not eligible: <why>; mode warn only (w6792)`. BEAST, 2026-11-28 (measured): automatic logon to its
-  user with the password in the LSA, logged on 11 s after boot and 2.3 s after the console connected.
+  `self-reboot: eligible|not eligible: <why>; mode live (w6792)`. A `DefaultPassword` value alone is not enough (it can be
+  stale or wrong): the last boot must have logged this user on by itself as well. A check that does not answer in 2
+  minutes is stopped, and no new one starts until that stop has gone through. BEAST, 2026-11-28 (measured): automatic
+  logon to its user with the password in the LSA, logged on 11 s after boot and 2.3 s after the console connected.
 - **macOS and Linux are not eligible** and say why on the machine's panel: launchd (KeepAlive) and systemd
   (Restart=always) restart their daemon and no supervisor of ours watches it, a reboot needs root, and on a Mac with
   FileVault the disk stays locked after a restart until someone types the password.
 - **The portal shows it.** The supervisor writes `logs\supervisor-reboot.json` (mode, eligible and why, the episode, the guard
   holding it, the last reboot or would-be reboot, `lastLiveAt`); the daemon sends it (`self_reboot`) when it changes and
-  after each hello, the portal logs `machine X: self-reboot: ...` and `machine X: would have rebooted itself at T (warn
-  only): ...`, and the machine's panel shows a **Self-reboot** chip (warn only, on, off, stuck) with the last one and why.
-  After a real reboot the next daemon reports the same file, so the panel says when and why it rebooted.
-- Workers gain nothing: the supervisor runs at the user's own level from its logon task, takes no reboot command from a file or
-  the link (w6784's restart request asks only for a restart of the daemon), and its script has no reboot call at all in warn mode (a test checks it); a worker's shutdown command stays refused
-  by the guard (`runsPowerOff`).
+  after each hello, the portal logs `machine X: self-reboot: ...` and `machine X: rebooted itself at T: ...` (or `tried to
+  reboot itself at T and could not (...)`), and the machine's panel shows a **Self-reboot** chip (on, off, stuck) with the
+  last one and why. After the reboot the next daemon reports the same file, so the panel says when and why it rebooted.
+- Workers gain nothing: the supervisor runs at the user's own level from its logon task and reboots from one named step
+  (`Reboot-Now`, called only by its own 15-minute check after the guards); no file, request or link message asks for it
+  (w6784's restart request asks only for a restart of the daemon; a test checks both), and a worker's shutdown command
+  stays refused by the guard (`runsPowerOff`). Tests never reach the real reboot: `supervisorWin.test.ts` replaces both
+  calls with fakes and refuses a script that still has either.
 
 **The offline backstop (w6784).** The offline redeploy above leaves two kinds of machine alone: a worker root install
 (BEAST, started on its computer, never redeployed over ssh) and one with agents running. BEAST stayed offline from 07:41Z

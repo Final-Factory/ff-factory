@@ -494,14 +494,28 @@ export const SUPERVISOR_AUTOLOGON_CONNECT_S = 5;
 /** w6792: this file in the daemon's folder turns the automatic reboot off: a stuck episode is only logged. */
 export const SUPERVISOR_NO_REBOOT = 'supervisor-no-reboot';
 /**
- * w6792, lothsahn's lockout rule: warn only first. False: the supervisor logs "would reboot now" and tells the portal, and
- * its script has no way to reboot at all; the live route comes in its own reviewed PR once the warn lines look right.
+ * w6792, lothsahn's lockout rule: warn only first (#1579, which had no way to reboot at all), then live once the warn lines on
+ * real machines looked right (lothsahn, 2026-11-28: "Build the live stage now; it gets its own independent review before it
+ * merges."). False: the supervisor only logs "would reboot now" and tells the portal.
  */
-export const SUPERVISOR_REBOOT_LIVE = false;
+export const SUPERVISOR_REBOOT_LIVE = true;
+/**
+ * w6792: the reboot's fallback, NtShutdownSystem, when shutdown.exe fails, does not answer in SUPERVISOR_SHUTDOWN_WAIT_S, or
+ * the machine is still up (this supervisor still running) SUPERVISOR_REBOOT_FALLBACK_S after it said yes.
+ */
+export const SUPERVISOR_SHUTDOWN_WAIT_S = 60;
+export const SUPERVISOR_REBOOT_FALLBACK_S = 600;
+/**
+ * w6792 (w6809's review): a daemon that cannot reach the portal at all works; a reboot would not bring the portal back. Its
+ * heartbeat names the last try that failed before a link opened (machine/selfReboot.ts portalUnreachable), kept until a
+ * welcome; one this recent holds the reboot. A link that opened and was never welcomed stops holding it this long after.
+ */
+export const SUPERVISOR_PORTAL_HOLD_S = 120;
 
 /**
  * w6792: the helper the supervisor compiles (Add-Type, off its loop) to read the console's last input, the uptime, which
- * session has the console and the logon session's times. It reads; it changes nothing.
+ * session has the console and the logon session's times, and its one action, Reboot (NtShutdownSystem, the fallback when
+ * shutdown.exe cannot reboot): only the supervisor's own stuck-episode check calls it, and nothing outside it can.
  */
 const SELF_REBOOT_NATIVE = `using System;
 using System.Runtime.InteropServices;
@@ -521,15 +535,24 @@ public static class FFSelfReboot {
     if (!WTSQuerySessionInformationW(IntPtr.Zero, session, 24, out b, out n)) return new long[0];
     try { if (n < 216) return new long[0]; return new long[] { Marshal.ReadInt64(b, 176), Marshal.ReadInt64(b, 200) }; } finally { WTSFreeMemory(b); }
   }
+  // The kernel's reboot: no app or service is asked to close, the file systems are flushed. SeShutdownPrivilege (19), which a
+  // workstation's Users group holds, enabled first. Returns the NTSTATUS when it fails; on success it does not return.
+  [DllImport("ntdll.dll")] static extern int RtlAdjustPrivilege(int privilege, bool enable, bool currentThread, out bool wasEnabled);
+  [DllImport("ntdll.dll")] static extern int NtShutdownSystem(int action);
+  public static string Reboot() {
+    bool was; int p = RtlAdjustPrivilege(19, true, false, out was);
+    if (p != 0) return "SeShutdownPrivilege could not be enabled: NTSTATUS 0x" + p.ToString("X8");
+    return "NtShutdownSystem answered NTSTATUS 0x" + NtShutdownSystem(1).ToString("X8");
+  }
 }`;
 
 /**
  * w6792: whether this machine comes back by itself after a reboot, detected, never configured by name: automatic logon on
  * (Winlogon AutoAdminLogon 1) to the daemon's own user (DefaultUserName, or a Microsoft account's address, matched by SID;
  * AutoLogonSID, when there, this user's), a stored password for it, and the daemon's logon task. The password's value is
- * never read: a DefaultPassword value counts by its name; one in the LSA (Sysinternals Autologon, netplwiz), which only an
- * administrator can see, counts when the last boot logged this user on by itself and AutoAdminLogon stayed 1 (Winlogon
- * turns it off when it finds no password). Run in a runspace by the supervisor (params: task name, the FFSelfReboot source,
+ * never read: it counts when the last boot logged this user on by itself and AutoAdminLogon stayed 1 (Winlogon turns it off
+ * when it finds no password), whether it is a DefaultPassword value (named, never read; it can be stale) or in the LSA
+ * (Sysinternals Autologon, netplwiz), which only an administrator can see. Run in a runspace by the supervisor (params: task name, the FFSelfReboot source,
  * the last answer about the task, SUPERVISOR_AUTOLOGON_BOOT_S, SUPERVISOR_AUTOLOGON_CONNECT_S); answers {eligible, why, task}.
  * Its readers come first, so a test can define fakes after them (the line ELIG_READERS_END).
  */
@@ -591,17 +614,18 @@ if ($w.user) {
   else { try { $sid = Read-Sid $w.domain $w.user; $match = $sid -eq $me.sid -or $me.groups -contains $sid } catch { } }
 }
 if (-not $match) { return No "automatic logon names another account than this daemon's user ($($me.name))" }
-$secret = $null
-if ($w.names -contains 'DefaultPassword') { $secret = 'its password stored (a DefaultPassword value, not read)' }
-else {
-  $l = $null
-  try { $l = Read-Logon } catch { }
-  if ($l -and $l[0] -le $bootS -and $l[1] -ge 0 -and $l[1] -le $connectS) { $secret = "its password stored (the last boot logged this user on by itself $([int]$l[0]) s after it started, $([Math]::Round($l[1], 1)) s after the console connected, and AutoAdminLogon stayed 1)" }
-  else {
-    $seen = if ($l) { "this user's logon came $([int]$l[0]) s after the last boot and $([Math]::Round($l[1], 1)) s after the console connected (by itself: within $bootS s and $connectS s)" } else { "this session's logon times could not be read" }
-    return No "no stored password for automatic logon can be seen: no DefaultPassword value, and $seen; one in the LSA only an administrator can check"
-  }
+# The last boot's logon is the evidence either way: a DefaultPassword value can hold a stale password, and Winlogon then stops
+# at the sign-in screen (w6809's review).
+$plain = $w.names -contains 'DefaultPassword'
+$l = $null
+try { $l = Read-Logon } catch { }
+if (-not ($l -and $l[0] -le $bootS -and $l[1] -ge 0 -and $l[1] -le $connectS)) {
+  $seen = if ($l) { "this user's logon came $([int]$l[0]) s after the last boot and $([Math]::Round($l[1], 1)) s after the console connected (by itself: within $bootS s and $connectS s)" } else { "this session's logon times could not be read" }
+  if ($plain) { return No "the last boot did not log this user on by itself: a DefaultPassword value is there (not read), but $seen" }
+  return No "no stored password for automatic logon can be seen: no DefaultPassword value, and $seen; one in the LSA only an administrator can check"
 }
+$byItself = "the last boot logged this user on by itself $([int]$l[0]) s after it started, $([Math]::Round($l[1], 1)) s after the console connected, and AutoAdminLogon stayed 1"
+$secret = if ($plain) { "its password stored (a DefaultPassword value, not read; $byItself)" } else { "its password stored ($byItself)" }
 $task = $prevTask
 $said = $null
 try { $t = Read-Task; if ($t -is [string]) { $said = $t; $task = $false } elseif ($null -ne $t) { $task = [bool]$t } } catch { $said = $_.Exception.Message; $task = $false }
@@ -644,12 +668,22 @@ $abandoned = New-Object System.Collections.Generic.List[int]
 # w6792: a stuck episode begins when a daemon is found stuck mid-exit and ends when the daemon running then says it works
 # (its heartbeat, machine/selfReboot.ts, fresh and linked to the portal). One still going $rebootAfterS later reboots a machine
 # that comes back by itself, unless someone used its console in the last $rebootIdleS or it rebooted itself in the last
-# $rebootEveryS. $rebootLive false: it only says so ("would reboot now"), and this script has no way to reboot at all.
+# $rebootEveryS, or its daemon works but cannot reach the portal. $rebootLive false: it only says so ("would reboot now").
+# No file, request or link message asks for a reboot: Reboot-Now's one caller is this check (w6792).
 $rebootAfterS = ${SUPERVISOR_REBOOT_AFTER_S}
 $rebootIdleS = ${SUPERVISOR_REBOOT_IDLE_S}
 $rebootEveryS = ${SUPERVISOR_REBOOT_EVERY_S}
 $eligEveryS = ${SUPERVISOR_ELIGIBLE_EVERY_S}
+$eligWaitS = 120
 $rebootLive = $${SUPERVISOR_REBOOT_LIVE}
+$shutdownWaitS = ${SUPERVISOR_SHUTDOWN_WAIT_S}
+$rebootFallbackS = ${SUPERVISOR_REBOOT_FALLBACK_S}
+$portalHoldS = ${SUPERVISOR_PORTAL_HOLD_S}
+$youngS = ${SUPERVISOR_PORTAL_HOLD_S}
+$rebootAsked = $null
+$portalHold = $null
+$eligHung = $null
+$eligHungSaid = $false
 $rebootState = Join-Path $logs '${SELF_REBOOT_STATE}'
 $aliveFile = Join-Path $logs '${DAEMON_ALIVE}'
 $noReboot = Join-Path $F '${SUPERVISOR_NO_REBOOT}'
@@ -741,13 +775,18 @@ function Write-RebootState {
 }
 try {
   $r0 = Get-Content -LiteralPath $rebootState -Raw -ErrorAction Stop | ConvertFrom-Json
-  if ($r0.last) { $rebootLast = [pscustomobject]@{ at = Iso (To-Utc $r0.last.at); mode = [string]$r0.last.mode; why = [string]$r0.last.why; stuckSince = $(if ($r0.last.stuckSince) { Iso (To-Utc $r0.last.stuckSince) }) } }
+  if ($r0.last) { $rebootLast = [pscustomobject]@{ at = Iso (To-Utc $r0.last.at); mode = [string]$r0.last.mode; why = [string]$r0.last.why; stuckSince = $(if ($r0.last.stuckSince) { Iso (To-Utc $r0.last.stuckSince) }) }; if ($r0.last.failed) { $rebootLast | Add-Member -NotePropertyName failed -NotePropertyValue ([string]$r0.last.failed) } }
   if ($r0.lastLiveAt) { $rebootLastLive = To-Utc $r0.lastLiveAt }
 } catch { }
 function Check-Eligible {
+  # A check that hung is stopped and let go once the stop has gone through; none starts beside it meanwhile (w6809's review).
+  if ($eligHung) {
+    $st = [string]$eligHung.InvocationStateInfo.State
+    if ($st -ne 'Running' -and $st -ne 'Stopping') { try { $eligHung.Dispose() } catch { }; $script:eligHung = $null; Say "self-reboot: the eligibility check that hung has stopped ($st) and is let go (w6792)" }
+  }
   if ($eligAsync) {
     if (-not $eligAsync.IsCompleted) {
-      if (((Get-Date) - $eligStarted).TotalSeconds -gt 120) { Say "self-reboot: its eligibility check has not answered in 120 s; left, and tried again in $([int]($eligEveryS / 60)) min (w6792)"; $script:eligAsync = $null; $script:eligNext = (Get-Date).AddSeconds($eligEveryS) }
+      if (((Get-Date) - $eligStarted).TotalSeconds -gt $eligWaitS) { Say "self-reboot: its eligibility check has not answered in $eligWaitS s; stopped, and tried again in $([int]($eligEveryS / 60)) min (w6792)"; try { $null = $eligPs.BeginStop($null, $null) } catch { }; $script:eligHung = $eligPs; $script:eligAsync = $null; $script:eligNext = (Get-Date).AddSeconds($eligEveryS) }
       return
     }
     $r = $null
@@ -761,6 +800,8 @@ function Check-Eligible {
     Write-RebootState
   }
   if ($stuckSince -or (Get-Date) -lt $eligNext) { return }
+  if ($eligHung) { if (-not $eligHungSaid) { Say "self-reboot: the eligibility check that hung has not stopped yet; no new one starts beside it (w6792)"; $script:eligHungSaid = $true }; return }
+  $script:eligHungSaid = $false
   $script:eligNext = (Get-Date).AddSeconds($eligEveryS)
   try {
     $script:eligPs = [powershell]::Create().AddScript($eligCheck).AddArgument('${taskName(service)}').AddArgument($nativeSrc).AddArgument($(if ($elig) { $elig.task })).AddArgument(${SUPERVISOR_AUTOLOGON_BOOT_S}).AddArgument(${SUPERVISOR_AUTOLOGON_CONNECT_S})
@@ -784,11 +825,43 @@ function End-Stuck($line) {
   $script:skipNow = $null
   Write-RebootState
 }
+# w6792: the reboot; its one caller is Watch-RebootStep. shutdown.exe first (/r /f: apps are closed without asking; /t 0; reason
+# "Other Failure: System Unresponsive"), which needs neither the Task Scheduler nor WMI (both hung on BEAST, w6784): its exit
+# code, or $null when it did not answer in $shutdownWaitS s. NtShutdownSystem (FFSelfReboot::Reboot) when that fails.
+function Run-Shutdown($comment) {
+  $psi = New-Object Diagnostics.ProcessStartInfo (Join-Path $env:SystemRoot 'System32\\shutdown.exe'), ('/r /f /t 0 /d u:0:5 /c "' + $comment + '"')
+  $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+  $q = [Diagnostics.Process]::Start($psi)
+  if ($q.WaitForExit($shutdownWaitS * 1000)) { return $q.ExitCode }
+  try { $q.Kill() } catch { }
+  $null
+}
+function Nt-Reboot { if (-not ('FFSelfReboot' -as [type])) { return 'its helper type is not compiled' }; [FFSelfReboot]::Reboot() }
+function Reboot-Now($mins) {
+  $script:rebootAsked = Get-Date
+  $code = $null
+  try { $code = Run-Shutdown "FF Factory: the daemon was stuck $mins min and its supervisor reboots this machine (w6792)" } catch { $code = [string]$_.Exception.Message }
+  if ($code -is [int] -and $code -eq 0) { Say "self-reboot: shutdown.exe started the reboot (w6792)"; return }
+  Nt-Now "shutdown.exe $(if ($null -eq $code) { "did not answer in $shutdownWaitS s" } elseif ($code -is [int]) { "answered exit code $code" } else { "could not run: $code" })"
+}
+# Answers only when the machine did not reboot: that is said, and kept with the last reboot for the portal.
+function Nt-Now($because) {
+  Say "self-reboot: $because; rebooting through NtShutdownSystem (w6792)"
+  $script:rebootAsked = $null
+  $r = $null
+  try { $r = Nt-Reboot } catch { $r = $_.Exception.Message }
+  Say "self-reboot: this machine did not reboot: $r (w6792)"
+  if ($rebootLast) { $rebootLast | Add-Member -NotePropertyName failed -NotePropertyValue "$because, and $r" -Force }
+  Write-RebootState
+}
 # Why not to reboot now ({key, why}: logged once per key), or nothing.
-function Reboot-Skip {
+function Reboot-Skip($daemonPid) {
   if (Test-Path -LiteralPath $noReboot) { return @{ key = 'off'; why = "$noReboot turns it off" } }
   if (-not $elig) { return @{ key = 'unread'; why = 'whether this machine comes back by itself has not been read yet' } }
   if (-not $elig.eligible) { return @{ key = 'not eligible'; why = "this machine would not come back by itself: $($elig.why)" } }
+  # A daemon started this recently ($started, the loop's) gets as long as a link takes before it counts as not working.
+  if ($daemonPid -and ((Get-Date) - $started).TotalSeconds -lt $youngS) { return @{ key = 'young'; why = "the daemon running now, pid $daemonPid, started $([int]((Get-Date) - $started).TotalSeconds) s ago; it gets $youngS s to link to the portal" } }
+  if ($portalHold) { return @{ key = 'portal'; why = "the daemon works but cannot reach the portal ($portalHold); a reboot would not bring the portal back" } }
   $c = Console-Why
   if ($c) { return @{ key = 'console'; why = $c } }
   $idle = Idle-S
@@ -804,8 +877,18 @@ function Watch-Reboot($daemonPid) {
 }
 function Watch-RebootStep($daemonPid) {
   Check-Eligible
+  # Still running $rebootFallbackS s after shutdown.exe said yes: the reboot never went through. Not when the daemon works again
+  # or someone used the console since (they may have called it off: shutdown /a).
+  if ($rebootAsked -and ((Get-Date) - $rebootAsked).TotalSeconds -ge $rebootFallbackS) {
+    $since = ((Get-Date) - $rebootAsked).TotalSeconds
+    $idle = Idle-S
+    $no = if (-not $stuckSince) { 'the daemon works again' } elseif ($idle -lt 0) { "the console's last input can't be read" } elseif ($idle -lt $since) { 'someone used the console since' }
+    if ($no) { $script:rebootAsked = $null; Say "self-reboot: this machine is still up $([int]($since / 60)) min after shutdown.exe started the reboot, but $no; no fallback (w6792)" }
+    else { Nt-Now "this machine is still up $([int]($since / 60)) min after shutdown.exe started the reboot" }
+  }
   if (-not $stuckSince) { return }
   $mins = [int](((Get-Date).ToUniversalTime() - $stuckSince).TotalMinutes)
+  $script:portalHold = $null
   if ($daemonPid) {
     try {
       $a = Get-Content -LiteralPath $aliveFile -Raw -ErrorAction Stop | ConvertFrom-Json
@@ -813,11 +896,17 @@ function Watch-RebootStep($daemonPid) {
       # from before it said it ends, is still under ${DAEMON_ALIVE_FRESH_S} s old (w6809's review).
       $wrote = (Get-Item -LiteralPath $aliveFile).LastWriteTimeUtc
       $age = ((Get-Date).ToUniversalTime() - $wrote).TotalSeconds
-      if ([int]$a.pid -eq $daemonPid -and $a.linked -eq $true -and $age -le ${DAEMON_ALIVE_FRESH_S} -and $wrote -gt $stuckSince) { End-Stuck "self-reboot: the daemon, pid $daemonPid, works (linked to the portal) $mins min after the stuck state began: the episode is over, no reboot (w6792)"; return }
+      if ([int]$a.pid -eq $daemonPid -and $age -le ${DAEMON_ALIVE_FRESH_S} -and $wrote -gt $stuckSince) {
+        if ($a.linked -eq $true) { End-Stuck "self-reboot: the daemon, pid $daemonPid, works (linked to the portal) $mins min after the stuck state began: the episode is over, no reboot (w6792)"; return }
+        # w6809's review: one that cannot reach the portal at all works, and a reboot would not bring the portal back; one whose
+        # link opened and was never welcomed holds it no longer than $portalHoldS s after its last failed try.
+        $u = $a.portalUnreachable
+        if ($u -and $u.at -and ((Get-Date).ToUniversalTime() - (To-Utc $u.at)).TotalSeconds -le $portalHoldS) { $script:portalHold = [string]$u.why }
+      }
     } catch { }
   }
   if ($rebootSaid -or ((Get-Date).ToUniversalTime() - $stuckSince).TotalSeconds -lt $rebootAfterS) { return }
-  $skip = Reboot-Skip
+  $skip = Reboot-Skip $daemonPid
   if ($skip) {
     if ($skip.key -ne $skipSaid) { Say "self-reboot: stuck $mins min, no reboot: $($skip.why) (w6792)"; $script:skipSaid = $skip.key; $script:skipNow = [pscustomobject]@{ at = Iso (Get-Date).ToUniversalTime(); why = $skip.why }; Write-RebootState }
     return
@@ -825,9 +914,14 @@ function Watch-RebootStep($daemonPid) {
   $script:rebootSaid = $true
   $script:skipNow = $null
   $why = "the daemon was stuck $mins min ($stuckWhy) and this supervisor's own recovery brought back no working daemon"
-  $script:rebootLast = [pscustomobject]@{ at = Iso (Get-Date).ToUniversalTime(); mode = 'warn'; why = $why; stuckSince = Iso $stuckSince }
-  Say "self-reboot: would reboot now (warn only), reason: $why (w6792)"
+  $now = (Get-Date).ToUniversalTime()
+  $script:rebootLast = [pscustomobject]@{ at = Iso $now; mode = $(if ($rebootLive) { 'live' } else { 'warn' }); why = $why; stuckSince = Iso $stuckSince }
+  if (-not $rebootLive) { Say "self-reboot: would reboot now (warn only), reason: $why (w6792)"; Write-RebootState; return }
+  # Written before the reboot: the next daemon tells the portal when and why, and the rate guard holds if it fails.
+  $script:rebootLastLive = $now
+  Say "self-reboot: rebooting now, reason: $why (w6792)"
   Write-RebootState
+  Reboot-Now $mins
 }
 Check-Eligible
 while ($true) {
