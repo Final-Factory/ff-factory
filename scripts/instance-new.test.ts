@@ -22,7 +22,7 @@ import {
   startScript,
   taskScript,
 } from './instance/new.ts';
-import { listProblem, readList, settingsDiff } from './instance/update-all.ts';
+import { listProblem, readList, settingsDiff, startScriptProblem } from './instance/update-all.ts';
 import { tmpDir } from '../server/testTmp.ts';
 
 // A folder of this computer's kind, so the portal's own loadConfig takes its paths (it refuses F:/ paths off Windows).
@@ -253,4 +253,9 @@ test('nextSteps: the owner\'s login, then per machine its record, credential and
   // Another machine: redeem the code there, then the installer of its kind.
   assert.match(s, /https:\/\/beast\.tail\.ts\.net\/machine\/join/);
   assert.match(s, /install\.sh\)" -- --instance atlas --root ~\/atlas\/worker --portal-url https:\/\/beast\.tail\.ts\.net --repo-url https:\/\/github\.com\/someone\/atlas-mapper\.git --claude-config-dir ~\/atlas\/worker\/claude --max-unity 0 --credential-file ~\/atlas-m3\.credential/);
+});
+
+test('w6603: the start script new.ts writes is the one the updater checks for', () => {
+  const s = startScript({ ...opts(), dir: path.win32.join('F:', 'ffw', 'atlas'), nodeDir: path.win32.join('F:', 'ffw', 'tools', 'node') });
+  assert.equal(startScriptProblem(s), undefined);
 });
