@@ -80,13 +80,15 @@ function Test-DedupWatch {
     # The repair task (w6597, install-privileged-helpers.ps1 -Actions deduprepair): run it now rather than waiting for the night.
     $rt = 'ffsb-helper-deduprepair'
     $rj = Join-Path $PSScriptRoot 'results\dedup-repair\dedup-repair.json'
-    # schtasks under 'Stop': its stderr ("cannot find" when the task is not registered) would throw in WinPS 5.1 (w6791 N3).
-    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $rq = @(& schtasks.exe /query /tn $rt /fo csv /nh 2>$null); $rqCode = $LASTEXITCODE } finally { $ErrorActionPreference = $eap }
-    if ($rqCode -eq 0) {
+    # Read through the Task Scheduler's API, not schtasks' text, whose status words are translated on a non-English Windows
+    # (w6796). Not registered throws, and leaves $rtask null (never under 'Stop' to the caller: caught here, w6791 N3).
+    $eap = $ErrorActionPreference
+    $rtask = $null
+    try { $tsv = New-Object -ComObject Schedule.Service; $tsv.Connect(); $rtask = $tsv.GetFolder('\').GetTask($rt) } catch { $rtask = $null }
+    if ($rtask) {
       $t0 = (Get-Date).ToUniversalTime()
       # A run already going (IgnoreNew drops ours): take its result, from any start within the task's 15-minute limit (w6623 M2).
-      if ("$($rq | Select-Object -Last 1)" -match '"Running"$') { $t0 = $t0.AddMinutes(-15) }
+      if ([int]$rtask.State -eq 4) { $t0 = $t0.AddMinutes(-15) }   # 4: TASK_STATE_RUNNING
       $ErrorActionPreference = 'Continue'
       try { & schtasks.exe /run /tn $rt *> $null } finally { $ErrorActionPreference = $eap }
       for ($i = 0; $i -lt 60; $i++) {

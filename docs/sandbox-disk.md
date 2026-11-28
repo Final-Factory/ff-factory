@@ -252,11 +252,17 @@ Installed and updated like the other helper tasks
 back to confirm the ACE is gone. Neither is a lasting off switch: the next `devdrive.ps1 ensure` or elevated worker update
 registers the task again in repair mode.
 A read the repair cannot make fails loudly (`ok=false`): an event log it may not read, or a volume task whose state
-`schtasks /query` refuses it (`unreadable`), is never taken as "nothing to repair" or "repaired".
+the Task Scheduler refuses it (`unreadable`), is never taken as "nothing to repair" or "repaired". It reads the task and
+the service through their APIs (the Task Scheduler's `Schedule.Service`, the service controller), not the text of
+`schtasks` or `sc query`, whose words are translated on a non-English Windows; "missing" is the Task Scheduler's own
+not-found code, 0x80070002 or 0x80070003 (w6796).
 Once it has stopped the service it always starts it again (a second try if the first start is refused), whatever fails
 after the stop. Stopping the service deletes the volume task, and that task is the nightly job's trigger, so "repaired"
-needs it back: the run waits up to 120 s for the service to register it again and fails (`ok=false`) if it does not. The
-script never makes the task itself. A missing volume task is also a reason to repair on its own. (Measured on LothDesktop,
+needs it back with a next run time (a Disabled task has none): the run waits up to 120 s for the service to register it
+again and fails (`ok=false`) if it does not. The script never makes the task itself. A missing volume task is also a reason
+to repair on its own, but only once: when a repair's restart did not bring it back (dedup turned off on V:, say), the next
+runs report it (`ok=false`, "not restarting the service again", so the watch warns each day) without restarting the service,
+until V: is next dismounted and mounted (w6796). (Measured on LothDesktop,
 2026-11-28: after the ops worker's stop and start the task was back, registered anew (never run, next run 02:00); on
 windows-latest, which watches no volume, it stays missing.) (The
 first forced test on LothDesktop, 2026-11-28, left the service stopped: `schtasks /query` of the deleted task wrote to
@@ -274,7 +280,8 @@ force` registers the task to repair whatever the state. Then, elevated:
 2. `schtasks /run /tn ffsb-helper-deduprepair`, wait until it is not Running, and read `dedup-repair.json`. Want `did` to
    list the stop, the task gone or ended, the start and `service RUNNING`; `state` "repaired" with a new event 6 and
    "volume task back"; and then check it yourself: `schtasks /query /tn "\Microsoft\Windows\ReFsDedupSvc\{<volume GUID>}"
-   /fo list` answers, not Running, with a Next Run Time (the nightly trigger).
+   /fo list` answers, not Running, with a Next Run Time (the nightly trigger). (Those field names are English Windows';
+   the script itself reads the Task Scheduler's API.)
 3. `install-privileged-helpers.ps1 -Actions deduprepair` again, which puts it back in repair mode. Never leave it in force
    mode: it would restart the service every night.
 If it goes wrong: elevated, `sc.exe start refsdedupsvc`, then wait for event 6 for V: and check the volume task answers
@@ -284,6 +291,9 @@ The Dev Drive e2e runs force mode as the task (LOCAL SERVICE) on windows-latest,
 
 The full log is `C:\ProgramData\ffsb-helpers\results\refs-dedup-trial.log`. To undo:
 `Clear-ReFSDedupSchedule -Volume V:` then `Disable-ReFSDedup -Volume V:`. Data already shared stays shared (sourced).
+Then remove the repair task too: `install-privileged-helpers.ps1 -Uninstall -Actions deduprepair`. Otherwise its 01:30 run
+finds no volume task, restarts refsdedupsvc once, and then reports "not restarting" every night. The next
+`devdrive.ps1 ensure` or elevated worker update registers it again; the back-off above keeps that to a warning.
 
 **The daily job is incremental, so a weekly full pass runs too (w4502).** `Start-ReFSDedupJob` without `-FullRun` processes
 "only new or changed files" (Microsoft's docs). On 2026-11-16 the nightly job reported success (29 min, result 0) while 54 GB
