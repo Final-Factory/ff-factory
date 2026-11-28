@@ -67,7 +67,7 @@ restarts on every exit but 75, 10 s later after a run of over 5 minutes (`server
 has KeepAlive true and ThrottleInterval 10 (`server/machineDeploy.ts`); Linux's unit has `Restart=always`, `RestartSec=10`
 and `KillMode=process` (`server/machineDeployLinux.ts`). Agent hosts run detached in their own process group, so they and
 their editors run on and the fresh daemon finds them, as after a daemon update. `freezeWatch: { exitMin: false }` or
-`FF_FREEZE_WATCH=log` only logs; `freezeWatch: false` or `FF_FREEZE_WATCH=off` turns the watch off. If a daemon still has not come back 2 minutes after the portal started or after it
+`FF_FREEZE_WATCH=log` only logs; `freezeWatch: false` or `FF_FREEZE_WATCH=off` turns the watch off. Before BEAST froze (2026-11-28) agent hosts failed to start three times in eleven minutes, so the daemon counts its agent hosts' starts across all sandboxes (`machine/startStreak.ts`, w6784): 3 failed in a row (an error from the spawn, or no heartbeat in 60 s) log one `early warning (w6784, warn-only)` line in daemon.log, again every 3 further failures, and a host that comes alive logs `early warning cleared`. It only logs. If a daemon still has not come back 2 minutes after the portal started or after it
 dropped, and its Mac answers ssh, the portal redeploys it by itself (as `add_machine` does), at most
 every 30 minutes and never while its agents are running. So after a restart, give daemons a minute
 before redeploying by hand.

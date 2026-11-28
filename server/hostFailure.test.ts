@@ -10,6 +10,7 @@ import { Store } from './store.ts';
 import { SessionManager } from './sessions.ts';
 import { MachineManager, RemoteSession } from './machines.ts';
 import { HostedSession, type HostDeps } from '../machine/agentHost.ts';
+import { StartStreak } from '../machine/startStreak.ts';
 import { workLive } from '../shared/workState.ts';
 import { agentState } from '../shared/agentState.ts';
 import type { Config } from './config.ts';
@@ -152,4 +153,31 @@ test('w691: a worker\'s next message ends its declaration that it waits on a per
   assert.equal(i.waitingOn, undefined);
   assert.deepEqual(posts, ['send', 'touch']);
   t.after(() => undefined);
+});
+
+test('w6784: three agent hosts that fail to start in a row log the early warning (warn-only), and a host that comes alive clears it', (t) => {
+  const root = tmpdir(t);
+  const logs: string[] = [];
+  const starts = new StartStreak(3);
+  const deps: HostDeps = {
+    root,
+    out: () => undefined,
+    events: new EventEmitter(),
+    handlers: () => ({}),
+    spec: () => ({ cwd: root, settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: root, protectedPaths: [], gameRepos: [] } }),
+    editorUp: () => undefined,
+    changed: () => undefined,
+    log: (l) => logs.push(l),
+    starts,
+    launch: () => {
+      throw new Error('spawn timed out');
+    },
+  };
+  for (const id of ['4d9ab4cd', '1a8feb55']) new HostedSession(info(id), 0, deps).send('hi');
+  assert.ok(!logs.some((l) => /early warning/.test(l)), logs.join('\n'));
+  new HostedSession(info('4d9ab4cd'), 0, deps).send('hi');
+  assert.equal(logs.filter((l) => /early warning \(w6784, warn-only\): 3 child starts failed in a row/.test(l)).length, 1, logs.join('\n'));
+  assert.ok(logs.some((l) => /agent host 4d9ab4cd, agent host 1a8feb55/.test(l)), logs.join('\n'));
+  // A start that spawned is not yet a success: only a host that is alive clears the streak.
+  assert.match(starts.started('agent host x')!, /early warning cleared/);
 });

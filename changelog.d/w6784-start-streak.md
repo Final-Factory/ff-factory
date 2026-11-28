@@ -1,0 +1,1 @@
+- The daemon logs an early warning after 3 failed agent-host starts in a row across its sandboxes (`machine/startStreak.ts`, warn-only), as BEAST showed before it froze on 2026-11-28 (w6784).
