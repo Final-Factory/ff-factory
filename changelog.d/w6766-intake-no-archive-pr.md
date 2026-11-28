@@ -1,0 +1,1 @@
+- The nightly merge review's intake text no longer tells the reviewer to open a one-time archive pull request (the Sentry's folder is gone); it says the review opens none (w6766).
