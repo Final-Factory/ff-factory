@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { gitFence, isGit } from './safeGit.ts';
 import { execFileOffThread } from './spawnThread.ts';
+import { hasTrickName, presentAt } from './fsLink.ts';
 
 export const isWindows = process.platform === 'win32';
 
@@ -229,11 +230,30 @@ export async function copyTree(src: string, dst: string, opts: { signal?: AbortS
   if (!(isWindows && opts.mode !== 'clone')) for (const n of opts.exclude ?? []) fs.rmSync(path.join(dst, n), { recursive: true, force: true });
 }
 
-/** Recursively delete a directory. Returns the command's result; callers check whether the directory is gone. */
-export async function removeTree(dir: string): Promise<RunResult> {
-  if (isWindows) {
-    // rd copes with long paths and read-only files far better than a recursive unlink of Library/.
-    return run('cmd.exe', ['/c', 'rd', '/s', '/q', dir]);
-  }
-  return run('rm', ['-rf', dir]);
+/**
+ * Recursively delete a directory. Returns the command's result: a failure (code 1 at least, with a line on stderr) when the
+ * directory is still there afterwards, whatever the command answered.
+ *
+ * Windows (w6462, from w6437): `rd /s /q <dir>` answers 0 and leaves entries named `x.`, `y ` or `NUL` (fsLink.ts
+ * isTrickName) with all that is in them, since Windows drops a trailing dot or space and opens a device name as the device;
+ * by its `\\?\` path rd removes them too, and a junction in them without its target (both measured on LothDesktop). So an
+ * absolute drive path still there after rd goes again by its `\\?\` path; a path holding such a name goes by it at once, since
+ * the plain path would name another folder (`x.` is `x`). A Low worker can make these names. `o` is for tests.
+ */
+export async function removeTree(dir: string, o: { run?: typeof run; platform?: NodeJS.Platform } = {}): Promise<RunResult> {
+  const exec = o.run ?? run;
+  if ((o.platform ?? process.platform) !== 'win32') return goneOr(dir, await exec('rm', ['-rf', dir]));
+  // rd copes with long paths and read-only files far better than a recursive unlink of Library/.
+  const rd = (p: string) => exec('cmd.exe', ['/c', 'rd', '/s', '/q', p]);
+  const exact = path.isAbsolute(dir) && !dir.startsWith('\\\\') ? `\\\\?\\${path.resolve(dir)}` : undefined;
+  if (exact && hasTrickName(dir)) return goneOr(dir, await rd(exact), 'by its \\\\?\\ path');
+  const r = await rd(dir);
+  if (!exact || !presentAt(dir)) return goneOr(dir, r);
+  return goneOr(dir, await rd(exact), 'by its plain path and by its \\\\?\\ path');
+}
+
+function goneOr(dir: string, r: RunResult, how = ''): RunResult {
+  if (!presentAt(dir)) return r;
+  const line = `${dir} is still there after removing it${how ? ` ${how}` : ''} (w6462)`;
+  return { ...r, code: r.code || 1, stderr: r.stderr ? `${r.stderr.trimEnd()}\n${line}` : line };
 }

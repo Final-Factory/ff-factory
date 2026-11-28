@@ -45,6 +45,20 @@ export const TRICK_WHY = 'a name ending in a dot or a space, or a device name su
 export const hasTrickName = (p: string) => p.split(/[\\/]/).some((s) => s !== '' && isTrickName(s));
 
 /**
+ * Whether anything (a link included) is at `p`. Node's fs already opens an absolute Windows path by its exact name (it
+ * hands the system the namespaced `\\?\` form), so `x.` answers for `x.`, never for `x` beside it (w6462: the test with
+ * `pkg.` beside `pkg` fails if it did not).
+ */
+export function presentAt(p: string): boolean {
+  try {
+    return fs.lstatSync(p, { throwIfNoEntry: false }) !== undefined;
+  } catch (e) {
+    // Not to be read (EPERM, EBUSY): something is there.
+    return (e as NodeJS.ErrnoException).code !== 'ENOTDIR';
+  }
+}
+
+/**
  * Take link `p` away, never what it leads to. rmSync refuses a junction lstat calls a folder (ERR_FS_EISDIR, and unlink
  * EPERM, measured on BEAST, w5915); rmdir removes the junction only, and refuses a real folder with anything in it.
  */
