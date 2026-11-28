@@ -164,6 +164,9 @@ orchestrators drive. The route is the machines' own logins, over the ssh the wor
 - **A branch delete** needs no clone: `gh api repos/OWNER/REPO/branches/BRANCH --jq .commit.sha` (it is there),
   `gh api -X DELETE repos/OWNER/REPO/git/refs/heads/BRANCH`, then `git ls-remote --heads git@github.com:OWNER/REPO.git BRANCH`
   prints nothing. This is the sequence the w1788 job ran (the portal's journal, 2026-10-23 15:16Z).
+  Since w6815 (2026-11-28) a sandbox worker deletes a feature branch itself, by the same API call or `git push origin
+  --delete`, so such a job comes here only when no worker holds the request. Master, main and the release branches in
+  `server/protectedBranches.ts` are refused to workers; deleting one is a person's call, made in their words.
 - **A job that needs a clone** makes it in a new `mktemp -d` folder on the machine, never in a person's clone or a sandbox.
 - Only what the job names is deleted, closed or merged; no token is printed (`grep -v Token` on `gh auth status`).
 

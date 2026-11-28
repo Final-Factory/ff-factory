@@ -22,6 +22,7 @@ import { checkChecksRead, checkTimedSleep } from './waitGuard.ts';
 import { checkFlakyRerun, type MachineDropReader, type RerunReader } from './rerunGuard.ts';
 import { checkSearchTool, checkWholeDiskSearch, type WholeDiskContext } from './wholeDiskSearch.ts';
 import { checkPrivacyRead, checkPrivacyShell, type PrivacyContext } from './privacyGuard.ts';
+import { judgeBranchDelete } from './protectedBranches.ts';
 import os from 'node:os';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
@@ -38,8 +39,12 @@ import type { CrashHoldMark } from '../shared/types.ts';
  * what is still open: docs/worker-fence.md, "What protects a machine, and what does not". Keep the rules simple and legible.
  *
  * Rules:
- *   - git, every repo: no force pushes (--force-with-lease is allowed), no remote branch deletion,
- *     no --mirror/--all, no `gh` calls that rewrite refs/branches.
+ *   - git, every repo: no force pushes (--force-with-lease is allowed), no --mirror/--all, no `gh` calls that rewrite
+ *     refs/branches. A remote FEATURE branch may be deleted (w6815; lothsahn: "It should block deleting master or a release
+ *     branch, but not feature branches"): `git push <remote> --delete <branch>`, `git push <remote> :<branch>` and
+ *     `gh api -X DELETE repos/<owner>/<repo>/git/refs/heads/<branch>`; master, main and the release branches in
+ *     server/protectedBranches.ts (the one list), tags and unclear names are refused. Each delete let through is logged
+ *     with who, repo, branch and sha ("w6815 remote branch delete allowed: ...", read before it runs).
  *   - git, the game repo only (config repo.url / repo.basePath): master is its one trunk (w1137, 2026-10-12; develop is
  *     retired) and takes changes only through a pull request: no pushes to master/main, no pushes to develop and no PRs
  *     into develop, opened, retargeted or merged (w1166: `gh pr merge` and `gh api .../pulls/<n>/merge` read the PR's
@@ -132,6 +137,10 @@ export function sandboxGuard(opts: {
    * and the agent warned; the command still runs (server/junctionRmWarn.ts). Absent: the platform decides (on for win32).
    */
   junctionRmWarn?: boolean;
+  /** w6815: reads the sha a remote branch points at for the delete's audit line. Default: branchSha (git ls-remote). */
+  branchSha?: (url: string, branch: string, env?: Record<string, string | undefined>) => Promise<string | undefined>;
+  /** w6815: reads which of some refs a remote has (a plain-name push delete must be a branch, not a tag). Default: lsRemoteRefs. */
+  remoteRefs?: (url: string, refs: string[], env?: Record<string, string | undefined>) => Promise<Map<string, string> | undefined>;
   /** Where the guard's warn lines go. Default: console.log with a timestamp (the daemon's log). */
   log?: (line: string) => void;
   /**
@@ -228,6 +237,52 @@ export function sandboxGuard(opts: {
   const junctionWarn = opts.junctionRmWarn ?? (opts.platform ?? process.platform) === 'win32';
   const log = opts.log ?? ((line: string) => console.log(`${new Date().toISOString()} ${line}`));
   // w6266: the warning rides on a command every other check let through, never on a refusal, and never refuses itself.
+  // w6815: the remote branch deletes each allowed shell command makes, keyed by the tool use, for the audit line.
+  const pendingDeletes = new Map<string, BranchDelete[]>();
+  const audit: HookCallback = async (input, toolUseID, o) => {
+    const key = toolUseID ?? (input as { tool_use_id?: string }).tool_use_id ?? '';
+    try {
+      const r = await warned(input, toolUseID, o);
+      const deletes = pendingDeletes.get(key);
+      if (deletes?.length && !(r as { hookSpecificOutput?: { permissionDecision?: string } }).hookSpecificOutput?.permissionDecision) {
+        await logBranchDeletes(deletes, input.cwd || opts.sandboxPath);
+      }
+      return r;
+    } finally {
+      pendingDeletes.delete(key);
+    }
+  };
+  /** One line per delete: who (session, sandbox), repo, branch and the sha it pointed at, read before the delete runs. */
+  const logBranchDeletes = async (deletes: BranchDelete[], cwd: string) => {
+    const who = `session=${opts.session ?? opts.env?.FF_SESSION_ID ?? 'unknown'} sandbox=${opts.sandboxId}`;
+    // Read in parallel (each read is capped at 10 s), logged in the command's order.
+    const lines = await Promise.all(deletes.map(async (d) => {
+      try {
+        let url: string | undefined;
+        if (d.repo) url = /^[\w.-]+\/[\w.-]+$/.test(d.repo) ? `https://github.com/${d.repo}.git` : d.repo;
+        else {
+          const remotes = await (opts.remotes ?? gitRemotes)(d.dir ?? cwd);
+          const name = d.route === 'git push' ? (d.remote ?? 'origin') : 'origin';
+          url = remotes?.get(name) ?? (/[:/]/.test(name) ? name : undefined);
+        }
+        let sha = d.sha ?? (url ? await (opts.branchSha ?? branchSha)(url, d.branch, opts.env) : undefined);
+        // No answer from the remote: the clone's tracking ref, which a push of the branch left (it may be older than the remote).
+        if (!sha && d.route === 'git push') {
+          const tracked = (await trustedGitOut(['-C', d.dir ?? cwd, 'rev-parse', '--verify', '-q', `refs/remotes/${d.remote ?? 'origin'}/${d.branch}`], 5000))?.trim();
+          if (tracked && /^[0-9a-f]{40}$/.test(tracked)) sha = `${tracked} (tracking ref)`;
+        }
+        return `w6815 remote branch delete allowed: ${who} route=${d.route} repo=${url ? repoKey(url) : 'unknown'} branch=${d.branch} sha=${sha ?? 'unknown'}`;
+      } catch (e) {
+        return `w6815 remote branch delete allowed: ${who} route=${d.route} branch=${d.branch} sha=unknown (audit read failed: ${(e as Error).message})`;
+      }
+    }));
+    for (const l of lines) log(l);
+  };
+  const deletesFor = (toolUseID: string | undefined) => {
+    const list: BranchDelete[] = [];
+    pendingDeletes.set(toolUseID ?? '', list);
+    return list;
+  };
   const warned: HookCallback = async (input, toolUseID, o) => {
     const r = await check(input, toolUseID, o);
     if (!junctionWarn || input.hook_event_name !== 'PreToolUse' || input.tool_name !== 'Bash' || Object.keys(r).length) return r;
@@ -238,7 +293,7 @@ export function sandboxGuard(opts: {
     return scan.found.length ? { hookSpecificOutput: { hookEventName: 'PreToolUse' as const, additionalContext: junctionRmMessage(scan.found) } } : r;
   };
 
-  const check: HookCallback = async (input) => {
+  const check: HookCallback = async (input, toolUseID) => {
     if (input.hook_event_name !== 'PreToolUse') return {};
     const tool = input.tool_name;
     const args = (input.tool_input ?? {}) as Record<string, unknown>;
@@ -264,7 +319,7 @@ export function sandboxGuard(opts: {
       // first: it may ask the portal whether the runner's machine went down (w4136), which is async.
       const flakyRerun = await checkFlakyRerun(cmd, { cwd: input.cwd || opts.sandboxPath, env: opts.env, reader: opts.rerunJobs, drops: opts.machineDrops });
       const reason =
-        (await checkShellAsync(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, branch: opts.branch ?? ((d) => (fs.existsSync(d) ? repoBranch(d) : undefined)), prBase: opts.prBase ?? ghPrBase, evidence: opts.evidence ?? ghEvidence, publicIdentity: opts.publicIdentity, env: opts.env })) ??
+        (await checkShellAsync(cmd, { deletes: deletesFor(toolUseID ?? input.tool_use_id), remoteRefs: (url, refs) => (opts.remoteRefs ?? lsRemoteRefs)(url, refs, opts.env), cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, branch: opts.branch ?? ((d) => (fs.existsSync(d) ? repoBranch(d) : undefined)), prBase: opts.prBase ?? ghPrBase, evidence: opts.evidence ?? ghEvidence, publicIdentity: opts.publicIdentity, env: opts.env })) ??
         (opts.privacy ? checkPrivacyShell(withoutTextArgs(cmd), { ...opts.privacy, cwd: input.cwd || opts.sandboxPath }) : undefined) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, opts.env) : undefined) ??
         checkReleaseBranchCommit(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath, repoBranch, opts.env) ??
@@ -370,7 +425,7 @@ export function sandboxGuard(opts: {
     }
     return {};
   };
-  return warned;
+  return audit;
 }
 
 const PROTECTED_BRANCH = /^(?:refs\/heads\/)?(?:master|main)$/i;
@@ -1045,6 +1100,10 @@ export const ghEvidence: EvidenceResolver = makeGhEvidence();
 
 export interface ShellContext {
   cwd?: string;
+  /** w6815: the remote branch deletes a command this check lets through, for the audit line (sandboxGuard logs them). */
+  deletes?: BranchDelete[];
+  /** w6815: the refs among `refs` a remote URL has, with their shas (lsRemoteRefs). Absent: a plain-name push delete is refused. */
+  remoteRefs?: (url: string, refs: string[]) => Maybe<Map<string, string> | undefined>;
   gameRepos: string[];
   remotes: RemoteResolver;
   /** w3111: the branch checked out in a folder (`git push origin HEAD` pushes it under its own name). Absent: HEAD is not resolved. */
@@ -1056,6 +1115,120 @@ export interface ShellContext {
   publicIdentity?: PublicIdentity;
   /** The worker shell's environment, for `cd $TMPDIR/x`. */
   env?: Record<string, string | undefined>;
+}
+
+/** w6815: one remote branch delete a shell command makes: by `git push` (its remote, in dir) or the GitHub API (its repo). */
+export interface BranchDelete {
+  route: 'git push' | 'gh api';
+  dir?: string;
+  remote?: string;
+  repo?: string;
+  branch: string;
+  /** The commit the branch pointed at, when the check already read it from the remote. */
+  sha?: string;
+}
+
+/**
+ * w6815: git push's options as git reads them. git takes any unique prefix of a long option (`--dele` is --delete, `--mirr`
+ * --mirror); a prefix several options share is refused by git itself, so refusing it here costs nothing. In a short cluster
+ * `-o` takes the rest of the word as its value (`-od` is `-o d`, not -d), or the next word. `values` are the indexes of the
+ * words that are an option's value, not a refspec.
+ */
+export function readPushArgs(words: readonly string[]): { deleting: boolean; force: boolean; blocked?: string; values: Set<number> } {
+  const out: { deleting: boolean; force: boolean; blocked?: string; values: Set<number> } = { deleting: false, force: false, values: new Set() };
+  const prefix = (w: string, full: string, min: number) => w.length >= min && full.startsWith(w);
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (out.values.has(i)) continue;
+    if (w === '--') break;
+    if (w.startsWith('--')) {
+      const name = w.split('=')[0];
+      if (prefix(name, '--delete', 4)) out.deleting = true;
+      if (prefix(name, '--force', 3)) out.force = true;
+      if (['--mirror', '--all', '--branches', '--prune'].some((o) => prefix(name, o, 3))) out.blocked ??= w;
+      if (!w.includes('=') && ['--push-option', '--repo', '--receive-pack', '--exec', '--recurse-submodules'].some((o) => prefix(name, o, 4))) out.values.add(i + 1);
+    } else if (/^-[^-]/.test(w)) {
+      for (let j = 1; j < w.length; j++) {
+        if (w[j] === 'o') {
+          if (j === w.length - 1) out.values.add(i + 1);
+          break;
+        }
+        if (w[j] === 'd') out.deleting = true;
+        if (w[j] === 'f') out.force = true;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * w6815: what a `git push` delete of `name` removes on the remote. A full refs/heads/<branch> names that branch. A plain
+ * name is resolved by git on the remote, where it deletes a TAG of that name when no branch has it: so the remote's refs are
+ * read (git ls-remote), and the delete passes only when the name is a branch there and nothing else (no tag, no other ref).
+ * A string is the refusal; otherwise the branch's sha, when read.
+ */
+function remoteBranchOf(ctx: ShellContext | undefined, name: string, remote: string, dir: string | undefined): string | { sha?: string } {
+  if (/^refs\/heads\//i.test(name)) return {};
+  const fix = `Write the full name instead: git push ${remote} --delete refs/heads/${name}.`;
+  const url = (dir && ctx ? now(ctx.remotes(dir))?.get(remote) : undefined) ?? (/[/:\\]/.test(remote) ? remote : undefined);
+  if (!url || !ctx?.remoteRefs) return `Deleting "${name}" is refused: the remote could not be read to check that it is a branch and not a tag. ${fix}`;
+  const want = [`refs/heads/${name}`, `refs/tags/${name}`, `refs/${name}`, `refs/remotes/${name}`];
+  const refs = now(ctx.remoteRefs(url, want));
+  if (!refs) return `Deleting "${name}" is refused: the remote could not be read to check that it is a branch and not a tag. ${fix}`;
+  if (refs.has(want[1])) return `Deleting "${name}" is refused: the remote has a tag of that name, and a push delete would remove the tag. Tags are never deleted from a sandbox.`;
+  if (refs.has(want[2]) || refs.has(want[3])) return `Deleting "${name}" is refused: the name matches another ref on the remote, not only a branch. ${fix}`;
+  const sha = refs.get(want[0]);
+  if (!sha) return `Deleting "${name}" is refused: the remote has no branch of that name (a delete would fail, or match something else). ${fix}`;
+  return { sha };
+}
+
+/**
+ * w6815: the refs among `refs` a remote has, with their shas (`git ls-remote <url> <refs>`, 10 s at most), or undefined when
+ * the remote cannot be read.
+ */
+export async function lsRemoteRefs(url: string, refs: string[], env?: Record<string, string | undefined>): Promise<Map<string, string> | undefined> {
+  try {
+    const r = await gitOffThread(['ls-remote', url, ...refs], { bin: trustedGit(), pre: TRUSTED_GIT, timeoutMs: 10_000, env: { ...process.env, ...env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' } });
+    if (r.code !== 0) return undefined;
+    const out = new Map<string, string>();
+    for (const m of (r.stdout ?? '').matchAll(/^([0-9a-f]{40})\s+(\S+)$/gm)) if (refs.includes(m[2])) out.set(m[2], m[1]);
+    return out;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * w6815: the repo and branch of `gh api -X DELETE repos/<owner>/<repo>/git/refs/heads/<branch>` with no body, or undefined
+ * (another endpoint, or a field or --input that makes it more than a delete). The repo is undefined for {owner}/{repo},
+ * which gh fills from the directory's repo. Exported for tests.
+ */
+export function ghApiBranchDelete(raw: readonly string[], lower: readonly string[]): { repo?: string; branch: string } | undefined {
+  if (lower.some((w) => ['-f', '-F', '--field', '--raw-field', '--input'].includes(w) || w.startsWith('--field=') || w.startsWith('--raw-field=') || w.startsWith('--input=')) || raw.includes('-F')) return undefined;
+  const refs = raw.map((w) => /^(?:https:\/\/api\.github\.com)?\/?repos\/([^/\s]+)\/([^/\s]+)\/git\/refs\/heads\/([^?#\s]+)$/i.exec(w)).filter((m) => !!m);
+  if (refs.length !== 1) return undefined;
+  const [, owner, name, b] = refs[0];
+  let branch: string;
+  try {
+    branch = decodeURIComponent(b);
+  } catch {
+    branch = b;
+  }
+  return { repo: owner.includes('{') || name.includes('{') ? undefined : `${owner}/${name}`, branch };
+}
+
+/**
+ * w6815: the commit a remote branch points at before it is deleted, for the audit line: `git ls-remote <url>
+ * refs/heads/<branch>`, 10 s at most. The URL is the remote's (git remote -v in dir) or https://github.com/<owner>/<repo>.git.
+ * Undefined when it cannot be read; the delete still runs (the audit never refuses).
+ */
+export async function branchSha(url: string, branch: string, env?: Record<string, string | undefined>): Promise<string | undefined> {
+  try {
+    const r = await gitOffThread(['ls-remote', url, `refs/heads/${branch}`], { bin: trustedGit(), pre: TRUSTED_GIT, timeoutMs: 10_000, env: { ...process.env, ...env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' } });
+    return /^([0-9a-f]{40})\s/m.exec(r.stdout ?? '')?.[1];
+  } catch {
+    return undefined;
+  }
 }
 
 /** Repos whose history is public, and the identity commits to them should carry (config publicGitIdentity). */
@@ -1118,12 +1291,14 @@ export async function checkShellAsync(command: string, ctx?: ShellContext): Prom
   const c: ShellContext = {
     ...ctx,
     remotes: settled(ctx.remotes, seen, 'remotes'),
+    ...(ctx.remoteRefs ? { remoteRefs: settled(ctx.remoteRefs, seen, 'remoteRefs') } : {}),
     ...(ctx.prBase ? { prBase: settled(ctx.prBase, seen, 'prBase') } : {}),
     ...(ctx.evidence ? { evidence: settled(ctx.evidence, seen, 'evidence') } : {}),
     ...(pub ? { publicIdentity: { ...pub, pushedEmails: settled(pub.pushedEmails ?? gitPushedEmails, seen, 'emails'), isPublic: settled(pub.isPublic ?? ((k: string) => repoIsPublic(k)), seen, 'public') } } : {}),
   };
   for (let round = 0; ; round++) {
     try {
+      if (c.deletes) c.deletes.length = 0;
       return checkShell(command, c);
     } catch (e) {
       if (!(e instanceof Pending) || round > 100) throw e;
@@ -1464,20 +1639,39 @@ export function checkShell(command: string, ctx?: ShellContext): string | undefi
           pushLost = raw[i];
         }
       }
-      const positionals = raw.slice(pushAt + 1).filter((w) => !w.startsWith('-'));
+      // w6815: a refspec set in config pushes (or deletes) what the command line does not show.
+      for (let i = 0; i < pushAt; i++) {
+        if (lower[i] === '-c' && /^(?:remote\.[^=]*\.(?:push|mirror)|push\.default|remote\.pushdefault)=/.test(lower[i + 1] ?? '')) {
+          return `git -c ${raw[i + 1]} push is blocked in sandboxes: a push refspec or mode set in config pushes or deletes branches the command does not name. Name the refspecs on the command line.`;
+        }
+      }
+      const args = readPushArgs(lower.slice(pushAt + 1));
+      const positionals = raw.slice(pushAt + 1).filter((w, k) => !w.startsWith('-') && !args.values.has(k));
       const remote = positionals.length >= 2 ? positionals[0] : undefined;
       const srcs = positionals.slice(1).map((r) => (r.includes(':') ? r.slice(0, r.indexOf(':')) : r).replace(/^\+/, '')).filter(Boolean);
       const identity = checkPublicIdentity(ctx, positionals[0] ?? 'origin', srcs.length ? srcs : ['HEAD'], pushDir);
       if (identity) return identity;
-      for (const w of lower.slice(pushAt + 1)) {
-        if (w === '--force' || w.startsWith('--force=') || (/^-[a-z]+$/.test(w) && w.includes('f'))) {
-          return 'Force pushes are blocked in sandboxes. Use --force-with-lease on your own branch if you must rewrite it.';
-        }
-        if (w === '--delete' || (/^-[a-z]+$/.test(w) && w.includes('d')) || w.startsWith(':')) {
-          return 'Deleting remote branches is blocked in sandboxes.';
-        }
-        if (w === '--mirror' || w === '--all' || w === '--prune') return `git push ${w} is blocked in sandboxes; push your own branch.`;
+      if (args.force) return 'Force pushes are blocked in sandboxes. Use --force-with-lease on your own branch if you must rewrite it.';
+      if (args.blocked) return `git push ${args.blocked} is blocked in sandboxes; push your own branch.`;
+      // w6815: a delete (`--delete`/`-d` names branches; a `:<branch>` refspec deletes one) passes for a feature branch and is
+      // refused for master, main and the release branches (server/protectedBranches.ts), on every repo.
+      const deleting = args.deleting;
+      let positional = 0;
+      for (const [k, w] of lower.slice(pushAt + 1).entries()) {
+        const rw = raw[pushAt + 1 + k];
+        if (args.values.has(k)) continue;
         if (w.startsWith('+')) return 'Force pushes (+refspec) are blocked in sandboxes.';
+        if (!w.startsWith('-')) positional++;
+        const deleted = w.startsWith(':') ? rw.slice(1) : deleting && !w.startsWith('-') && positional >= 2 ? rw : undefined;
+        if (deleted !== undefined) {
+          const refused = judgeBranchDelete(deleted);
+          if (refused) return refused;
+          const target = remoteBranchOf(ctx, deleted, positionals[0] ?? 'origin', pushDir);
+          if (typeof target === 'string') return target;
+          ctx?.deletes?.push({ route: 'git push', dir: pushDir, remote: positionals[0] ?? 'origin', branch: deleted.replace(/^refs\/heads\//i, ''), sha: target.sha });
+          continue;
+        }
+        if (deleting && !w.startsWith('-')) continue;
         if (!w.startsWith('-')) {
           const dst = w.includes(':') ? w.slice(w.indexOf(':') + 1) : w;
           // w3111: `git push origin HEAD` pushes the checked-out branch under its own name, so judge that name.
@@ -1506,6 +1700,9 @@ export function checkShell(command: string, ctx?: ShellContext): string | undefi
       const rAt = lower.findIndex((w) => w === '-r' || w === '--repo');
       const repoFlag = rAt >= 0 ? raw[rAt + 1] : (raw.find((w) => w.toLowerCase().startsWith('--repo='))?.slice('--repo='.length) ?? ghRepoEnv);
       if (sub === 'repo delete') return "gh repo delete is blocked: deleting a repository is the user's call, done by hand.";
+      // w6815: the other ways gh deletes or moves a ref: a release's tag, and the GraphQL ref mutations.
+      if (sub === 'release delete' && lower.includes('--cleanup-tag')) return 'gh release delete --cleanup-tag is blocked in sandboxes: it deletes the tag. Tags are never deleted from a sandbox.';
+      if (lower[1] === 'api' && lower.includes('graphql') && /\b(?:deleteref|updateref|updaterefs|createref)\b/.test(command.toLowerCase())) return 'Changing refs through the GitHub GraphQL API is blocked in sandboxes. Deleting a feature branch is allowed: gh api -X DELETE repos/<owner>/<repo>/git/refs/heads/<branch>, or git push origin --delete <branch>.';
       if (['repo rename', 'repo create', 'repo edit', 'repo archive', 'repo unarchive'].includes(sub)) {
         // rename's argument is the NEW name: its target is -R or the directory's repo. create's is the repo it makes.
         const arg = sub === 'repo rename' ? undefined : ghRepoArgument(raw);
@@ -1530,10 +1727,21 @@ export function checkShell(command: string, ctx?: ShellContext): string | undefi
         if (refused) return refused;
       }
       if (lower[1] === 'api') {
-        const method = lower.find((w, i) => (lower[i - 1] === '-x' || lower[i - 1] === '--method') && !!w)?.toUpperCase();
+        // `-X DELETE`, `--method DELETE`, `--method=DELETE` and `-XDELETE` (w6815: the last two were read as no method).
+        const method = lower
+          .map((w, i) => (lower[i - 1] === '-x' || lower[i - 1] === '--method' ? w : w.startsWith('--method=') ? w.slice(9) : /^-x[a-z]+$/.test(w) ? w.slice(2) : undefined))
+          .find((w) => !!w)
+          ?.toUpperCase();
         const writes = (method && method !== 'GET') || lower.some((w) => w === '-f' || w === '--field' || w === '--raw-field' || w === '--input');
-        if (writes && lower.some((w) => /\/git\/refs|\/branches|\/protection|\/merges|\/rulesets/.test(w))) {
-          return 'Rewriting branches or refs through the GitHub API is blocked in sandboxes.';
+        // w6815: DELETE of one branch's ref (repos/<owner>/<repo>/git/refs/heads/<branch>, no body) passes for a feature
+        // branch and is refused for master, main and the release branches (server/protectedBranches.ts).
+        const refDelete = method === 'DELETE' ? ghApiBranchDelete(raw, lower) : undefined;
+        if (refDelete) {
+          const refused = judgeBranchDelete(refDelete.branch);
+          if (refused) return refused;
+          ctx?.deletes?.push({ route: 'gh api', dir, repo: refDelete.repo ?? repoFlag, branch: refDelete.branch });
+        } else if (writes && lower.some((w) => /\/git\/refs|\/branches|\/protection|\/merges|\/rulesets/.test(w))) {
+          return 'Rewriting branches or refs through the GitHub API is blocked in sandboxes. Deleting a feature branch is allowed: gh api -X DELETE repos/<owner>/<repo>/git/refs/heads/<branch>, or git push origin --delete <branch>.';
         }
         // w1166: the API's ways to open, retarget or merge a PR into the retired develop, as gh pr create/edit/merge are.
         const pulls = raw.map((w) => /(?:^|\/)repos\/([^/\s]+\/[^/\s]+)\/pulls(?:\/(\d+)(\/merge)?)?\/?$/i.exec(w)).find(Boolean);

@@ -71,7 +71,8 @@ loads user settings (so the ff-agents / ff-discord plugin skills are available) 
 except its own. Permission mode is `bypassPermissions`, bounded by two `PreToolUse` hooks:
 
 1. `sandboxGuard`, the same one workers get: no direct push to the game repo's master/main (or its retired develop), no force push,
-   no remote branch deletion, no killing processes, no protected paths (the live checkout, this
+   no deleting master, main or a release branch (server/protectedBranches.ts, w6815; its allowlist below refuses every
+   branch delete for a standing run anyway), no killing processes, no protected paths (the live checkout, this
    server's code and data).
 2. `standingGuard`: Write/Edit only in its own folder; shell commands must be on an allowlist
    that depends on the groups, and may not name another sandbox, the base clone, or use command

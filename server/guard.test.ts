@@ -172,7 +172,7 @@ test('master/main: blocked for the game repo only, and whenever the target is un
     [sb, 'gh api repos/example-org/example-game/private-vulnerability-reporting', 'allow'], // a read
     // The every-repo rules still hold outside the game repo.
     [tools, 'git push -' + 'f origin main', 'deny'],
-    [tools, 'git push origin --del' + 'ete old', 'deny'],
+    [tools, 'git push origin --del' + 'ete main', 'deny'], // w6815: a feature branch delete passes (branchDelete.test.ts)
     [tools, 'git push --mir' + 'ror origin', 'deny'],
   ];
   for (const [cwd, command, want] of cases) assert.equal(await decide(g, 'Bash', { command }, cwd), want, `${command} (in ${cwd})`);

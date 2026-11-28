@@ -753,6 +753,49 @@ Before the switch, w6050 replayed 13 real temp writes from workers' transcripts 
 commands that read a temp folder through the parser. All 13 writes were seen and none of the 28 reads was refused
 (server/tmpWriteFence.test.ts, "real temp writes").
 
+## Remote branch deletes: feature branches yes, master and release branches no (w6815)
+
+lothsahn, 2026-11-28: "It should block deleting master or a release branch, but not feature branches." Until then the
+sandbox guard refused every remote branch delete, so a worker that had pushed a probe or diagnostic branch handed its
+deletion up and an orchestrator had to find a machine with a working gh login (w6812 found none).
+
+- **Allowed, on every repo**: `git push <remote> --delete <branch>...`, `git push -d <remote> <branch>`,
+  `git push <remote> :<branch>` (or `:refs/heads/<branch>`), and `gh api -X DELETE
+  repos/<owner>/<repo>/git/refs/heads/<branch>` (also `--method DELETE`, `--method=DELETE`, `{owner}/{repo}`, a
+  percent-encoded name) with no body.
+- **Refused**: a name in `server/protectedBranches.ts` (`PROTECTED_BRANCHES`, the one list both routes read: master,
+  main, develop, pre-1.0, Steam branch names, `release/*`, `release-*`, `urgent/*`, `hotfix/*`, `ffbox/release-*`,
+  `ci/*`, version lines such as `0.16.1`, and safety copies under `backup/`, `ff-backup/`, `ff-saved/`, `rescue/`;
+  the file says where each comes from), and any name that is not clearly a branch: HEAD, a tag or other ref outside
+  `refs/heads/`, a variable or glob, and git's short ref names (`heads/main` is main, `tags/v1` a tag). Force pushes,
+  `+refspec`, `--mirror`/`--all`/`--branches`/`--prune`, other ref rewrites through the API (PATCH, POST, protection,
+  merges, rulesets, the GraphQL ref mutations), `gh release delete --cleanup-tag`, a push refspec set with
+  `git -c remote.<r>.push=` and pushes to master stay refused.
+- **Tags**: `git push origin --delete <name>` deletes a TAG when the remote has a tag of that name and no branch (the
+  game repo's `mode2-manual-*` tags, ffu's `play`). So for a plain name the guard reads the remote first (`git ls-remote`,
+  10 s at most) and lets the delete through only when the name is a branch there and nothing else. A remote it cannot
+  read refuses a plain name; the full name, `git push origin --delete refs/heads/<branch>`, never reaches a tag and needs
+  no read.
+- **Options as git reads them**: git takes any unique prefix of a long option, so `--de`, `--dele` are `--delete` and
+  `--mirr`, `--pru`, `--forc` are read as what they abbreviate. In a short cluster `-o` takes the rest as its value, so
+  `-od` is a push option, not `-d` (w6817's review found each of these, and the tag hole, in the first version).
+- **Audit**: each delete the guard lets through writes one line to the daemon's log before the command runs:
+  `w6815 remote branch delete allowed: session=<id> sandbox=<name> route=<git push|gh api> repo=<github.com/owner/repo>
+  branch=<name> sha=<40 hex|unknown>`. The sha is the one the tag check read, or read with `git ls-remote` (10 s at most,
+  all the command's deletes at once); an unreadable sha is logged
+  as unknown and never refuses the delete. A deleted branch can be made again at that sha from any clone that has the
+  commit: `git push origin <sha>:refs/heads/<branch>`.
+- **Server side**: GitHub's own rulesets refuse deleting the game repo's master, develop and pre-1.0 ("Protect master and
+  develop from rewrites", "Protect pre-1.0 from rewrites", read 2026-11-28); `release/*` and the other repos' default
+  branches have no such rule, so the guard is their one layer.
+- **A mistaken refusal** (a feature branch matched by a pattern) is fixed with no one at a machine: any worker edits
+  `server/protectedBranches.ts` and its cases in `server/branchDelete.test.ts` in its own clone of FF Factory, merges on
+  green CI, and the deploy reaches the machines by itself. Meanwhile the ops worker's route (docs/ops-worker.md, "Git and
+  GitHub jobs") deletes it from a machine's own gh login, which this guard does not run on.
+
+Code: `checkShell` and `ghApiBranchDelete` in `server/guard.ts`, the list in `server/protectedBranches.ts`. Tests:
+`server/branchDelete.test.ts`.
+
 ## Known limits
 
 - **Linux is warn-only until its kernel has Landlock ABI 9 (Linux 7.1)** (w5748, w6443). Below it a fenced run reaches
