@@ -57,9 +57,17 @@ writes `event loop: frozen for N s so far ...: the daemon answers nothing` strai
 `event loop: frozen: the daemon's main thread is in <function (file:line)> < ...`, the stack V8 gives at the main thread's
 next JavaScript step (the in-process inspector, no port), and both again every `repeatMin` (default 5) while it lasts. On
 2026-11-27 BEAST's daemon held its loop 891 s in a synchronous realpath (w6546) and its log said nothing for those 15 minutes.
-For now the watch only logs. Ending the process so the supervisor starts a new daemon is the next stage; the supervisor
-restarts on every exit on Windows (`run-daemon.ps1`), on a Mac (KeepAlive) and on Linux (`Restart=always`), and the agent
-hosts and editors run on through a daemon restart. `freezeWatch: false` or `FF_FREEZE_WATCH=off` turns the watch off. If a daemon still has not come back 2 minutes after the portal started or after it
+Once a freeze reaches `exitMin` (default 3) the watch writes `... ending it so its supervisor starts a fresh one`, reads the
+stack once more (5 s at most), looks again, and ends the process with SIGKILL (TerminateProcess on Windows), since a frozen
+main thread runs no exit of its own: `event loop: ending the daemon now (SIGKILL)` is its last line. A loop that came free
+in that moment is left running (`came free before it was ended`; the last look waits two beats), and a gap the watch's own
+thread shares (the computer slept, the clock jumped) is no freeze: a freeze is counted from the later of the last beat
+and that wake. Its supervisor starts a fresh daemon: `run-daemon.ps1`
+restarts on every exit but 75, 10 s later after a run of over 5 minutes (`server/machineDeployWin.ts`); a Mac's LaunchAgent
+has KeepAlive true and ThrottleInterval 10 (`server/machineDeploy.ts`); Linux's unit has `Restart=always`, `RestartSec=10`
+and `KillMode=process` (`server/machineDeployLinux.ts`). Agent hosts run detached in their own process group, so they and
+their editors run on and the fresh daemon finds them, as after a daemon update. `freezeWatch: { exitMin: false }` or
+`FF_FREEZE_WATCH=log` only logs; `freezeWatch: false` or `FF_FREEZE_WATCH=off` turns the watch off. If a daemon still has not come back 2 minutes after the portal started or after it
 dropped, and its Mac answers ssh, the portal redeploys it by itself (as `add_machine` does), at most
 every 30 minutes and never while its agents are running. So after a restart, give daemons a minute
 before redeploying by hand.

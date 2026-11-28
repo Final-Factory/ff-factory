@@ -392,9 +392,11 @@ export interface DaemonConfig {
   sessionSweep?: Partial<{ graceMin: number; cloneKeepHours: number; quietMin: number }>;
   /**
    * The freeze watch (machine/freezeWatch.ts, w6555): a thread that logs a main event loop frozen for `afterMin` minutes
-   * (default 3) while it is frozen, with the main thread's stack, and again every `repeatMin` (default 5). `false`: off.
+   * (default 3) while it is frozen, with the main thread's stack, and again every `repeatMin` (default 5); at `exitMin`
+   * (default 3) it ends the daemon so its supervisor starts a fresh one (`exitMin: false`, or FF_FREEZE_WATCH=log: only log).
+   * `false`: off.
    */
-  freezeWatch?: Partial<{ afterMin: number; repeatMin: number }> | false;
+  freezeWatch?: Partial<{ afterMin: number; repeatMin: number; exitMin: number | false }> | false;
   /**
    * The MCP-for-Unity server agents here get as "UnityMCP", each confined to its own editor (machine/unityMcp.ts).
    * Default: the UnityMCP entry the machine's own Claude Code has in ~/.claude.json.
@@ -2378,7 +2380,7 @@ export class Daemon {
     const fw = freezeWatchSettings(this.cfg.freezeWatch);
     if (fw && process.env.FF_FREEZE_WATCH !== 'off') {
       try {
-        this.freezeWatch = startFreezeWatch({ afterMs: fw.afterMin * 60_000, repeatMs: fw.repeatMin * 60_000, onError: (e) => log(`freeze watch: its thread failed: ${e.message}`) });
+        this.freezeWatch = startFreezeWatch({ afterMs: fw.afterMin * 60_000, repeatMs: fw.repeatMin * 60_000, exitMs: fw.exitMin === false || process.env.FF_FREEZE_WATCH === 'log' ? 0 : fw.exitMin * 60_000, onError: (e) => log(`freeze watch: its thread failed: ${e.message}`) });
       } catch (e) {
         log(`freeze watch: not started: ${(e as Error).message}`);
       }
