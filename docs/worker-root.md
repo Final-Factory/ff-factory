@@ -1605,8 +1605,11 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
     Every walk that skips one says it: the spawner's, a pin taken back to Medium, the lock and the unlock (review w6452 L3).
     lockIn (machine/lockIn.ts `firstUnplain`) counts such a name in a moved-in entry as bad: labelTree would skip it, so it
     would keep the worker's own Low label; the entry is removed and said (review w6452 M2). `rd /s /q` answers 0 and leaves
-    `x.`, `y ` and NUL in place with all that is in them (measured on LothDesktop), so lockIn removes again by the entry's
-    `\\?\` path, which removes them too, and a junction in them without its target (measured).
+    `x.`, `y ` and NUL in place with all that is in them (measured on LothDesktop), so proc.ts `removeTree`, which lockIn
+    and every other folder delete use, looks again after rd and goes again by the folder's `\\?\` path, which removes them
+    too, and a junction in them without its target (measured); a folder whose own name is such a name goes by its `\\?\`
+    path at once, since its plain path names another folder (`pkg.` is `pkg`). A folder still there after that is a failed
+    remove, with a line saying so (w6462).
   - **Linux** (machine/writeLock.ts `writeLockArgs`): `players` and `seed` leave the write set, and `cache`, `cache/nuget`
     and `tools` are opened child by child (`--rw-children DIR --except NAME`: ff-landlock.py lists DIR at start, so a child
     made later is not writable until the agent's next start; hence `makeSharedLockDirs` there too, before the args are
