@@ -77,6 +77,27 @@ function Test-DedupWatch {
       if ($ev) { return '' }
       if ($i -lt 11) { Start-Sleep -Seconds 5 }
     }
+    # The repair task (w6597, install-privileged-helpers.ps1 -Actions deduprepair): run it now rather than waiting for the night.
+    $rt = 'ffsb-helper-deduprepair'
+    $rj = Join-Path $PSScriptRoot 'results\dedup-repair\dedup-repair.json'
+    & schtasks.exe /query /tn $rt *> $null
+    if ($LASTEXITCODE -eq 0) {
+      $t0 = (Get-Date).ToUniversalTime()
+      # A run already going (IgnoreNew drops ours): take its result, from any start within the task's 15-minute limit (w6623 M2).
+      if ("$(& schtasks.exe /query /tn $rt /fo csv /nh 2>$null | Select-Object -Last 1)" -match '"Running"$') { $t0 = $t0.AddMinutes(-15) }
+      & schtasks.exe /run /tn $rt *> $null
+      for ($i = 0; $i -lt 60; $i++) {
+        Start-Sleep -Seconds 3
+        try { $res = Get-Content -Raw $rj | ConvertFrom-Json } catch { $res = $null }
+        if ($res -and ([datetime]$res.at).ToUniversalTime() -ge $t0.AddSeconds(-2)) {
+          if ($res.ok -and "$($res.state)" -like 'repaired*') { return "; dedup repaired (w6597): $($res.state)" }
+          if ($res.ok) { return '' }   # the service began watching the drive meanwhile
+          return "; dedup not repaired (w6597, $rt $($res.mode)): $($res.state) $(@($res.reasons) -join '; ') $($res.detail)".TrimEnd()
+        }
+      }
+      # The repair can take about 4 minutes (stop, start, event 6) and this helper's caller allows 5 in all: leave it running.
+      return "; dedup repair still running (w6597): $rt wrote no result within 3 minutes; it finishes on its own (results\dedup-repair\dedup-repair.json)"
+    }
     return "; warn-only (w6573): the ReFS dedup service logged no 'started monitoring' for $($Letter): since its dismount at $($dm.TimeCreated.ToUniversalTime().ToString('s'))Z, so its scheduled dedup may not run again until the service restarts (an administrator: stop the volume's task under \Microsoft\Windows\ReFsDedupSvc\ if it is Running, then Restart-Service refsdedupsvc)"
   } catch { return "; dedup watch not checked (w6573): $($_.Exception.Message)" }
 }

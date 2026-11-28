@@ -143,7 +143,7 @@ function Format-DataPartition([int]$n, [int]$part, [string]$l) {
 function Register-Tasks([string]$l) {
   if ($NoTasks) { return }
   $helpers = Join-Path $PSScriptRoot '..\install-privileged-helpers.ps1'
-  $a = @{ Vhdx = $Vhdx; Letter = $l; Flex = $true; StateFile = $StateFile; DaemonConfig = $DaemonConfig; WorkerRoot = $WorkerRoot; Actions = @('mount', 'trim', 'compact', 'grow', 'dedup') }
+  $a = @{ Vhdx = $Vhdx; Letter = $l; Flex = $true; StateFile = $StateFile; DaemonConfig = $DaemonConfig; WorkerRoot = $WorkerRoot; Actions = @('mount', 'trim', 'compact', 'grow', 'dedup', 'deduprepair') }
   if ($User) { $a.User = $User }
   if ($Skip) { $a.Skip = $Skip }
   & $helpers @a | ForEach-Object { Say "helpers: $_" }
@@ -244,6 +244,10 @@ try {
       foreach ($t in @(Get-ScheduledTask -TaskName 'ffsb-helper-*' -ErrorAction SilentlyContinue)) {
         $args0 = [string]($t.Actions | Select-Object -First 1).Arguments
         if ($args0.IndexOf($Vhdx, [StringComparison]::OrdinalIgnoreCase) -ge 0) { Unregister-ScheduledTask -TaskName $t.TaskName -Confirm:$false; Say "removed task $($t.TaskName)" }
+      }
+      # The dedup repair (w6597) names the drive's letter, not the VHDX: the installer takes it and its service ACE away.
+      if (Get-ScheduledTask -TaskName 'ffsb-helper-deduprepair' -ErrorAction SilentlyContinue) {
+        & (Join-Path $PSScriptRoot '..\install-privileged-helpers.ps1') -Uninstall -Actions deduprepair | ForEach-Object { Say "helpers: $_" }
       }
       if (Test-Path -LiteralPath $Vhdx) {
         Dismount-DiskImage -ImagePath $Vhdx -ErrorAction SilentlyContinue | Out-Null
