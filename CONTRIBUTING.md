@@ -90,8 +90,8 @@ Three from the Windows supervisor (w6784):
   child outlives it waits until that child ends. Wait on `'exit'`, and end the children (the test's own pids) before
   removing the folder they run in (`server/supervisorWin.test.ts`).
 - **Node's strip-only TypeScript refuses parameter properties** (`constructor(private n = 3)` is
-  `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` at import, not a type error `tsc` reports): declare the fields and assign them in
-  the constructor (`machine/startStreak.ts`).
+  `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` at import; `npm run typecheck` catches it first as TS1294, since `tsconfig.json`
+  sets `erasableSyntaxOnly`): declare the fields and assign them in the constructor (`machine/startStreak.ts`).
 - **A back-off variable is not a "start now" flag.** The supervisor script run-daemon.ps1
   (`server/machineDeployWin.ts`) set `$delay = 0` to restart at once and so zeroed the back-off for every later exit
   (the Worker update end-to-end check caught it); keep what this exit waits (`$wait`) apart from the back-off it grows
