@@ -192,7 +192,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w6727 (no bump): `steam_start` / `steam_start_result` and `steamStart` in the hello, optional; the portal sends steam_start only
 // to a daemon whose hello offered steamStart, so an older daemon never gets one, and an older portal never sends it (so a
 // daemon never answers it).
-const DECIDED = { protocol: 9, fingerprint: '4725c06754de071b' };
+// w6792 (no bump): the 'self_reboot' message { selfReboot } (whether the machine reboots itself when its daemon stays stuck);
+// an older portal drops it (onMessage has no default case), and an older daemon never sends it (the panel then shows none).
+const DECIDED = { protocol: 9, fingerprint: 'e07e3aa283a862ee' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

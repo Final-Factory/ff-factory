@@ -30,6 +30,7 @@ import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
 import { StallProfiler } from '../server/stallProfile.ts';
 import { DAEMON_ENDING_MARKER, freezeWatchSettings, startFreezeWatch, type FreezeWatch } from './freezeWatch.ts';
+import { DAEMON_ALIVE_EVERY_MS, readSelfReboot, writeAlive } from './selfReboot.ts';
 import { execFileOffThread, useSpawnThread } from '../server/spawnThread.ts';
 import { useProbeGuard } from '../server/probeGuard.ts';
 import { warmScopeProbes } from './linuxScope.ts';
@@ -791,6 +792,8 @@ export class Daemon {
   private ghLogin?: GhLoginWatch;
   /** The machine's Steam client: installed, running, signed in, as which account (w2459, machine/steamClient.ts). */
   private steamClient?: SteamClientWatch;
+  /** What it last sent of the supervisor's self-reboot file (w6792), as JSON: sent again only when it changes, and after each hello. */
+  private selfRebootSent?: string;
   /** Starts the installed Steam client in the desktop session: a person's steam_start and the players broker's self-healing (w6727). */
   private steamStarterMade?: SteamStarter;
   /** Claude Code's own transcripts on this computer, kept free of the secret values this daemon knows (w1688). */
@@ -2464,6 +2467,11 @@ export class Daemon {
         }
       });
     }
+    // w6792: tells run-daemon.ps1 this daemon works (linked to the portal), which ends a stuck episode before any reboot, and
+    // sends the portal what the supervisor wrote about rebooting this machine (machine/selfReboot.ts).
+    const rebootLogs = path.join(appDirOfConfig(this.cfg), 'logs');
+    this.timers.push(setInterval(loopLabel('timer selfReboot', () => this.selfRebootTick(rebootLogs)), DAEMON_ALIVE_EVERY_MS));
+    this.selfRebootTick(rebootLogs);
     if (fw && process.env.FF_FREEZE_WATCH !== 'off') {
       try {
         this.freezeWatch = startFreezeWatch({ afterMs: fw.afterMin * 60_000, repeatMs: fw.repeatMin * 60_000, exitMs: fw.exitMin === false || process.env.FF_FREEZE_WATCH === 'log' ? 0 : fw.exitMin * 60_000, markerFile: endingMarker, onError: (e) => log(`freeze watch: its thread failed: ${e.message}`) });
@@ -2845,6 +2853,23 @@ export class Daemon {
     this.send({ type: 'runner_hold', report });
   }
 
+  /** w6792: the heartbeat the supervisor reads (Windows), and the supervisor's self-reboot file to the portal when it changed. */
+  private selfRebootTick(logsDir = path.join(appDirOfConfig(this.cfg), 'logs')) {
+    const linked = this.ws?.readyState === WebSocket.OPEN && this.welcomed;
+    if (process.platform === 'win32') {
+      try {
+        writeAlive(logsDir, linked);
+      } catch {
+        // No logs folder (a test's daemon): the supervisor then sees no working daemon, as before w6792.
+      }
+    }
+    const selfReboot = linked ? readSelfReboot(logsDir) : undefined;
+    const json = selfReboot && JSON.stringify(selfReboot);
+    if (!selfReboot || json === this.selfRebootSent) return;
+    this.selfRebootSent = json;
+    this.send({ type: 'self_reboot', selfReboot });
+  }
+
   private send(msg: FromDaemon) {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
@@ -3040,6 +3065,9 @@ export class Daemon {
     // The last gh login reading (w1463): a portal that restarted, or a new one, has it at once.
     this.ghLogin?.resend();
     this.steamClient?.resend();
+    // w6792: a portal that restarted has the self-reboot state at once, and the supervisor sees this daemon linked now.
+    this.selfRebootSent = undefined;
+    this.selfRebootTick();
     // The portal keeps the last report across a reconnect: a flapping link must not start a CLI each time.
     if (Date.now() - this.lastUsage > this.usageMs / 2) void this.reportUsage();
     else this.scheduleUsage();

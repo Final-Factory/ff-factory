@@ -128,6 +128,15 @@ later, the supervisor ends it again, and if it is still there leaves it behind a
 supervisor first, by `logs\daemon-restart-request.json`, with no Task Scheduler or WMI. `machine_daemon start` says when the
 task was already running, so the start changed nothing. Details: [machines.md](machines.md), "A daemon stuck mid-exit". A root install the portal sees offline 10 minutes while ssh reaches it gets a `machine_daemon restart` from the portal (warn-only for now: [machines.md](machines.md), "The offline backstop").
 
+**A machine that comes back by itself may reboot itself when its daemon stays stuck** (w6792, warn only for now): when the
+recovery above brings back no working daemon (one linked to the portal, `logs\daemon-alive.json`) within 15 minutes, the
+supervisor logs `self-reboot: would reboot now (warn only), reason: ...` in supervisor.log and the machine's panel shows it.
+Only a machine with automatic logon to the daemon's user, a stored password (seen without reading it) and the
+`FFFactoryDaemon` logon task is eligible, detected at the supervisor's start and hourly; it waits while the console had
+input in the last 30 minutes, and at most once in 6 hours. A file `supervisor-no-reboot` in the daemon's folder turns it
+off. macOS and Linux only say why they are not eligible. Details: [machines.md](machines.md), "A machine that reboots
+itself".
+
 **The short way for a new machine: a join code** (w1592): an owner asks for one, and one line at the PC does the rest,
 record and credential included ([Adding a machine with a join code](#adding-a-machine-with-a-join-code-w1592)).
 

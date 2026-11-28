@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { DAEMON_ENDING_MARKER } from '../machine/freezeWatch.ts';
+import { DAEMON_ALIVE, DAEMON_ALIVE_FRESH_S, SELF_REBOOT_STATE } from '../machine/selfReboot.ts';
 
 /**
  * The Windows half of server/machineDeploy.ts (docs/machines.md, "Windows machines"): the PowerShell scripts
@@ -472,6 +473,143 @@ export const SUPERVISOR_FRESH_S = 30;
 export const SUPERVISOR_ANSWER_S = 60;
 /** w6784: how long a start waits for the task's state before it goes on without it. */
 export const TASK_STATE_WAIT_MS = 15_000;
+/**
+ * w6792: a stuck episode (a daemon stuck mid-exit, w6784) that no working daemon has ended this long after it began lets an
+ * eligible machine reboot itself (lothsahn, 2026-11-28: "If the daemon is stuck, can we reboot after 15minutes?").
+ */
+export const SUPERVISOR_REBOOT_AFTER_S = 900;
+/** w6792: no reboot while the console had keyboard or mouse input this recently: someone may be at the machine. */
+export const SUPERVISOR_REBOOT_IDLE_S = 1800;
+/** w6792: at most one automatic reboot per machine in this long. */
+export const SUPERVISOR_REBOOT_EVERY_S = 6 * 3600;
+/** w6792: how often the supervisor reads again whether this machine may reboot itself (never during a stuck episode). */
+export const SUPERVISOR_ELIGIBLE_EVERY_S = 3600;
+/**
+ * w6792: a boot whose user logon came this soon after it started, and within SUPERVISOR_AUTOLOGON_CONNECT_S of the console
+ * connecting, logged on by itself (BEAST, 2026-11-28: 11 s after boot, 2.3 s after the console connected); with
+ * AutoAdminLogon still 1 after it, Winlogon found the stored password, which only an administrator can check directly.
+ */
+export const SUPERVISOR_AUTOLOGON_BOOT_S = 120;
+export const SUPERVISOR_AUTOLOGON_CONNECT_S = 5;
+/** w6792: this file in the daemon's folder turns the automatic reboot off: a stuck episode is only logged. */
+export const SUPERVISOR_NO_REBOOT = 'supervisor-no-reboot';
+/**
+ * w6792, lothsahn's lockout rule: warn only first. False: the supervisor logs "would reboot now" and tells the portal, and
+ * its script has no way to reboot at all; the live route comes in its own reviewed PR once the warn lines look right.
+ */
+export const SUPERVISOR_REBOOT_LIVE = false;
+
+/**
+ * w6792: the helper the supervisor compiles (Add-Type, off its loop) to read the console's last input, the uptime, which
+ * session has the console and the logon session's times. It reads; it changes nothing.
+ */
+const SELF_REBOOT_NATIVE = `using System;
+using System.Runtime.InteropServices;
+public static class FFSelfReboot {
+  [StructLayout(LayoutKind.Sequential)] struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+  [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+  [DllImport("kernel32.dll")] static extern ulong GetTickCount64();
+  [DllImport("kernel32.dll")] static extern uint WTSGetActiveConsoleSessionId();
+  [DllImport("wtsapi32.dll", SetLastError = true)] static extern bool WTSQuerySessionInformationW(IntPtr server, int sessionId, int infoClass, out IntPtr buffer, out int bytes);
+  [DllImport("wtsapi32.dll")] static extern void WTSFreeMemory(IntPtr p);
+  public static long IdleMs() { LASTINPUTINFO i = new LASTINPUTINFO(); i.cbSize = (uint)Marshal.SizeOf(i); if (!GetLastInputInfo(ref i)) return -1; return (long)unchecked((uint)Environment.TickCount - i.dwTime); }
+  public static long UptimeMs() { return (long)GetTickCount64(); }
+  public static int ConsoleSession() { return unchecked((int)WTSGetActiveConsoleSessionId()); }
+  // WTSSessionInfo (24): WTSINFOW's ConnectTime and LogonTime (FILETIME, UTC) at bytes 176 and 200; empty when unreadable.
+  public static long[] SessionTimes(int session) {
+    IntPtr b; int n;
+    if (!WTSQuerySessionInformationW(IntPtr.Zero, session, 24, out b, out n)) return new long[0];
+    try { if (n < 216) return new long[0]; return new long[] { Marshal.ReadInt64(b, 176), Marshal.ReadInt64(b, 200) }; } finally { WTSFreeMemory(b); }
+  }
+}`;
+
+/**
+ * w6792: whether this machine comes back by itself after a reboot, detected, never configured by name: automatic logon on
+ * (Winlogon AutoAdminLogon 1) to the daemon's own user (DefaultUserName, or a Microsoft account's address, matched by SID;
+ * AutoLogonSID, when there, this user's), a stored password for it, and the daemon's logon task. The password's value is
+ * never read: a DefaultPassword value counts by its name; one in the LSA (Sysinternals Autologon, netplwiz), which only an
+ * administrator can see, counts when the last boot logged this user on by itself and AutoAdminLogon stayed 1 (Winlogon
+ * turns it off when it finds no password). Run in a runspace by the supervisor (params: task name, the FFSelfReboot source,
+ * the last answer about the task, SUPERVISOR_AUTOLOGON_BOOT_S, SUPERVISOR_AUTOLOGON_CONNECT_S); answers {eligible, why, task}.
+ * Its readers come first, so a test can define fakes after them (the line ELIG_READERS_END).
+ */
+export const ELIG_READERS_END = '# (the readers above; what they answer decides below)';
+export function selfRebootEligibilityScript(): string {
+  return `param($taskName, $native, $prevTask, $bootS, $connectS)
+try { if (-not ('FFSelfReboot' -as [type])) { Add-Type -TypeDefinition $native -ErrorAction Stop } } catch { }
+# Each value by its name: the stored password's value is never read, only whether its name is there.
+function Read-Winlogon {
+  $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon')
+  if (-not $k) { return $null }
+  try { @{ names = @($k.GetValueNames()); auto = [string]$k.GetValue('AutoAdminLogon'); user = [string]$k.GetValue('DefaultUserName'); domain = [string]$k.GetValue('DefaultDomainName'); autoSid = [string]$k.GetValue('AutoLogonSID') } } finally { $k.Close() }
+}
+function Read-Who {
+  $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+  @{ name = $me.Name; sid = $me.User.Value; groups = @($me.Groups | ForEach-Object { $_.Value }); user = $env:USERNAME; domain = $env:USERDOMAIN; computer = $env:COMPUTERNAME }
+}
+function Read-Sid($domain, $user) {
+  $a = if ($domain) { New-Object Security.Principal.NTAccount($domain, $user) } else { New-Object Security.Principal.NTAccount($user) }
+  $a.Translate([Security.Principal.SecurityIdentifier]).Value
+}
+# This session's logon: seconds after the boot and after the console connected, or $null.
+function Read-Logon {
+  $t = [FFSelfReboot]::SessionTimes([Diagnostics.Process]::GetCurrentProcess().SessionId)
+  if ($t.Count -ne 2 -or $t[1] -le 0) { return $null }
+  $boot = (Get-Date).ToUniversalTime().AddMilliseconds(-[FFSelfReboot]::UptimeMs())
+  $logon = [DateTime]::FromFileTimeUtc($t[1])
+  @(($logon - $boot).TotalSeconds, ($logon - [DateTime]::FromFileTimeUtc($t[0])).TotalSeconds)
+}
+# The logon task: $true when schtasks finds it, else what schtasks said, or $null when the Task Scheduler does not answer in
+# 15 s (it hung on BEAST, w6784).
+function Read-Task {
+  $psi = New-Object Diagnostics.ProcessStartInfo 'schtasks.exe', ('/query /tn "' + $taskName + '"')
+  $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+  $q = [Diagnostics.Process]::Start($psi)
+  $o = $q.StandardOutput.ReadToEndAsync(); $e = $q.StandardError.ReadToEndAsync()
+  if ($q.WaitForExit(15000)) {
+    if ($q.ExitCode -eq 0) { return $true }
+    $said = (([string]$e.Result) + ' ' + ([string]$o.Result)).Trim() -replace '\\s+', ' '
+    if (-not $said) { $said = "exit code $($q.ExitCode)" }
+    return $said
+  }
+  try { $q.Kill() } catch { }
+  $null
+}
+${ELIG_READERS_END}
+function No($why, $task = $prevTask) { [pscustomobject]@{ eligible = $false; why = $why; task = $task } }
+$w = $null
+try { $w = Read-Winlogon } catch { }
+if (-not $w) { return No 'the Winlogon key could not be read' }
+if ($w.auto -ne '1') { return No "automatic logon is off (Winlogon AutoAdminLogon is '$($w.auto)', not 1)" }
+$me = Read-Who
+if ($w.autoSid -and $w.autoSid -ne $me.sid) { return No "automatic logon is for another account (Winlogon AutoLogonSID is not this daemon's user, $($me.name))" }
+# DefaultUserName: a local or domain account's name, or a Microsoft account's address (domain MicrosoftAccount), which this
+# user's token carries as a group (S-1-11-96-...): matched by SID, so a Microsoft account matches the local user it signs in as.
+$match = $false
+if ($w.user) {
+  if ($w.user -ieq $me.user -and (-not $w.domain -or $w.domain -ieq $me.domain -or $w.domain -ieq $me.computer)) { $match = $true }
+  else { try { $sid = Read-Sid $w.domain $w.user; $match = $sid -eq $me.sid -or $me.groups -contains $sid } catch { } }
+}
+if (-not $match) { return No "automatic logon names another account than this daemon's user ($($me.name))" }
+$secret = $null
+if ($w.names -contains 'DefaultPassword') { $secret = 'its password stored (a DefaultPassword value, not read)' }
+else {
+  $l = $null
+  try { $l = Read-Logon } catch { }
+  if ($l -and $l[0] -le $bootS -and $l[1] -ge 0 -and $l[1] -le $connectS) { $secret = "its password stored (the last boot logged this user on by itself $([int]$l[0]) s after it started, $([Math]::Round($l[1], 1)) s after the console connected, and AutoAdminLogon stayed 1)" }
+  else {
+    $seen = if ($l) { "this user's logon came $([int]$l[0]) s after the last boot and $([Math]::Round($l[1], 1)) s after the console connected (by itself: within $bootS s and $connectS s)" } else { "this session's logon times could not be read" }
+    return No "no stored password for automatic logon can be seen: no DefaultPassword value, and $seen; one in the LSA only an administrator can check"
+  }
+}
+$task = $prevTask
+$said = $null
+try { $t = Read-Task; if ($t -is [string]) { $said = $t; $task = $false } elseif ($null -ne $t) { $task = [bool]$t } } catch { $said = $_.Exception.Message; $task = $false }
+if ($null -eq $task) { return No "the Task Scheduler did not say in 15 s whether the $taskName logon task is there" $null }
+if (-not $task) { return No "schtasks finds no $taskName logon task ($(if ($said) { $said } else { 'the last answer' })), so the daemon would not start after a reboot" $false }
+[pscustomobject]@{ eligible = $true; why = "automatic logon to this daemon's user ($($me.name)), $secret, and the $taskName logon task"; task = $true }
+`;
+}
 
 export function supervisorScript(node: string, flag: boolean, service?: WinService): string {
   const flags = [...(flag ? ['--experimental-strip-types'] : []), '--disable-warning=ExperimentalWarning'].join(' ');
@@ -503,10 +641,41 @@ $request = Join-Path $logs '${SUPERVISOR_REQUEST}'
 # w6784: this file in the daemon's folder keeps the stage-1 behaviour: a daemon stuck mid-exit is only logged, never left behind.
 $warnOnly = Join-Path $F '${SUPERVISOR_WARN_ONLY}'
 $abandoned = New-Object System.Collections.Generic.List[int]
+# w6792: a stuck episode begins when a daemon is found stuck mid-exit and ends when the daemon running then says it works
+# (its heartbeat, machine/selfReboot.ts, fresh and linked to the portal). One still going $rebootAfterS later reboots a machine
+# that comes back by itself, unless someone used its console in the last $rebootIdleS or it rebooted itself in the last
+# $rebootEveryS. $rebootLive false: it only says so ("would reboot now"), and this script has no way to reboot at all.
+$rebootAfterS = ${SUPERVISOR_REBOOT_AFTER_S}
+$rebootIdleS = ${SUPERVISOR_REBOOT_IDLE_S}
+$rebootEveryS = ${SUPERVISOR_REBOOT_EVERY_S}
+$eligEveryS = ${SUPERVISOR_ELIGIBLE_EVERY_S}
+$rebootLive = $${SUPERVISOR_REBOOT_LIVE}
+$rebootState = Join-Path $logs '${SELF_REBOOT_STATE}'
+$aliveFile = Join-Path $logs '${DAEMON_ALIVE}'
+$noReboot = Join-Path $F '${SUPERVISOR_NO_REBOOT}'
+$stuckSince = $null
+$stuckWhy = $null
+$rebootSaid = $false
+$skipSaid = $null
+$skipNow = $null
+$elig = $null
+$eligPs = $null
+$eligAsync = $null
+$eligStarted = $null
+$eligNext = [DateTime]::MinValue
+$rebootLast = $null
+$rebootLastLive = $null
 function Say($line) { "$(Get-Date -Format s) $line" | Out-File $log -Append -Encoding utf8 }
+# w6792: a state file another process reads, swapped in by ReplaceFile. Move-Item -Force deletes the old file before it moves the
+# new one in, and a reader in between found none (CI's w6792 test). ReplaceFile narrows that gap but does not close it, and a
+# reader can find the file busy while it runs (measured on BEAST, 3000 swaps against a reader: Move-Item 6184 reads found no
+# file, ReplaceFile 3152 found none and 4608 found it busy), so every reader tries again (askSupervisor, the daemon's next tick).
+function Put-File($tmp, $to) {
+  if ([IO.File]::Exists($to)) { [IO.File]::Replace($tmp, $to, [NullString]::Value) } else { [IO.File]::Move($tmp, $to) }
+}
 function Beat($daemonPid) {
   $alive = @($abandoned | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
-  try { [pscustomobject]@{ pid = $PID; daemonPid = $daemonPid; abandoned = $alive; at = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress | Set-Content -LiteralPath "$state.tmp" -Encoding utf8; Move-Item -LiteralPath "$state.tmp" -Destination $state -Force } catch { }
+  try { [pscustomobject]@{ pid = $PID; daemonPid = $daemonPid; abandoned = $alive; at = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress | Set-Content -LiteralPath "$state.tmp" -Encoding utf8; Put-File "$state.tmp" $state } catch { }
 }
 # A restart asked over ssh (controlScript): its why, once; the file is taken away so each ask acts once.
 function Take-Request {
@@ -548,6 +717,119 @@ function End-Daemon($p) {
   try { Stop-Held $p } catch { Say "ending the daemon, pid $($p.Id), answered: $($_.Exception.Message) (it is already ending)" }
   $p.WaitForExit(15000)
 }
+# w6792: whether this machine may reboot itself, read off this loop in a runspace (selfRebootEligibilityScript: the registry,
+# a SID lookup and schtasks could each block), at start and hourly but never during a stuck episode; its helper type, compiled
+# there, is the process's, so the console checks below use it once it is in.
+$nativeSrc = @'
+${SELF_REBOOT_NATIVE}
+'@
+$eligCheck = @'
+${selfRebootEligibilityScript()}'@
+function To-Utc($v) { if ($v -is [DateTime]) { return $v.ToUniversalTime() }; [DateTime]::Parse([string]$v, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() }
+function Iso($d) { if ($d) { $d.ToString('o') } }
+function Idle-S { if ('FFSelfReboot' -as [type]) { [FFSelfReboot]::IdleMs() / 1000 } else { -1 } }
+function Console-Why { if (-not ('FFSelfReboot' -as [type])) { return "which session has the console can't be read yet" }; $s = [Diagnostics.Process]::GetCurrentProcess().SessionId; $c = [FFSelfReboot]::ConsoleSession(); if ($c -ne $s) { "the console is session $c, not this daemon's session $s (someone else may be at it, or this session is remote)" } }
+# What it saw and did, for the daemon to tell the portal (machine/selfReboot.ts); last and lastLiveAt outlive a reboot.
+function Write-RebootState {
+  $o = [ordered]@{ mode = $(if ($rebootLive) { 'live' } else { 'warn' }); why = 'not read yet' }
+  if ($elig) { $o.eligible = [bool]$elig.eligible; $o.why = [string]$elig.why; $o.checkedAt = Iso $elig.at }
+  if ($stuckSince) { $o.stuckSince = Iso $stuckSince }
+  if ($rebootLast) { $o.last = $rebootLast }
+  if ($skipNow) { $o.skip = $skipNow }
+  if ($rebootLastLive) { $o.lastLiveAt = Iso $rebootLastLive }
+  try { [pscustomobject]$o | ConvertTo-Json -Compress -Depth 4 | Set-Content -LiteralPath "$rebootState.tmp" -Encoding utf8; Put-File "$rebootState.tmp" $rebootState } catch { }
+}
+try {
+  $r0 = Get-Content -LiteralPath $rebootState -Raw -ErrorAction Stop | ConvertFrom-Json
+  if ($r0.last) { $rebootLast = [pscustomobject]@{ at = Iso (To-Utc $r0.last.at); mode = [string]$r0.last.mode; why = [string]$r0.last.why; stuckSince = $(if ($r0.last.stuckSince) { Iso (To-Utc $r0.last.stuckSince) }) } }
+  if ($r0.lastLiveAt) { $rebootLastLive = To-Utc $r0.lastLiveAt }
+} catch { }
+function Check-Eligible {
+  if ($eligAsync) {
+    if (-not $eligAsync.IsCompleted) {
+      if (((Get-Date) - $eligStarted).TotalSeconds -gt 120) { Say "self-reboot: its eligibility check has not answered in 120 s; left, and tried again in $([int]($eligEveryS / 60)) min (w6792)"; $script:eligAsync = $null; $script:eligNext = (Get-Date).AddSeconds($eligEveryS) }
+      return
+    }
+    $r = $null
+    try { $r = @($eligPs.EndInvoke($eligAsync)) | Select-Object -Last 1 } catch { }
+    if (-not $r) { $err = 'it answered nothing'; try { if ($eligPs.Streams.Error.Count) { $err = [string]$eligPs.Streams.Error[0] } } catch { }; $r = [pscustomobject]@{ eligible = $false; why = "its check failed: $err"; task = $null } }
+    try { $eligPs.Dispose() } catch { }
+    $script:eligAsync = $null
+    $was = $elig
+    $script:elig = [pscustomobject]@{ eligible = [bool]$r.eligible; why = [string]$r.why; task = $r.task; at = (Get-Date).ToUniversalTime() }
+    if (-not $was -or $was.eligible -ne $elig.eligible -or $was.why -ne $elig.why) { Say "self-reboot: $(if ($elig.eligible) { 'eligible' } else { 'not eligible' }): $($elig.why); mode $(if ($rebootLive) { 'live' } else { 'warn only' }) (w6792)" }
+    Write-RebootState
+  }
+  if ($stuckSince -or (Get-Date) -lt $eligNext) { return }
+  $script:eligNext = (Get-Date).AddSeconds($eligEveryS)
+  try {
+    $script:eligPs = [powershell]::Create().AddScript($eligCheck).AddArgument('${taskName(service)}').AddArgument($nativeSrc).AddArgument($(if ($elig) { $elig.task })).AddArgument(${SUPERVISOR_AUTOLOGON_BOOT_S}).AddArgument(${SUPERVISOR_AUTOLOGON_CONNECT_S})
+    $script:eligStarted = Get-Date
+    $script:eligAsync = $eligPs.BeginInvoke()
+  } catch { Say "self-reboot: its eligibility check could not start: $($_.Exception.Message) (w6792)" }
+}
+function Begin-Stuck($since, $why) {
+  if ($stuckSince) { return }
+  $script:stuckSince = $since
+  $script:stuckWhy = $why
+  $script:rebootSaid = $false
+  $script:skipSaid = $null
+  $script:skipNow = $null
+  Say "self-reboot: a stuck episode began at $(Iso $since) ($why); with no working daemon by $(Iso $since.AddSeconds($rebootAfterS)) this machine $(if ($rebootLive) { 'reboots' } else { 'would reboot (warn only)' }) if it may (w6792)"
+  Write-RebootState
+}
+function End-Stuck($line) {
+  Say $line
+  $script:stuckSince = $null
+  $script:skipNow = $null
+  Write-RebootState
+}
+# Why not to reboot now ({key, why}: logged once per key), or nothing.
+function Reboot-Skip {
+  if (Test-Path -LiteralPath $noReboot) { return @{ key = 'off'; why = "$noReboot turns it off" } }
+  if (-not $elig) { return @{ key = 'unread'; why = 'whether this machine comes back by itself has not been read yet' } }
+  if (-not $elig.eligible) { return @{ key = 'not eligible'; why = "this machine would not come back by itself: $($elig.why)" } }
+  $c = Console-Why
+  if ($c) { return @{ key = 'console'; why = $c } }
+  $idle = Idle-S
+  if ($idle -lt 0) { return @{ key = 'input'; why = "the console's last input can't be read" } }
+  if ($idle -lt $rebootIdleS) { return @{ key = 'idle'; why = "the console had keyboard or mouse input $([int]($idle / 60)) min ago; it waits for $([int]($rebootIdleS / 60)) min with none" } }
+  if ($rebootLastLive -and ((Get-Date).ToUniversalTime() - $rebootLastLive).TotalSeconds -lt $rebootEveryS) { return @{ key = 'rate'; why = "it rebooted itself at $(Iso $rebootLastLive), under $([int]($rebootEveryS / 3600)) h ago" } }
+  $null
+}
+# Every step: the eligibility check's answer; a stuck episode ended by a working daemon, or held back, or answered. Its own
+# failure is said once and never reaches w6784's loop, where a throw reads as "could not start" (w6809's review).
+function Watch-Reboot($daemonPid) {
+  try { Watch-RebootStep $daemonPid } catch { if (-not $watchFailSaid) { Say "self-reboot: its check failed: $($_.Exception.Message) (w6792)"; $script:watchFailSaid = $true } }
+}
+function Watch-RebootStep($daemonPid) {
+  Check-Eligible
+  if (-not $stuckSince) { return }
+  $mins = [int](((Get-Date).ToUniversalTime() - $stuckSince).TotalMinutes)
+  if ($daemonPid) {
+    try {
+      $a = Get-Content -LiteralPath $aliveFile -Raw -ErrorAction Stop | ConvertFrom-Json
+      # Written since the stuck state began: with supervisor-warn-only a stuck daemon keeps its pid, and its last heartbeat,
+      # from before it said it ends, is still under ${DAEMON_ALIVE_FRESH_S} s old (w6809's review).
+      $wrote = (Get-Item -LiteralPath $aliveFile).LastWriteTimeUtc
+      $age = ((Get-Date).ToUniversalTime() - $wrote).TotalSeconds
+      if ([int]$a.pid -eq $daemonPid -and $a.linked -eq $true -and $age -le ${DAEMON_ALIVE_FRESH_S} -and $wrote -gt $stuckSince) { End-Stuck "self-reboot: the daemon, pid $daemonPid, works (linked to the portal) $mins min after the stuck state began: the episode is over, no reboot (w6792)"; return }
+    } catch { }
+  }
+  if ($rebootSaid -or ((Get-Date).ToUniversalTime() - $stuckSince).TotalSeconds -lt $rebootAfterS) { return }
+  $skip = Reboot-Skip
+  if ($skip) {
+    if ($skip.key -ne $skipSaid) { Say "self-reboot: stuck $mins min, no reboot: $($skip.why) (w6792)"; $script:skipSaid = $skip.key; $script:skipNow = [pscustomobject]@{ at = Iso (Get-Date).ToUniversalTime(); why = $skip.why }; Write-RebootState }
+    return
+  }
+  $script:rebootSaid = $true
+  $script:skipNow = $null
+  $why = "the daemon was stuck $mins min ($stuckWhy) and this supervisor's own recovery brought back no working daemon"
+  $script:rebootLast = [pscustomobject]@{ at = Iso (Get-Date).ToUniversalTime(); mode = 'warn'; why = $why; stuckSince = Iso $stuckSince }
+  Say "self-reboot: would reboot now (warn only), reason: $why (w6792)"
+  Write-RebootState
+}
+Check-Eligible
 while ($true) {
   $out = Rotate-Out 'daemon'
   $err = Rotate-Out 'daemon.err'
@@ -566,11 +848,13 @@ while ($true) {
     $left = $false
     while (-not $proc.WaitForExit($waitStepMs)) {
       Beat $proc.Id
+      Watch-Reboot $proc.Id
       $ask = Take-Request
       if ($ask) {
         Say "a restart was asked ($ask): ending the daemon, pid $($proc.Id) (w6784)"
         $asked = $true
         if (End-Daemon $proc) { break }
+        Begin-Stuck ((Get-Date).ToUniversalTime().AddSeconds(-15)) "pid $($proc.Id) did not end when a restart was asked ($ask)"
         if (Test-Path -LiteralPath $warnOnly) { Say "the daemon, pid $($proc.Id), is still there 15 s after it was ended; $warnOnly says warn only, so this supervisor goes on waiting for it"; continue }
         $left = $true
         Say "the daemon, pid $($proc.Id), is still there 15 s after it was ended: it is stuck mid-exit; left behind, a fresh one starts beside it (w6784)"
@@ -583,12 +867,16 @@ while ($true) {
         if ([int]$m.pid -ne $proc.Id -or $for -lt $stuckAfter) { continue }
       } catch { continue }
       $stuckSaid = $true
+      $stuckFrom = (Get-Date).ToUniversalTime().AddSeconds(-$for)
+      $stuckAs = "pid $($proc.Id) said it ends ($($m.why)) and did not exit"
       if (Test-Path -LiteralPath $warnOnly) {
+        Begin-Stuck $stuckFrom $stuckAs
         Say "the daemon, pid $($proc.Id), said it ends ($($m.why)) $([int]$for) s ago and has still not exited: it is stuck mid-exit; $warnOnly says warn only, so this supervisor goes on waiting for it (w6784)"
         continue
       }
       Say "the daemon, pid $($proc.Id), said it ends ($($m.why)) $([int]$for) s ago and has still not exited: ending it again (w6784)"
       if (End-Daemon $proc) { break }
+      Begin-Stuck $stuckFrom $stuckAs
       $left = $true
       Say "the daemon, pid $($proc.Id), is still there: it is stuck mid-exit; left behind, a fresh one starts beside it (w6784)"
       break
@@ -616,6 +904,7 @@ while ($true) {
   $until = (Get-Date).AddSeconds($wait)
   while ((Get-Date) -lt $until) {
     Beat $null
+    Watch-Reboot $null
     $ask = Take-Request
     if ($ask) { Say "a restart was asked ($ask): starting the daemon now (w6784)"; break }
     Start-Sleep -Milliseconds ([Math]::Max(1, [Math]::Min($waitStepMs, ($until - (Get-Date)).TotalMilliseconds)))
@@ -883,11 +1172,14 @@ $viaSupervisor = $false
 $sj = Join-Path $F 'logs\\${SUPERVISOR_STATE}'
 $req = Join-Path $F 'logs\\${SUPERVISOR_REQUEST}'
 $live = $null
-if (Test-Path -LiteralPath $sj) {
+# Up to 5 tries 100 ms apart: the supervisor swaps the file in every few seconds, and a read in the swap finds none or finds it
+# busy (w6792); taken as no supervisor, a restart went the Task Scheduler route (w6784's ssh restart test on CI).
+for ($try = 0; $try -lt 5 -and -not $live; $try++) {
+  if ($try) { Start-Sleep -Milliseconds 100 }
   try {
     $s0 = Get-Content -LiteralPath $sj -Raw -ErrorAction Stop | ConvertFrom-Json
-    $age = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $sj).LastWriteTimeUtc).TotalSeconds
-    if ($age -lt ${SUPERVISOR_FRESH_S} -and (Get-Process -Id ([int]$s0.pid) -ErrorAction SilentlyContinue)) { $live = $s0 }
+    $age = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $sj -ErrorAction Stop).LastWriteTimeUtc).TotalSeconds
+    if ($age -lt ${SUPERVISOR_FRESH_S} -and (Get-Process -Id ([int]$s0.pid) -ErrorAction SilentlyContinue)) { $live = $s0 } else { break }
   } catch { }
 }
 if ($live) {

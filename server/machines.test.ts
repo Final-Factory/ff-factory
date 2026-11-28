@@ -1922,6 +1922,27 @@ test('w5515: a Mac agent reporting an account the portal never handed it keeps t
   assert.equal(s.info.account, undefined, 'the forged account is not taken');
 });
 
+test('machine: a self_reboot message lands on the machine, sanitized, and its eligibility and reboots are logged once (w6792)', async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  daemon();
+  await until('online', () => mm.isOnline('mx') && !!store.machines.get('mx')?.info);
+  const lines: string[] = [];
+  t.mock.method(console, 'log', (l: string) => lines.push(String(l)));
+  const send = (selfReboot: unknown) => (mm as unknown as { onMessage(id: string, msg: unknown): void }).onMessage('mx', { type: 'self_reboot', selfReboot });
+  const at = '2026-11-28T15:00:00.000Z';
+  send({ mode: 'warn', eligible: true, why: 'automatic logon to rydin', command: 'shutdown /r' });
+  assert.deepEqual(store.machines.get('mx')!.selfReboot, { mode: 'warn', eligible: true, why: 'automatic logon to rydin' });
+  send({ mode: 'warn', eligible: true, why: 'automatic logon to rydin', last: { at, mode: 'warn', why: 'the daemon was stuck 15 min' } });
+  send({ mode: 'warn', eligible: true, why: 'automatic logon to rydin', last: { at, mode: 'warn', why: 'the daemon was stuck 15 min' } });
+  send({ why: 'no mode' });
+  assert.equal(store.machines.get('mx')!.selfReboot?.last?.at, at, 'a message that is not one changes nothing');
+  assert.deepEqual(lines.filter((l) => l.includes('self-reboot') || l.includes('rebooted itself')), [
+    'machine mx: self-reboot: eligible (warn only): automatic logon to rydin',
+    `machine mx: would have rebooted itself at ${at} (warn only): the daemon was stuck 15 min`,
+  ]);
+});
+
 test('machine: the offline backstop (w6784) warns, then enforced restarts, a daemon the redeploy leaves alone (a worker root install) once it has been offline 10 min while ssh answers, at most every 30 min', async (t) => {
   const { mm, daemon, cleanup } = await setup();
   t.after(cleanup);

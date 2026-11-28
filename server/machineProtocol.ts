@@ -11,6 +11,7 @@ import type { SessionOwner } from './resumable.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import type { GhLogin } from '../shared/ghLogin.ts';
 import type { SteamClient } from '../shared/steam.ts';
+import type { SelfRebootInfo } from '../shared/selfReboot.ts';
 import type { DesktopSession } from '../shared/desktop.ts';
 import type { GhAppToken } from '../shared/githubAppRoute.ts';
 import type { TimedRunOrder, TimedRunReport } from '../shared/timedRun.ts';
@@ -44,6 +45,8 @@ import type { AttachmentRef, BenchLock, FfuSlotsReport, BenchPriority, BenchQueu
  * `save_result`, which an older portal never asks for and drops.
  * Also (w1463, no bump): `gh_login`, the machine's gh account and scope names, which an older portal drops.
  * Also (w2459, no bump): `steam_client`, the machine's Steam client and signed-in account, which an older portal drops.
+ * Also (w6792, no bump): `self_reboot`, whether the machine may reboot itself when its daemon stays stuck and when it last
+ * did (or would have), which an older portal drops.
  * Also (w1519, no bump): `ghApp` in the hello and `gh_app_tokens`, GitHub App installation tokens, sent only to a daemon that
  * offered it.
  * Also (w1596, no bump): `selfUpdate` in the hello, and `self_update` and `daemon_control`, sent only to a daemon that offered
@@ -579,6 +582,12 @@ export type FromDaemon =
    * them (every 2 minutes) and after each hello. An older portal drops it; an older daemon sends no desktop.
    */
   | { type: 'steam_client'; steam: SteamClient; desktop?: DesktopSession }
+  /**
+   * Whether this machine reboots itself when its daemon stays stuck (w6792, shared/selfReboot.ts): eligible and why, the mode,
+   * a stuck episode going on, the guard holding it, and the last reboot (or, warn only, the one it would have done). What the
+   * supervisor wrote (Windows), or why not (macOS, Linux); when it changes (read every 30 s) and after each hello.
+   */
+  | { type: 'self_reboot'; selfReboot: SelfRebootInfo }
   /** A live view's state when it changes (w1398): live, holding (detail says why), stopped. An older portal drops it. */
   | { type: 'live_state'; liveId: string; state: 'starting' | 'live' | 'holding' | 'stopped'; detail: string; frames: number }
   /** A live view set up again from its recipe (w1839): whether it worked, why not, how long, and how long each leg took (ms). An older portal drops it. */
