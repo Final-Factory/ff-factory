@@ -532,6 +532,30 @@ test('w5573: a repository-set url.insteadOf refuses the daemon’s push and fetc
   }
 });
 
+test('w6650: remote add with its fetch is refused in every checkout, in any spelling; a plain remote add passes', () => {
+  for (const a of [
+    ['remote', 'add', '-f', 'c', 'u'],
+    ['remote', 'add', '--f', 'c', 'u'],
+    ['remote', 'add', '--fe', 'c', 'u'],
+    ['remote', 'add', '--fetch', 'c', 'u'],
+    ['remote', 'add', '-ftmaster', 'c', 'u'],
+    ['remote', 'add', '-tmaster', '-f', 'c', 'u'],
+    ['remote', 'add', 'c', 'u', '-f'],
+    ['-C', 'd', 'remote', 'add', '--tags', '-f', 'c', 'u'],
+  ])
+    assert.match(refusal(a, []) ?? '', /refused by FF Factory \(w6650\)/, a.join(' '));
+  for (const a of [
+    ['remote', 'add', 'origin', 'u'],
+    ['remote', 'add', '-tf', 'c', 'u'],
+    ['remote', 'add', '-mf', 'c', 'u'],
+    ['remote', 'add', '--no-fetch', 'c', 'u'],
+    ['remote', 'add', '--tags', 'c', 'u'],
+    ['remote', 'add', 'c', '--', '-f'],
+    ['remote', 'set-url', 'c', '-f'],
+  ])
+    assert.equal(refusal(a, []), undefined, a.join(' '));
+});
+
 test('w6632: only a scan that read the whole config passes; a cut-short scan refuses', () => {
   assert.equal(scanCut(0, '', 'local\0x\ny\0'), undefined);
   assert.equal(scanCut(1, '', ''), undefined, 'no such key');
@@ -664,6 +688,48 @@ test('w6570: a repository-set protocol.ext.allow runs an ext:: command on plain 
     assert.notEqual(r.code, 0);
     assert.match(r.stderr, /transport 'ext' not allowed/);
     assert.equal(f.ran(), '', 'the fence ran no ext:: command');
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('w6650: an uploadpack that an includeIf switches on only after remote add writes the URL runs on plain git, never through the fence', { skip }, async () => {
+  const f = fixture();
+  try {
+    const { main } = worktree(f);
+    const c2 = path.join(f.root, 'c2.git');
+    git(f.root, 'clone', '-q', '--bare', '--no-local', slash(main), c2);
+    const pack = slash(path.join(f.root, 'pack.sh'));
+    fs.writeFileSync(pack, `#!/bin/sh\necho "pack $*" >> '${f.marker}'\nexit 1\n`, { mode: 0o755 });
+    const plant = slash(path.join(f.root, 'plant.cfg'));
+    fs.writeFileSync(plant, `[remote "c"]\n\tuploadpack = ${pack}\n`);
+    fs.appendFileSync(path.join(main, '.git', 'config'), `[includeIf "hasconfig:remote.*.url:**/c2.git"]\n\tpath = ${plant}\n`);
+    // Control (w6649's repro): plain git's remote add -f runs the plant, which the scan before the call cannot see.
+    assert.equal(gitFenceSync(['remote', 'add', 'c', slash(c2)], { cwd: main }).args.some((a) => /refused/.test(a)), false, 'nothing to see before');
+    spawnSync('git', ['-C', main, 'remote', 'add', '-f', 'c', slash(c2)], { encoding: 'utf8', timeout: 30_000 });
+    assert.match(f.ran(), /pack /, 'plain git remote add -f ran the planted uploadpack');
+    git(main, 'remote', 'remove', 'c');
+    fs.rmSync(f.marker, { force: true });
+
+    for (const o of ['-f', '--fetch', '-ftmaster']) {
+      const a = ['remote', 'add', o, 'c', slash(c2)];
+      const sync = gitSpawnSync(a, { cwd: main, encoding: 'utf8', timeout: 30_000 });
+      const proc = await run('git', ['-C', main, ...a]);
+      const off = await gitOffThread(a, { cwd: main, timeoutMs: 30_000 });
+      for (const [name, code, err] of [['gitSpawnSync', sync.status, sync.stderr], ['run', proc.code, proc.stderr], ['gitOffThread', off.code, off.stderr]] as const) {
+        assert.notEqual(code, 0, `${name} ${o}`);
+        assert.match(String(err), /refused-by-FF-Factory-\(w6650\)/, `${name} ${o}: ${err}`);
+      }
+      assert.ok(gitFenceSync(a, { cwd: main }).args.some((x) => /refused-by-FF-Factory-\(w6650\)/.test(x)), `gitFenceSync ${o}`);
+    }
+    assert.equal(f.ran(), '', 'no planted program ran');
+    assert.equal(spawnSync('git', ['-C', main, 'remote'], { encoding: 'utf8' }).stdout.split(/\r?\n/).includes('c'), false, 'no remote was added');
+    // The same work in two steps, each scanned: the plain remote add passes, and the fetch then sees the plant and is refused.
+    const add = gitSpawnSync(['remote', 'add', 'c', slash(c2)], { cwd: main, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(add.status, 0, add.stderr);
+    const fetch = gitSpawnSync(['fetch', '--all'], { cwd: main, encoding: 'utf8', timeout: 30_000 });
+    assert.match(String(fetch.stderr), /w6570/);
+    assert.equal(f.ran(), '', 'no planted program ran on the two-step route');
   } finally {
     fs.rmSync(f.root, { recursive: true, force: true });
   }

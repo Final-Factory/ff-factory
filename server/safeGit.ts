@@ -162,6 +162,27 @@ function shortMultiple(a: string): boolean {
   return false;
 }
 
+/**
+ * Whether `remote <rest>` is `remote add` with its fetch (w6650): `-f`, any prefix of `--fetch` from `--f`, or `f` in a cluster
+ * of short options (`-ftmaster`). In a cluster, the letters after `-t` or `-m` are that option's value (`-tf` tracks a branch
+ * named f). git's options may come after the name and URL, so every argument before `--` counts.
+ */
+function remoteAddFetches(rest: string[]): boolean {
+  if (rest[0] !== 'add') return false;
+  for (const a of rest.slice(1)) {
+    if (a === '--') return false;
+    if (a.startsWith('--')) {
+      if (isOpt(a, '--fetch')) return true;
+    } else if (/^-./.test(a)) {
+      for (const c of a.slice(1)) {
+        if (c === 'f') return true;
+        if (c === 't' || c === 'm') break;
+      }
+    }
+  }
+  return false;
+}
+
 /** The remote (or group) a fetch or pull names, or undefined when it names none. */
 function remoteArg(rest: string[]): string | undefined {
   for (let i = 0; i < rest.length; i++) {
@@ -211,7 +232,7 @@ export function uploadReach(args: string[], rows: { key: string; value: string }
   if (name === 'remote') {
     if (/^(show|prune|update)$/.test(verb)) return 'uncovered';
     if (verb === 'set-head' && rest.some((a) => a === '-a' || isOpt(a, '--auto'))) return 'uncovered';
-    if (verb === 'add' && rest.some((a) => a === '-f' || isOpt(a, '--fetch'))) return 'uncovered';
+    if (remoteAddFetches(rest)) return 'uncovered';
   }
   if (name === 'lfs' && /^(fetch|pull|push|pre-push|prune)$/.test(verb)) return 'uncovered';
   return 'none';
@@ -261,6 +282,13 @@ const NETWORK = new Set(['fetch', 'pull', 'push', 'clone', 'ls-remote', 'remote'
  * through one is not made at all.
  */
 export function refusal(args: string[], rows: { scope: string; key: string; value: string }[]): string | undefined {
+  const { sub } = splitGlobal(args);
+  // w6650: `remote add --fetch` writes the URL, then fetches; config that switches on only once that URL is there
+  // (`includeIf "hasconfig:remote.*.url:..."` holding an uploadpack or an insteadOf) is not in the scan made before the call,
+  // and the child fetch ran a planted uploadpack (measured by w6649's review on git 2.56.1). Refused in every checkout: no
+  // FF Factory caller passes it, and adding the remote, then fetching it, is the same work with each step scanned.
+  if (args[sub] === 'remote' && remoteAddFetches(args.slice(sub + 1)))
+    return "refused by FF Factory (w6650): `git remote add` with --fetch fetches the new remote after writing its URL, past the fence's scan of the config (an includeIf on that URL switches on only then); run `git remote add` without -f, then `git fetch <name>`";
   const bad = rows.find((r) => !TRUSTED_SCOPES.has(r.scope) && isUrlRewrite(r.key));
   if (!bad || !NETWORK.has(args[splitGlobal(args).sub] ?? '')) return firstWinsRefusal(args, rows);
   return `refused by FF Factory (w5573): the repository's own config sets ${bad.key}, which could send this call to another remote; ${unsetHint(bad)}`;
