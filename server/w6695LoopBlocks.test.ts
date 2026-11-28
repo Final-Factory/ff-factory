@@ -228,3 +228,28 @@ test("w6695: the Unity slots arbiter's look writes arbiter.json off the loop, wh
   assert.deepEqual(names.filter((n) => n.endsWith('.tmp')), [], 'no temporary file is left');
   assert.ok((JSON.parse(fs.readFileSync(path.join(dir, 'arbiter.json'), 'utf8')) as { pid?: number }).pid === process.pid);
 });
+
+test("w6695: a twin arbiter's arbiter.json written while the look writes its own is seen before it is replaced", async (t) => {
+  const dir = tmp(t, 'twin');
+  const events: string[] = [];
+  const slots = new UnitySlots({ dir, platform: 'win32', procs: async () => [], alive: () => true, now: () => Date.now(), limit: () => 1, places: () => [], ramPct: () => undefined, onEvent: (e) => void events.push(e) });
+  t.after(() => slots.close());
+  await slots.tick();
+  const rogue = new UnitySlots({ dir, platform: 'win32', procs: async () => [], alive: () => true, now: () => Date.now(), limit: () => undefined, places: () => [], ramPct: () => undefined, machine: 'mx' });
+  t.after(() => rogue.close());
+  // The rogue's look lands while this arbiter's arbiter.json is being written (a slow disk: 14.7 s on BEAST).
+  const real = fs.promises.writeFile;
+  let once = false;
+  fs.promises.writeFile = (async (...a: Parameters<typeof real>) => {
+    if (!once && /arbiter\.json\..*\.tmp$/.test(String(a[0]))) {
+      once = true;
+      fs.promises.writeFile = real;
+      await rogue.tick();
+    }
+    return real(...a);
+  }) as typeof real;
+  t.after(() => void (fs.promises.writeFile = real));
+  await slots.tick();
+  assert.equal(once, true);
+  assert.equal(events.filter((e) => e.startsWith('another process')).length, 1, "the twin's file was replaced unseen");
+});

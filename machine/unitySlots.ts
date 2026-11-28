@@ -752,7 +752,7 @@ function writeAtomic(file: string, data: string) {
  * writeAtomic off the loop (w6695): the same file, written whole the same way. In the arbiter's look one write held BEAST's
  * daemon 14.7 s (2026-11-28 04:28Z, a busy disk).
  */
-async function writeAtomicAsync(file: string, data: string) {
+async function writeAtomicAsync(file: string, data: string, beforeRename?: () => boolean): Promise<boolean> {
   const tmp = `${file}.${process.pid}.${randomBytes(3).toString('hex')}.tmp`;
   try {
     await fs.promises.writeFile(tmp, data);
@@ -760,10 +760,16 @@ async function writeAtomicAsync(file: string, data: string) {
     await fs.promises.rm(tmp, { force: true }).catch(() => undefined);
     throw e;
   }
+  // Last before the rename, on the loop: what reads the file it replaces (the arbiter's look reads another arbiter's
+  // arbiter.json here, so nothing it writes meanwhile is overwritten unseen). False: the file is left as it is.
+  if (beforeRename && !beforeRename()) {
+    await fs.promises.rm(tmp, { force: true }).catch(() => undefined);
+    return false;
+  }
   for (let i = 0; ; i++) {
     try {
       await fs.promises.rename(tmp, file);
-      return;
+      return true;
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
       if (i >= 20 || !(code === 'EPERM' || code === 'EBUSY' || code === 'EACCES')) {
@@ -988,26 +994,34 @@ export class UnitySlots {
     this.last = { a, reqs, ramPct, ramWords, at: now };
     this.notices(a, now);
     // Another live arbiter on this mailbox (a second daemon on the same home folder, a test's daemon) grants past the
-    // limit: the orchestrator hears of it once per arbiter, so it can be stopped.
-    const cur = readJson<ArbiterFile>(arbiterFile(this.d.dir));
-    const other = !!cur?.instance && cur.instance !== this.instance && now - Date.parse(cur.at) <= ARBITER_FRESH_MS && this.d.alive(cur.pid);
-    if (other && this.d.onNewerTwin && this.d.machine && cur!.machine === this.d.machine && cur!.startedAt && Date.parse(cur!.startedAt) > this.started) {
-      // The same machine's newer daemon (an update started it beside this one): it keeps the mailbox, this one ends.
-      if (!this.yielded) {
-        this.yielded = true;
-        this.d.onNewerTwin(cur!.pid);
+    // limit: the orchestrator hears of it once per arbiter, so it can be stopped. Read just before this look's own
+    // arbiter.json replaces it (w6695: the write is awaited, and one read before it missed a twin written meanwhile).
+    let checked = false;
+    const twin = (): boolean => {
+      checked = true;
+      const cur = readJson<ArbiterFile>(arbiterFile(this.d.dir));
+      const other = !!cur?.instance && cur.instance !== this.instance && now - Date.parse(cur.at) <= ARBITER_FRESH_MS && this.d.alive(cur.pid);
+      if (other && this.d.onNewerTwin && this.d.machine && cur!.machine === this.d.machine && cur!.startedAt && Date.parse(cur!.startedAt) > this.started) {
+        // The same machine's newer daemon (an update started it beside this one): it keeps the mailbox, this one ends.
+        if (!this.yielded) {
+          this.yielded = true;
+          this.d.onNewerTwin(cur!.pid);
+        }
+        return false;
       }
-      return a;
-    }
-    if (other && !this.foreign.has(cur!.instance!)) {
-      this.foreign.add(cur!.instance!);
-      this.d.onEvent?.(`another process (pid ${cur!.pid}${cur!.machine ? `, machine "${cur!.machine}"` : ''}${cur!.startedAt ? `, started ${cur!.startedAt}` : ''}) is answering this machine's Unity slots mailbox ${this.d.dir} too, so launches may be granted past the limit. Stop it: a second daemon on the same home folder, or a test's daemon left running.`);
-    }
+      if (other && !this.foreign.has(cur!.instance!)) {
+        this.foreign.add(cur!.instance!);
+        this.d.onEvent?.(`another process (pid ${cur!.pid}${cur!.machine ? `, machine "${cur!.machine}"` : ''}${cur!.startedAt ? `, started ${cur!.startedAt}` : ''}) is answering this machine's Unity slots mailbox ${this.d.dir} too, so launches may be granted past the limit. Stop it: a second daemon on the same home folder, or a test's daemon left running.`);
+      }
+      return true;
+    };
     try {
-      await writeAtomicAsync(arbiterFile(this.d.dir), JSON.stringify(this.arbiterFile(), null, 1));
+      await writeAtomicAsync(arbiterFile(this.d.dir), JSON.stringify(this.arbiterFile(), null, 1), twin);
     } catch (e) {
       // The next look writes it again; clients count it as gone only after a minute without one.
       this.d.log?.(`unity slots: could not write ${arbiterFile(this.d.dir)}: ${(e as Error).message}`);
+      // A failed temporary write never reached the twin check: it runs on its own then, as before.
+      if (!checked) twin();
     }
     return a;
   }
