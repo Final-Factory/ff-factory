@@ -109,6 +109,13 @@ export interface BlockerWatchDeps {
   room?: () => string[];
   /** Room for each kind of work and the held computers (w1089, w1098); preferred over `room`. */
   roomFacts?: () => RoomNow;
+  /**
+   * w6769: runs `fn`, the look's last synchronous steps (the exclusion audit, the pair cut, the room and its flag), with places()
+   * and each machine's claims worked out once (Agents.placementRead); placementChanged empties both after a step changed the
+   * ledger. Each step read places afresh: 5 places a look, 0.7-5.0 s blocks (169 s of 653 s blocked, 05-12Z on 2026-11-28).
+   */
+  placementOnce?: <T>(fn: () => T) => T;
+  placementChanged?: () => void;
   /** w6235: clear the pre-w5297 mark of queued pair runs whose commit reads FF_GAME_DATA_DIR (Agents.recheckLegacyPairs). */
   legacyPairs?: () => Promise<string[]>;
   now?: () => number;
@@ -437,18 +444,34 @@ export class BlockerWatch {
       for (const id of this.d.orchestrators.timedLegBound?.() ?? []) did.set(id, 'timed leg: started, pre-empted or re-queued (w2055)');
       // A Steam pair run on a fleet short of computers signed in to Steam (w2459): Blocked on that, not Queued.
       for (const id of this.d.orchestrators.holdSteamPairs?.() ?? []) did.set(id, 'blocked: too few computers signed in to Steam for its pair run (w2459)');
-      // w6687 stage 1: machine exclusions that cite no live hold, config rule, capability or person's words are logged, not dropped.
-      // Its own catch (w6697 review): a throw in the audit must not skip the pair cut and the room flag below.
-      try {
-        for (const id of this.d.orchestrators.auditExclusions?.() ?? []) did.set(id, 'a machine exclusion that cites no live reason: logged, or dropped under config placement.exclusions enforce (w6687, w6754)');
-      } catch (e) {
-        console.warn(`blocker watch: exclusion audit (w6687): ${(e as Error).message}`);
-      }
-      // w4618: a Queued pair run that one computer runs (no reason to need computers at once) is cut to one leg, once.
-      for (const id of this.d.orchestrators.cutDefaultPairs?.() ?? []) did.set(id, 'cut to one leg: a pair run with no reason to need computers at once (w4618)');
-      // Queued with room (w643): the same room test the page and decide_work queue read, for game work and for agent-slot work (w1098).
-      const room: RoomNow | undefined = this.d.roomFacts?.() ?? (this.d.room ? { game: this.d.room(), agent: [], held: [] } : undefined);
-      if (room && (room.game.length || room.agent.length || room.reserved?.length)) for (const id of this.d.orchestrators.flagQueuedWithRoom(room)) did.set(id, 'flagged: queued while a computer has room');
+      // w6769: the steps below read places() and the claims once between them, again only after one saved or dropped a
+      // request (Store.workRev) or said it changed one. Nothing below awaits.
+      const tail = () => {
+        let rev = this.d.store.workRev;
+        const after = (ids: readonly unknown[]) => {
+          if (ids.length || this.d.store.workRev !== rev) this.d.placementChanged?.();
+          rev = this.d.store.workRev;
+        };
+        // w6687 stage 1: machine exclusions that cite no live hold, config rule, capability or person's words are logged, not dropped.
+        // Its own catch (w6697 review): a throw in the audit must not skip the pair cut and the room flag below.
+        let audited: string[] = [];
+        try {
+          audited = this.d.orchestrators.auditExclusions?.() ?? [];
+          for (const id of audited) did.set(id, 'a machine exclusion that cites no live reason: logged, or dropped under config placement.exclusions enforce (w6687, w6754)');
+        } catch (e) {
+          console.warn(`blocker watch: exclusion audit (w6687): ${(e as Error).message}`);
+        }
+        after(audited);
+        // w4618: a Queued pair run that one computer runs (no reason to need computers at once) is cut to one leg, once.
+        const cut = this.d.orchestrators.cutDefaultPairs?.() ?? [];
+        for (const id of cut) did.set(id, 'cut to one leg: a pair run with no reason to need computers at once (w4618)');
+        after(cut);
+        // Queued with room (w643): the same room test the page and decide_work queue read, for game work and for agent-slot work (w1098).
+        const room: RoomNow | undefined = this.d.roomFacts?.() ?? (this.d.room ? { game: this.d.room(), agent: [], held: [] } : undefined);
+        if (room && (room.game.length || room.agent.length || room.reserved?.length)) for (const id of this.d.orchestrators.flagQueuedWithRoom(room)) did.set(id, 'flagged: queued while a computer has room');
+      };
+      if (this.d.placementOnce) this.d.placementOnce(tail);
+      else tail();
     } catch (e) {
       console.warn(`blocker watch: ${(e as Error).message}`);
     } finally {

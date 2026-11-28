@@ -6885,6 +6885,11 @@ A report is for a person who asked for one, and people want very few. File one w
     return this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(fn));
   }
 
+  /** w6769: within placementRead, the next places() and claims compute afresh (a step of the blocker watch changed the ledger). */
+  placementReadChanged(): void {
+    this.placementChanged();
+  }
+
   /** " (spoken for: …)" when a released worker is being placed again there or its resume waits for it (w640), else "". */
   private claimLine(machineId: string, sandbox: string): string {
     const by = this.placeAgain.claimedBy(machineId, sandbox);

@@ -256,6 +256,47 @@ if (DRAIN_ROUNDS > 0) {
   }
   process.exit(0);
 }
+// w6769: the release pass (PlaceAgain.tick) and the blocker watch's look (BlockerWatch.tick), the portal's two largest causes of
+// blocks on 2026-11-28 (267 s and 169 s of 653 s blocked from 05Z to 12Z). --tickRounds K: each K times with its place{} line;
+// --callers 1 also counts where each placesNow was asked from.
+const TICK_ROUNDS = arg('tickRounds', 0);
+if (TICK_ROUNDS > 0) {
+  const { BlockerWatch } = await import('../server/blockerWatch.ts');
+  const callers = new Map<string, number>();
+  if (arg('callers', 0) > 0) {
+    const a = agents as unknown as { placesNow: () => unknown };
+    const real = a.placesNow.bind(agents);
+    a.placesNow = () => {
+      const at = (new Error().stack ?? '').split('\n').slice(2).filter((l) => !/placesNow|withClaimsMemo|places \(|withPlacesOnce/.test(l)).slice(0, 3).map((l) => l.trim().replace(/^at /, '').replace(/\(.*[\\/]/, '(')).join(' < ');
+      callers.set(at, (callers.get(at) ?? 0) + 1);
+      return real();
+    };
+  }
+  const watch = new BlockerWatch({
+    store,
+    orchestrators: agents.orchestrators,
+    room: () => agents.roomNow(),
+    roomFacts: () => agents.roomFacts(),
+    legacyPairs: () => agents.recheckLegacyPairs(),
+    ...(arg('before', 0) > 0 ? {} : { placementOnce: <T>(fn: () => T) => agents.placementRead(fn), placementChanged: () => agents.placementReadChanged() }),
+    queued: (id: string) => sm.queued().some((q) => q.id === id),
+    benchResume: () => agents.resumeBenchWaits(),
+    awayMove: () => agents.moveAwayWork(),
+  } as unknown as ConstructorParameters<typeof BlockerWatch>[0]);
+  const line = async (label: string, fn: () => unknown) => {
+    for (let r = 0; r < TICK_ROUNDS; r++) {
+      const marks = [costMark(agents.placeCost.free), costMark(agents.placeCost.places), costMark(agents.placeAgain.claimsCost)] as const;
+      const t0 = performance.now();
+      await fn();
+      const place = `${costSince('places', agents.placeCost.places, marks[1])}${costSince('free', agents.placeCost.free, marks[0])}${costSince('claims', agents.placeAgain.claimsCost, marks[2])}`.trim();
+      console.log(`${label}, run ${r + 1}: ${(performance.now() - t0).toFixed(1)} ms  place{${place}}`);
+    }
+  };
+  await line('release pass (placeAgain.tick)', () => agents.placeAgain.tick());
+  await line('blocker watch (BlockerWatch.tick)', () => watch.tick());
+  for (const [at, n] of [...callers].sort((x, y) => y[1] - x[1])) console.log(`placesNow x${n}: ${at}`);
+  process.exit(0);
+}
 // --placeRounds K: only the page placement, K times, for a CPU profile (node --cpu-prof) that is mostly placement.
 if (PLACE_ROUNDS > 0) {
   for (let r = 0; r < PLACE_ROUNDS; r++) agents.pageRead(pagePlacement);

@@ -1108,6 +1108,9 @@ const blockerWatch = new BlockerWatch({
   nightlyAt: () => nightlyAt,
   room: () => agents.roomNow(),
   roomFacts: () => agents.roomFacts(),
+  // w6769: the look's last synchronous steps read places() and the claims once between them.
+  placementOnce: (fn) => agents.placementRead(fn),
+  placementChanged: () => agents.placementReadChanged(),
   legacyPairs: () => agents.recheckLegacyPairs(),
   // w2079: a worker whose work a resume's move is carrying away is not lost: the sweep leaves it be.
   queued: (id) => sessions.queued().some((q) => q.id === id) || agents.isMoving(id),

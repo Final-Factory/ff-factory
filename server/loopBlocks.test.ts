@@ -411,3 +411,47 @@ test('w6513: within a drain pass each machine\'s mid-turn counts are the same as
   });
   assert.equal(sessions.sessions.get(a.id)!.info.machineId, 'pc');
 });
+
+test('w6769: the blocker watch\'s last steps read places once between them, and flag, cut and log the same as each reading afresh', async (t) => {
+  const { BlockerWatch } = await import('./blockerWatch.ts');
+  const { costMark, costSince } = await import('./placeCost.ts');
+  const run = async (once: boolean) => {
+    const env = await setupOnMachine(t, {}, { sandboxes: ['alpha', 'beta', 'gamma'] });
+    const { agents, store } = env;
+    const o = agents.orchestrators;
+    const T = '2026-09-28T09:00:00.000Z';
+    // Two Queued game requests beside room (flagged), and a Queued pair run of two legs naming no reason (cut to one).
+    putRequests(store, [
+      { id: 'w1', status: 'queued', queuedFor: { at: T } },
+      { id: 'w2', status: 'queued', queuedFor: { at: T }, priority: 'high' },
+      { id: 'w3', status: 'queued', queuedFor: { at: T }, pair: { legs: 2 } as never },
+    ]);
+    // Past the queue's grace, and the room first seen 10 minutes before the look (ROOM_STAND_MS is 5).
+    let at = Date.now();
+    (o as unknown as { now: () => Date }).now = () => new Date(at);
+    agents.roomFacts();
+    at += 10 * 60_000;
+    const watch = new BlockerWatch({
+      store,
+      orchestrators: o,
+      roomFacts: () => agents.roomFacts(),
+      ...(once ? { placementOnce: <T>(fn: () => T) => agents.placementRead(fn), placementChanged: () => agents.placementReadChanged() } : {}),
+    } as unknown as ConstructorParameters<typeof BlockerWatch>[0]);
+    const mark = costMark(agents.placeCost.places);
+    const did = await watch.tick();
+    const places = Number(/x(\d+)/.exec(costSince('places', agents.placeCost.places, mark))?.[1] ?? 0);
+    const logs = ['w1', 'w2', 'w3'].map((id) => store.work.get(id)!.log.map((l) => l.replace(/^\S+ /, '')).join('\n'));
+    return { did: [...did].sort(), places, logs, pair: store.work.get('w3')!.pair };
+  };
+  const afresh = await run(false);
+  const once = await run(true);
+  assert.deepEqual(once.did, afresh.did);
+  assert.deepEqual(once.logs, afresh.logs);
+  assert.deepEqual(once.pair, afresh.pair);
+  // The pair cut changed the ledger between the steps (the room flag after it read places again), and all three are flagged.
+  assert.equal(afresh.pair?.legs, 1);
+  assert.match(afresh.logs[2], /cut to one leg/);
+  assert.deepEqual(afresh.did.map(([id]) => id), ['w1', 'w2', 'w3']);
+  assert.ok(afresh.did.some(([id, why]) => id === 'w1' && /flagged/.test(why)), JSON.stringify(afresh.did));
+  assert.ok(once.places < afresh.places, `places read ${once.places} times in one pass, ${afresh.places} afresh`);
+});
