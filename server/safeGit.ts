@@ -28,7 +28,8 @@
  *   so no override by value works (w6570). fetch, pull and ls-remote get `--upload-pack=`, push `--receive-pack=`
  *   (firstWinsArgs); the calls that option cannot cover are refused (firstWinsRefusal).
  * - SUBMODULES: a call that recurses into submodules runs each submodule's own config, which the scan never reads (w6630,
- *   SUBMODULE_GIT_CONFIG); the fence warns on such calls until it enforces (submoduleWarning).
+ *   SUBMODULE_GIT_CONFIG: forcing it stops some routes, not all); the fence warns on such calls, and on any call in a
+ *   repository that shows signs of submodules, until it enforces (submoduleWarning).
  * - `diff`, `log`, `show` and `whatchanged` also get `--no-ext-diff --no-textconv`: `diff.external` cannot be overridden
  *   by value (an empty one makes every `git diff` fail, measured by w5514 on git 2.50.1), and the flags need no scan.
  *
@@ -48,6 +49,7 @@ import {
   type SpawnOptions,
   type SpawnSyncOptions,
 } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { runOffThread } from './hostProbe.ts';
 import { execFileOffThread, type ThreadExecOptions } from './spawnThread.ts';
@@ -83,7 +85,7 @@ export const FIXED_GIT_CONFIG: [string, string][] = [
 
 /** Keys a repository may name a program in, read per call (canonical names: section and key lower case). */
 export const SCANNED_KEYS =
-  '^(filter\\..+\\.(clean|smudge|process)|merge\\..+\\.driver|diff\\..+\\.(command|textconv)|hook\\..+\\.command|remote\\..+\\.(uploadpack|receivepack|vcs)|submodule\\..+\\.(update|url|active)|submodule\\.active|lfs\\.customtransfer\\..+\\.path|lfs\\.extension\\..+\\.(clean|smudge)|lfs\\.standalonetransferagent|core\\.(sshcommand|askpass|gitproxy)|gpg\\.(.+\\.)?program|credential\\.(.+\\.)?helper|url\\..+\\.(insteadof|pushinsteadof)|protocol\\..+\\.allow|remotes\\..+|fetch\\.all)$';
+  '^(filter\\..+\\.(clean|smudge|process)|merge\\..+\\.driver|diff\\..+\\.(command|textconv)|hook\\..+\\.command|remote\\..+\\.(uploadpack|receivepack|vcs)|submodule\\..+\\.(update|url|active)|submodule\\.active|diff\\.submodule|lfs\\.customtransfer\\..+\\.path|lfs\\.extension\\..+\\.(clean|smudge)|lfs\\.standalonetransferagent|core\\.(sshcommand|askpass|gitproxy)|gpg\\.(.+\\.)?program|credential\\.(.+\\.)?helper|url\\..+\\.(insteadof|pushinsteadof)|protocol\\..+\\.allow|remotes\\..+|fetch\\.all)$';
 
 /** Scopes no worker writes: the user's and system's config, the caller's own command line (`unknown` is Apple git's Xcode config). */
 const TRUSTED_SCOPES = new Set(['system', 'global', 'command', 'unknown']);
@@ -145,9 +147,12 @@ export function firstWinsArgs(args: string[], rows: { scope: string; key: string
  * Keys scanned only to read, never overridden (w6570 review): a remote group (`remotes.<group>`) and `fetch.all` make a fetch
  * or pull start one child `git fetch` per remote, and the injected `--upload-pack=` never reaches those children.
  */
-const isReadOnly = (key: string) => /^remotes\..+$/.test(key) || key === 'fetch.all' || isSubmoduleMark(key);
+const isReadOnly = (key: string) => /^remotes\..+$/.test(key) || key === 'fetch.all' || isSubmoduleMark(key) || key === 'diff.submodule';
 
-/** Keys a repository with initialized submodules has in its own config (w6630): scanned only to see that it has some. */
+/**
+ * Keys a repository with initialized submodules has in its own config (w6630): scanned only to see that it has some. Not a
+ * reliable sign alone: a populated submodule whose keys were removed still recurses (w6648), so submoduleSign also looks on disk.
+ */
 const isSubmoduleMark = (key: string) => /^submodule\..+\.(url|active)$/.test(key) || key === 'submodule.active';
 
 /**
@@ -158,10 +163,19 @@ const isSubmoduleMark = (key: string) => /^submodule\..+\.(url|active)$/.test(ke
  * fence on a plain `git fetch origin` (fetch.recurseSubmodules=on-demand is git's default), `pull --recurse-submodules`,
  * `submodule update --remote`, `diff --submodule=diff` and `status` (measured, git 2.56.1.windows.1). Scanning submodule
  * configs was not taken: a submodule's `.git` file can point at any folder, and a linked worktree keeps its own `modules/`.
- * With SUBMODULE_GIT_CONFIG forced none of those ran on fetch, status or diff (measured); a call that recurses by its own
- * option or is `git submodule` still ran them, so the enforcing step refuses it (submoduleRecursion). No Final-Factory
- * repository has submodules. Warn-only first (lothsahn's lockout rule): the enforcing step changes what `git status` reports
- * in a repository that has them (a submodule's uncommitted edits stop showing), and the clean-up reads that status.
+ *
+ * SUBMODULE_GIT_CONFIG is what the enforcing step forces on every scanned call (not only in repositories that look like they
+ * have submodules: a populated submodule whose keys were removed from the superproject's config still recursed, w6648). It
+ * stopped a default fetch and pull, `status`, a working-tree diff, `stash`, `commit -a`, and (with diff.submodule=short) a
+ * diff between commits, which otherwise runs the submodule's diff.external, smudge filter and, in a partial clone, a lazy
+ * fetch through its core.sshCommand (measured by w6648 and here). It does not stop these, which start a child git in the
+ * submodule whatever the config says (measured): an explicit `--recurse-submodules`, `--ignore-submodules=none|untracked` or
+ * `--submodule=diff|log`, `git submodule` and `submodule--helper`, a caller's own `-c` of those keys, `git rm` of a
+ * submodule (`--cached` too), and `git add -A`, `add .` or `add -u` whose pathspec covers one (`add -A -- . ':!sub'` ran
+ * nothing). The enforcing step refuses those (submoduleRecursion; add and rm in a repository with submodules). No
+ * Final-Factory repository has submodules. Warn-only first (lothsahn's lockout rule): the enforcing step changes what
+ * `git status` reports in a repository that has them (a submodule's uncommitted edits stop showing), and the clean-up reads
+ * that status.
  */
 export const SUBMODULE_GIT_CONFIG: [string, string][] = [
   ['submodule.recurse', 'false'],
@@ -169,15 +183,35 @@ export const SUBMODULE_GIT_CONFIG: [string, string][] = [
   // status and diff look inside each submodule's working tree with a child `git status`; `dirty` still reads its HEAD.
   ['diff.ignoreSubmodules', 'dirty'],
   ['status.submoduleSummary', 'false'],
+  // `diff` or `log` reads the submodule's own objects and runs its diff programs between the two commits a gitlink moved.
+  ['diff.submodule', 'short'],
 ];
 
-/** The option or subcommand by which a call recurses into submodules whatever the config says, or undefined (w6630). */
+/** Config keys that make git recurse into submodules, and the values that do (a caller's `-c` beats the forced value). */
+const SUBMODULE_KEYS: [RegExp, RegExp][] = [
+  [/^(submodule\.recurse|fetch\.recursesubmodules|submodule\..+\.fetchrecursesubmodules|status\.submodulesummary)$/, /^(?!(no|false|off|0)$)/],
+  [/^(diff\.ignoresubmodules|submodule\..+\.ignore)$/, /^(none|untracked)$/],
+  [/^diff\.submodule$/, /^(?!short$)/],
+];
+/** Subcommands whose `--submodule...` option is not diff's (`fetch --submodule-prefix`). */
+const OTHER_SUBMODULE_OPT = new Set(['fetch', 'pull', 'clone']);
+
+/** The option, setting or subcommand by which a call recurses into submodules whatever the config says, or undefined (w6630). */
 export function submoduleRecursion(args: string[]): string | undefined {
   const { sub } = splitGlobal(args);
   const name = args[sub] ?? '';
   // A clone's submodules are new repositories whose config git writes itself.
   if (name === 'clone') return undefined;
-  if (name === 'submodule') return '`git submodule`';
+  for (let i = 0; i < sub; i++) {
+    const a = args[i];
+    const pair = a === '-c' || a === '--config-env' ? args[i + 1] ?? '' : a.startsWith('--config-env=') ? a.slice(13) : a.startsWith('-c') ? a.slice(2) : '';
+    const eq = pair.indexOf('=');
+    const key = (eq < 0 ? pair : pair.slice(0, eq)).toLowerCase();
+    // --config-env names an environment variable, not the value: any of the keys counts.
+    const value = a.startsWith('--config-env') ? '' : eq < 0 ? 'true' : pair.slice(eq + 1).toLowerCase();
+    if (SUBMODULE_KEYS.some(([k, v]) => k.test(key) && (a.startsWith('--config-env') || v.test(value)))) return `\`${a === '-c' || a === '--config-env' ? `${a} ${pair}` : a}\``;
+  }
+  if (name === 'submodule' || name === 'submodule--helper') return `\`git ${name}\``;
   for (const a of args.slice(sub + 1)) {
     if (a === '--') break;
     const eq = a.indexOf('=');
@@ -185,24 +219,75 @@ export function submoduleRecursion(args: string[]): string | undefined {
     const value = eq < 0 ? '' : a.slice(eq + 1).toLowerCase();
     if (opt.startsWith('--rec') && isOpt(opt, '--recurse-submodules') && !/^(no|false|off|0)$/.test(value)) return `\`${a}\``;
     if (opt.startsWith('--ig') && isOpt(opt, '--ignore-submodules') && /^(none|untracked)$/.test(value)) return `\`${a}\``;
+    // `--submodule` alone is `--submodule=log`.
+    if (!OTHER_SUBMODULE_OPT.has(name) && opt.startsWith('--sub') && isOpt(opt, '--submodule') && value !== 'short') return `\`${a}\``;
   }
   return undefined;
 }
 
 /**
- * The w6630 warning for a call, or undefined: one that recurses by its own option (the enforcing step refuses it), or any call
- * in a repository with initialized submodules (the enforcing step runs it with SUBMODULE_GIT_CONFIG). Running git in the
- * submodule itself needs neither: the fence then scans that submodule's own config.
+ * What says the repository has submodules (w6630), or undefined: a submodule key in its own config, `diff.submodule=diff|log`
+ * there, a `.gitmodules` at the top of its working tree, or a `modules` folder in its git folder. Read from the files, with
+ * no git call. A best effort for the warning only: a nested clone added as a gitlink without `git submodule add` shows none of
+ * these, and the enforcing step forces SUBMODULE_GIT_CONFIG on every scanned call whatever this says.
  */
-export function submoduleWarning(args: string[], rows: { scope: string; key: string }[]): string | undefined {
+export function submoduleSign(args: string[], rows: { scope: string; key: string; value?: string }[], cwd: string | undefined, env: Env): string | undefined {
+  const mark = rows.find((r) => !TRUSTED_SCOPES.has(r.scope) && (isSubmoduleMark(r.key) || (r.key === 'diff.submodule' && /^(diff|log)$/i.test(r.value ?? ''))));
+  if (mark) return mark.key === 'diff.submodule' ? `diff.submodule=${mark.value ?? ''}` : mark.key;
+  try {
+    const { location } = splitGlobal(args);
+    let base = path.resolve(cwd ?? process.cwd());
+    let gitDir: string | undefined;
+    let top: string | undefined;
+    for (let i = 0; i < location.length; i++) {
+      const [o, v] = location[i].includes('=') ? [location[i].slice(0, location[i].indexOf('=')), location[i].slice(location[i].indexOf('=') + 1)] : [location[i], location[i + 1] ?? ''];
+      if (!location[i].includes('=') && o !== '--bare') i++;
+      if (o === '-C') base = path.resolve(base, v);
+      else if (o === '--git-dir') gitDir = path.resolve(base, v);
+      else if (o === '--work-tree') top = path.resolve(base, v);
+    }
+    if (!gitDir && env.GIT_DIR) gitDir = path.resolve(base, env.GIT_DIR);
+    if (!top && env.GIT_WORK_TREE) top = path.resolve(base, env.GIT_WORK_TREE);
+    if (!gitDir)
+      for (let d = base; ; d = path.dirname(d)) {
+        const dot = path.join(d, '.git');
+        const st = fs.statSync(dot, { throwIfNoEntry: false });
+        if (st?.isDirectory()) gitDir = dot;
+        else if (st?.isFile()) gitDir = path.resolve(d, /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dot, 'utf8'))?.[1] ?? '.git');
+        if (gitDir) {
+          top ??= d;
+          break;
+        }
+        if (path.dirname(d) === d) return undefined;
+      }
+    if (top && fs.existsSync(path.join(top, '.gitmodules'))) return '.gitmodules';
+    const common = path.join(gitDir, 'commondir');
+    const commonDir = fs.existsSync(common) ? path.resolve(gitDir, fs.readFileSync(common, 'utf8').trim()) : gitDir;
+    if (fs.statSync(path.join(commonDir, 'modules'), { throwIfNoEntry: false })?.isDirectory()) return 'a `modules` folder in its git folder';
+  } catch {
+    // An unreadable folder is no sign; the call fails or runs by itself.
+  }
+  return undefined;
+}
+
+/**
+ * The w6630 warning for a call, or undefined: one that recurses by its own option or setting (the enforcing step refuses it),
+ * `git add` or `git rm` in a repository with submodules (they check each submodule they cover with a child `git status`
+ * whatever the config says, so the enforcing step refuses them there), or any other call in such a repository (the enforcing
+ * step runs it with SUBMODULE_GIT_CONFIG, which stops the child git on the routes measured, not on every one). Running git
+ * in the submodule itself needs none of it: the fence then scans that submodule's own config.
+ */
+export function submoduleWarning(args: string[], rows: { scope: string; key: string; value?: string }[], cwd?: string, env: Env = process.env): string | undefined {
   const name = args[splitGlobal(args).sub] ?? '';
   const how = submoduleRecursion(args);
   if (how)
     return `FF Factory safeGit (w6630) warning: \`git ${name}\` recurses into submodules (${how}), where git reads each submodule's own config, which the fence does not scan; this call will be refused once the fence enforces w6630. Run git in the submodule itself instead (\`git -C <submodule> ...\`), where the fence scans its config`;
-  const mark = rows.find((r) => !TRUSTED_SCOPES.has(r.scope) && isSubmoduleMark(r.key));
-  if (mark && name !== 'clone')
-    return `FF Factory safeGit (w6630) warning: the repository has submodules (${mark.key}), and \`git ${name}\` may recurse into them, where git reads each submodule's own config, which the fence does not scan; once the fence enforces w6630 it runs with ${SUBMODULE_GIT_CONFIG.map(([k, v]) => `${k}=${v}`).join(', ')}`;
-  return undefined;
+  if (name === 'clone') return undefined;
+  const sign = submoduleSign(args, rows, cwd, env);
+  if (!sign) return undefined;
+  if (name === 'add' || name === 'rm')
+    return `FF Factory safeGit (w6630) warning: the repository looks like it has submodules (${sign}), and \`git ${name}\` starts a child git in each submodule its pathspec covers, whatever the config says, which reads that submodule's own config, unscanned; once the fence enforces w6630 this call is refused here. Leave the submodules out of the pathspec (\`':!<submodule>'\`) or run git in the submodule itself (\`git -C <submodule> ...\`)`;
+  return `FF Factory safeGit (w6630) warning: the repository looks like it has submodules (${sign}), and \`git ${name}\` may start a child git in them, which reads each submodule's own config, unscanned; once the fence enforces w6630 every call runs with ${SUBMODULE_GIT_CONFIG.map(([k, v]) => `${k}=${v}`).join(', ')}, which stops that on the routes measured, and the calls it cannot stop are refused`;
 }
 
 const warned = new Set<string>();
@@ -442,13 +527,14 @@ export function needsScan(args: string[]): boolean {
 
 /** A call that skips the scan: fixed keys, and no lazy fetch of a missing object (git 2.45.1 on). */
 function unscanned(args: string[], env: Env): { args: string[]; env: Env } {
-  const f = fenced(args, env, '');
+  const f = fenced(args, env, '', null);
   return { args: f.args, env: { ...f.env, GIT_NO_LAZY_FETCH: '1' } };
 }
 
 const scanArgs = (location: string[]) => [...location, 'config', '--show-scope', '--includes', '-z', '--get-regexp', SCANNED_KEYS];
 
-function fenced(args: string[], env: Env, scanOut: string): { args: string[]; env: Env } {
+/** `cwd` is where the call runs; a call that skips the scan passes `null` and gets no w6630 warning. */
+function fenced(args: string[], env: Env, scanOut: string, cwd: string | undefined | null): { args: string[]; env: Env } {
   const rows = parseScan(scanOut);
   const no = refusal(args, rows);
   // A refused call still runs git, with an option it rejects (exit 129, the reason in its stderr), so every caller fails the
@@ -458,7 +544,7 @@ function fenced(args: string[], env: Env, scanOut: string): { args: string[]; en
       args: [`--${no.replace(/\s+/g, '-')}`],
       env: withConfigFirst(env, FIXED_GIT_CONFIG),
     };
-  warnOnce(submoduleWarning(args, rows));
+  if (cwd !== null) warnOnce(submoduleWarning(args, rows, cwd, env));
   const out = withConfigFirst(env, [...fixedFor(args), ...scannedOverrides(rows)]);
   return {
     args: fenceArgs(firstWinsArgs(args, rows)),
@@ -499,7 +585,7 @@ export function gitFenceSync(args: string[], opts: { cwd?: string; env?: Env } =
     // Exit 1 is "no such key"; anything else (not a repository) leaves the call to fail by itself.
     out = String((e as { stdout?: string }).stdout ?? '');
   }
-  return fenced(args, env, out);
+  return fenced(args, env, out, opts.cwd);
 }
 
 /** The arguments and environment for a git call in a checkout a worker may have written. */
@@ -519,7 +605,7 @@ export function gitFence(args: string[], opts: { cwd?: string; env?: Env } = {})
         windowsHide: true,
         maxBuffer: 4 * 1024 * 1024,
       },
-      (_e, out) => resolve(fenced(args, env, String(out ?? ''))),
+      (_e, out) => resolve(fenced(args, env, String(out ?? ''), opts.cwd)),
     );
   });
 }
@@ -535,7 +621,7 @@ export async function gitOffThread(args: string[], opts: { cwd?: string; env?: E
   if (!needsScan(args)) f = unscanned(args, env);
   else {
     const scan = await runOffThread('git', scanArgs(splitGlobal(args).location), 15_000, { cwd: opts.cwd, env: scanEnv(env), maxBuffer: 4 * 1024 * 1024 });
-    f = fenced(args, env, scan.stdout);
+    f = fenced(args, env, scan.stdout, opts.cwd);
   }
   return runOffThread(opts.bin ?? 'git', [...(opts.pre ?? []), ...f.args], opts.timeoutMs ?? 15_000, { cwd: opts.cwd, env: f.env });
 }
