@@ -2496,6 +2496,12 @@ export interface WorkPair {
   /** w6687: what the asker cited for each computer on `avoid` (request_pair avoid_why), by id; kept for the audit's log, never trusted. */
   avoidWhy?: Record<string, string>;
   /**
+   * w6754 (the w6697 review, 1): the computers where a leg of the run this one retries failed, as the server saw it
+   * (pairFailedOn: offline, its worker errored, or no DONE while another leg said DONE). Set only by the server, so the audit
+   * counts it as a reason to keep them on `avoid`; an asker's avoid_why never does.
+   */
+  failedOn?: string[];
+  /**
    * w4925: a person's words (decide_work block's override_gate) asking this unstarted pair run to wait on a computer or an
    * hour while others have room; without them such a block is refused, and the ledger flags one that stands beside room.
    */

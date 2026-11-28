@@ -96,7 +96,7 @@ import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashH
 import { designGoAsk } from './designGo.ts';
 import { failureLine, failureOf, failurePriority, kindOfKey, structuredFailure, wordFailure, type Failure } from './failurePriority.ts';
 import { openQuestionsOf } from './reports.ts';
-import { auditExclusions, warnLine, type ExclusionFacts, type ExclusionVerdict } from './exclusionAudit.ts';
+import { auditExclusions, exclusionMode, exclusionReason, markText, needsUnreasoned, warnLine, type ExclusionFacts, type ExclusionVerdict } from './exclusionAudit.ts';
 import { DISK_CLEANUP_FLOOR_GB, REPORT_KINDS, WORK_PRIORITIES, asWorkPriority, atLeast, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
 import { FOR_YOU_CHARS, FOR_YOU_KEPT, forYouId, splitForYou } from '../shared/forYou.ts';
 
@@ -4767,6 +4767,13 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         legOnly = true;
         what = `a leg queued for capacity on ${needs.join(' or ')} (its worker carries on; the leg stays Queued, and is flagged WRONG when ${needs.length > 1 ? 'one of them has' : 'it has'} room, until a worker starts for it there: start_agent with work_id "${w.id}" in a FREE sandbox on ${needs.join(' or ')})${held ? `; ${held}` : ''}`;
       } else {
+        // w6754: under config placement.exclusions enforce, needs ("only on X/Y") that leave out a computer no live reason
+        // keeps off are refused, with each reason; needs that are the request's pin are the pin's (w2521), judged as one.
+        const exFacts = this.d.exclusionFacts?.();
+        if (needs.length && !pin && exclusionMode(exFacts) === 'enforce') {
+          const bad = needsUnreasoned({ ...w, pair }, needs, exFacts!, w.pair?.for ? this.store.work.get(w.pair.for) : undefined);
+          if (bad.length) throw new Error(`needs ${needs.join(', ')} leave out ${bad.map((v) => v.machine).join(', ')}, and nothing live keeps ${w.id} off ${bad.length > 1 ? 'them' : 'it'} (w6754, config placement.exclusions is enforce): no crash hold of ${w.id}, machine hold or pause, config placement rule, capability or person's words names ${bad.length > 1 ? 'them' : 'it'}. A hold an earlier brief names is no hold unless list_sandboxes shows it. Queue it with needs that add ${bad.map((v) => v.machine).join(', ')}, or with no needs.`);
+        }
         w.queuedFor = { at: this.now().toISOString(), ...(needs.length ? { needs } : {}) };
         if (pair) w.pair = pair;
         what = `queued for capacity${input.pair_legs && pair ? ` (marked ${pairText(pair)})` : ''}${needs.length ? ` on ${needs.join(' or ')}` : ''}${held ? `; ${held}` : ''}${repeat ? `; note: pair run ${repeat.twin.id} of the same pull request already finished (on ${pairCommitsOf(repeat.twin).map((c) => c.slice(0, 10)).join(', ') || 'a commit it does not record'}): if this runs the same commit it is a repeat, so reject it (w2057)` : ''}`;
@@ -5432,7 +5439,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // w4618: 1 leg unless it names a reason to need computers at once; a leg count asked for outright stands (legsSaid).
     const splitSaid = String(a.split ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
     const legs = a.legs ?? (pairComputersReason({ title: what, brief, pair: { crossOs, steam, timed: a.timed === true, split: splitSaid && !saysNone(splitSaid) ? splitSaid : undefined } }) ? 2 : 1);
-    const named = [...new Set((a.avoid ?? []).map((m) => String(m).trim().toLowerCase()).filter(Boolean))];
+    const asked = [...new Set((a.avoid ?? []).map((m) => String(m).trim().toLowerCase()).filter(Boolean))];
     const given = String(a.commit ?? '').trim().toLowerCase() || undefined;
     if (given && !/^[0-9a-f]{7,40}$/.test(given)) throw new Error(`commit is the head commit the legs run (git rev-parse HEAD, 7 to 40 hex), not "${clip(given, 60)}"`);
     // w4613: the published player must be of the commit the legs run; without commit, its commit is the run's.
@@ -5473,6 +5480,13 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (lf?.short) throw new Error(`Nothing filed: ${lf.line}. Ask again once a computer measures Medium (its daemon log says "sandbox agents measured at" at each start).`);
     }
     const spent = open && this.pairSpent(open, a.retry === true);
+    // w6754: under config placement.exclusions enforce, a computer to avoid that no live reason names (a crash hold of this
+    // request, a machine hold, a config rule, a capability, a failed leg or a person's words) is not applied, and the
+    // answer says so. An asker's avoid_why is never a reason ("No game player on BEAST (crash hold)", w6685).
+    const failedBefore = open ? this.pairFailedOn(open) : [];
+    const avoidNot = this.avoidNotApplied(w, asked, failedBefore, { legs, split: splitSaid && !saysNone(splitSaid) ? splitSaid : undefined, timed: a.timed === true, legacyData });
+    const named = asked.filter((m) => !avoidNot.some((x) => x.machine === placeId(m)));
+    const notApplied = avoidNot.length ? ` Not applied (w6754, config placement.exclusions is enforce): avoid ${avoidNot.map((x) => `${x.machine}, since ${x.reason}`).join('; ')}. A computer is kept off only for a live reason: if one holds, it shows in list_sandboxes (crash holds, holds), config placement, or a person's own words on the request.` : '';
     // w2057: w665's PR #2340 had a pair run (w1936, filed by hand) that passed while its worker waited, and a second one was
     // queued after it. Without an open run of its own, a filing joins the open run of the same pull request, and is answered
     // with the finished run of the same pull request and commit; retry: true asks for a fresh run anyway.
@@ -5524,6 +5538,11 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const split = a.split?.replace(/\s+/g, ' ').trim().slice(0, 300);
       p = this.newPair(w, sessionId, { what, brief, legs, ...(a.legs !== undefined ? { legsSaid: true as const } : {}), crossOs, timed: a.timed === true, ...(split && !saysNone(split) ? { split } : {}), ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(steamNone ? { noSteam: STEAM_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}), ...(a.player ? { player: a.player } : {}), ...(legacyData ? { legacyData } : {}), ...(dataDirChecked ? { dataDirChecked } : {}) });
       if (open) for (const m of this.pairFailedOn(open)) if (!named.includes(m)) citeAvoid(p, [m], `an earlier leg of ${open.id} failed there (w2041)`);
+      // w6754 (the w6697 review, 1): the server's own record of where the earlier legs failed, the audit's reason to keep them off.
+      if (failedBefore.length && p.pair) {
+        p.pair = { ...p.pair, failedOn: failedBefore };
+        this.store.putWork(p);
+      }
       if (open) this.supersedePair(open, p, spent!);
       head = open
         ? `${open.id} (${spent}) is cancelled, and its legs no longer count for ${w.id}: filed ${p.id}, a retry, ${pairText(p.pair!)}, with fresh legs. Only ${p.id}'s report resumes you, never one from ${open.id}'s legs. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once.`
@@ -5537,7 +5556,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const steamShort = !p.pair?.started && p.status !== 'blocked' ? this.steamShortOf(p.pair) : undefined;
     const steamHeld = steamShort ? ` ${p.id} needs Steam and is ${this.blockOnSteam(p, steamShort, `worker ${sessionId}`)}; it starts by itself once enough are.` : '';
     const blocked = this.workerBlocked(sessionId, { request: w.id, reports: [p.id], what: `pair run ${p.id}: ${what}` });
-    return `${head}${dataDirChecked && !open ? ` Not a pre-w5297 run: ${dataDirChecked}.` : ''}${steamHeld} ${blocked} Commit and push your work before the turn ends: your sandbox is then released at once for other work, and you are resumed (in a free sandbox on your machine, on your branch) when the pair's host leg reports its result.`;
+    return `${head}${notApplied}${dataDirChecked && !open ? ` Not a pre-w5297 run: ${dataDirChecked}.` : ''}${steamHeld} ${blocked} Commit and push your work before the turn ends: your sandbox is then released at once for other work, and you are resumed (in a free sandbox on your machine, on your branch) when the pair's host leg reports its result.`;
   }
 
   /**
@@ -5555,6 +5574,19 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (failed.length) return `a leg failed on ${failed.join(', ')}`;
     if (retry) return 'retried by its asker';
     return undefined;
+  }
+
+  /**
+   * w6754: the computers a request_pair avoid names that no live reason keeps off, with why, when config
+   * placement.exclusions is enforce (else none: warn leaves the avoid as asked, and the minute audit logs it). Judged as the
+   * pair run would be (its legs, split, timed and legacy marks; the asking request's own crash holds and person's words), with
+   * the computers where the run it retries failed counting as a reason.
+   */
+  private avoidNotApplied(w: WorkItem, asked: readonly string[], failedOn: readonly string[], pair: Pick<WorkPair, 'legs' | 'split' | 'timed' | 'legacyData'>): { machine: string; reason: string }[] {
+    const facts = this.d.exclusionFacts?.();
+    if (!asked.length || exclusionMode(facts) !== 'enforce') return [];
+    const subject = { id: w.id, constraints: undefined, notes: undefined, needs: 'game' as const, pair: { ...pair, for: w.id, ...(failedOn.length ? { failedOn: [...failedOn] } : {}) } };
+    return asked.map(placeId).filter((m) => !exclusionReason(m, subject, facts!, w)).map((machine) => ({ machine, reason: `nothing live names it (no crash hold of ${w.id}, machine hold or pause, config placement rule, capability, failed leg or person's words)` }));
   }
 
   /** The computers of a started pair run's legs that failed (w2041): offline now, its worker errored, or no DONE while another leg said DONE. */
@@ -9996,42 +10028,72 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     return roomEnough(facts, w, on) ? on : [];
   }
 
-  /** w6687: the last verdict on each request's machine exclusions, by "request|source|machine" (memory only: a restart logs once again). */
+  /** w6687: the last verdict on each request's machine exclusions, by "request|source|machine" (memory; seeded from the log, w6754 d). */
   private readonly exclusionSeen = new Map<string, ExclusionVerdict>();
+  /** w6754 (d, e): the keys already logged as citing no live reason, until a real reason (not a machine hold) takes over. */
+  private readonly exclusionWarned = new Set<string>();
 
   /**
-   * w6687 stage 1, warn-only (lothsahn's lockout rule): each minute, judge every machine exclusion and pin an open request
-   * carries (server/exclusionAudit.ts) and log on the request, once per change, each one that cites no live crash hold,
-   * machine hold, config rule, checkable capability or person's words, including one whose crash hold has cleared. Nothing
-   * is dropped or re-queued here; the enforce stage does that. Returns the ids of the requests it logged on.
+   * w6687, w6754: each minute, judge every machine exclusion and pin an open request carries (server/exclusionAudit.ts) and
+   * act, by config placement.exclusions, on each one that cites no live crash hold, machine hold, config rule, checkable
+   * capability, failed leg, subject or person's words, including one whose crash hold has cleared:
+   *   - warn (the default, lothsahn's lockout rule): log it on the request once;
+   *   - enforce: drop it from the pair run's avoid, or add the computer to the queue's needs, log that, and leave it Queued
+   *     (the room flag in the same blocker-watch tick starts it on the computer it can now use); a pin is only logged;
+   *   - off: nothing.
+   * Logged once per mark (w6754 d, e): not again after a restart (the request's log already says it), nor when its computer
+   * drops off or is held and comes back; again only after a real reason held it in between. Returns the requests it logged on.
    */
   auditExclusions(): string[] {
     const facts = this.d.exclusionFacts?.();
-    if (!facts) return [];
+    const mode = exclusionMode(facts);
+    if (!facts || mode === 'off') return [];
     const logged: string[] = [];
     const live = new Set<string>();
     for (const w of this.store.work.values()) {
       if (w.status === 'done' || w.status === 'rejected' || w.status === 'cancelled' || w.status === 'merged') continue;
       const parent = w.pair?.for ? this.store.work.get(w.pair.for) : undefined;
       const lines: string[] = [];
+      const drop = { avoid: [] as string[], needs: [] as string[] };
       for (const v of auditExclusions(w, facts, parent)) {
         const key = `${w.id}|${v.source}|${v.machine}`;
         live.add(key);
         const was = this.exclusionSeen.get(key);
         this.exclusionSeen.set(key, v);
-        if (v.keep || (was && !was.keep)) continue;
-        const line = warnLine(v, was);
+        if (v.keep) {
+          // A machine hold (offline, paused, a build) says nothing about the mark: the warning stands (w6754 e).
+          if (v.kind !== 'machine-hold') this.exclusionWarned.delete(key);
+          continue;
+        }
+        const enforce = mode === 'enforce' && v.source !== 'machinePin';
+        if (enforce) (v.source === 'pair.avoid' ? drop.avoid : drop.needs).push(v.machine);
+        else if (this.exclusionWarned.has(key) || (!was && w.log.some((l) => l.includes(`would drop ${markText(v)}:`)))) {
+          this.exclusionWarned.add(key);
+          continue;
+        }
+        this.exclusionWarned.add(key);
+        const line = warnLine(v, was, enforce);
         lines.push(line);
         console.log(`[w6687 exclusions] ${w.id}: ${line}`);
       }
+      if (drop.avoid.length && w.pair) {
+        const avoid = (w.pair.avoid ?? []).filter((m) => !drop.avoid.includes(placeId(m)));
+        const avoidWhy = Object.fromEntries(Object.entries(w.pair.avoidWhy ?? {}).filter(([m]) => !drop.avoid.includes(m)));
+        const was = pairText(w.pair);
+        w.pair = { ...w.pair, avoid, avoidWhy: Object.keys(avoidWhy).length ? avoidWhy : undefined };
+        if (w.constraints === was) w.constraints = pairText(w.pair);
+      }
+      if (drop.needs.length && w.queuedFor?.needs) w.queuedFor = { ...w.queuedFor, needs: [...new Set([...w.queuedFor.needs, ...drop.needs])] };
+      if (drop.avoid.length || drop.needs.length) this.roomFlags.delete(w.id);
       if (!lines.length) continue;
-      // Only its log changes (not stamp: warn-only touches no gate, check-in or updatedAt).
+      // Only its log changes (not stamp: the audit touches no gate, check-in or updatedAt).
       const now = this.now();
       w.log = [...w.log, ...lines.map((line) => logLine(now, line))].slice(-40);
       this.store.putWork(w);
       logged.push(w.id);
     }
     for (const key of [...this.exclusionSeen.keys()]) if (!live.has(key)) this.exclusionSeen.delete(key);
+    for (const key of [...this.exclusionWarned]) if (!live.has(key)) this.exclusionWarned.delete(key);
     return logged;
   }
 

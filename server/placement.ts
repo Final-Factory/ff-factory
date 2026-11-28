@@ -173,7 +173,16 @@ export interface PlacementPrefs {
    * it, and only when every one is at it or over to placement.prefer's order up to real capacity. 100 turns the tiers off.
    */
   spillAtPercent?: number;
+  /**
+   * w6754: what the minute audit does with a machine exclusion that cites no live reason (server/exclusionAudit.ts): 'warn'
+   * logs it (the default), 'enforce' drops it and re-queues the request, 'off' does nothing. Config placement.exclusions.
+   */
+  exclusions?: ExclusionMode;
 }
+
+/** w6754: config placement.exclusions. */
+export const EXCLUSION_MODES = ['warn', 'enforce', 'off'] as const;
+export type ExclusionMode = (typeof EXCLUSION_MODES)[number];
 
 const ORDER: readonly WorkPriority[] = WORK_PRIORITIES;
 
