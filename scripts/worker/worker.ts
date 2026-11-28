@@ -924,7 +924,7 @@ export interface SupervisorFacts {
    * other powershell.exe processes whose command line came back empty (one at a higher integrity level than this session);
    * `taskProcs` the powershell.exe processes the task's running instance started (`enginePids`, Task Scheduler's own
    * answer, no command line needed); `level` is this session's integrity RID (8192 Medium, 12288 High); `seen` the
-   * command lines the query saw when none matched; `cimError` and `taskError` what a failed query said.
+   * powershell.exe the query saw when none matched (a command line only in a supervisor's own form); `cimError` and `taskError` what a failed query said.
    */
   unreadable?: number;
   taskState?: string;
@@ -1023,9 +1023,10 @@ try {
   "taskProcs=$(@($all | Where-Object { $engine -contains [int]$_.ParentProcessId }).Count)"
   if (-not $mine.Count) {
     foreach ($p in $all) {
-      $c = ([string]$p.CommandLine) -replace '(?i)(-e(nc(odedcommand)?)?\\s+)\\S+', '$1<encoded>' -replace '\\s+', ' '
-      if ($c.Length -gt 160) { $c = $c.Substring(0, 160) + '...' }
-      "seen=pid $($p.ProcessId) (parent $($p.ParentProcessId)): $(if ($c) { $c } else { '(command line not readable)' })"
+      # Only a supervisor's own form is shown (w6669's review): any other command line may carry a person's secret.
+      $c = ([string]$p.CommandLine) -replace '\\s+', ' '
+      $shown = if (-not $c) { '(command line not readable)' } elseif ($c -match '(?i)-File "([A-Za-z]:\\\\[^"]*\\\\run-daemon\\.ps1)"\\s*$') { "a supervisor running $($Matches[1])" } else { '(another command line, not shown)' }
+      "seen=pid $($p.ProcessId) (parent $($p.ParentProcessId)): $shown"
     }
   }
 } catch { "running=0"; "cimError=$($_.Exception.Message -replace '\\s+', ' ')" }

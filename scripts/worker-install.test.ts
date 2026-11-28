@@ -503,12 +503,13 @@ test('worker install: a supervisor this session cannot read is counted from the 
   assert.match(supervisorSeen(failed), /High; the process query failed: Access denied/);
   // An older daemon's script printed only the first five lines: nothing new is assumed.
   assert.deepEqual(parseWinSupervisorFacts('installed=True\nhere=True\nrestarts=True\nscript=True\nrunning=1').taskProcs, undefined);
-  // The script itself: read-only, pure ASCII (machineDeployWin.ts psq), the query fails loudly into cimError, and an
-  // encoded command is never printed.
+  // The script itself: read-only, pure ASCII (machineDeployWin.ts psq), the query fails loudly into cimError, and no
+  // command line but a supervisor's own form is printed (w6669's review).
   const script = winSupervisorScript(String.raw`D:\work\ffw\daemon`, 'FFFactoryDaemon');
   assert.match(script, /-ErrorAction Stop/);
   assert.match(script, /GetRunningTasks\(1\)/);
-  assert.match(script, /<encoded>/);
+  assert.match(script, /\(another command line, not shown\)/);
+  assert.doesNotMatch(script, /"seen=[^\n]*\$c\b/);
   assert.ok(/^[\x00-\x7f]*$/.test(script));
   assert.doesNotMatch(script, /Stop-|Remove-|Set-|Register-|Start-/);
 });
