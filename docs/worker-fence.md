@@ -111,6 +111,13 @@ anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macO
   the mark at all three points (`otherPlayerInWords`; start_agent and the re-check take the worker's part of a filed
   run's brief, `pairAskWords`, so FF Factory's own words and their hex session id do not count). A sha in a brief that
   is only context keeps the mark too, failing closed: pass `legacy_data` "none" when no leg runs a pre-w5297 player.
+  Since w6680 every sha the run names is read, not only `commit` (`pairDataDirAt`, `pairPlayerShas`; at request_pair,
+  start_agent and the minute re-check alike): w6678 ran A at the pre-1.0 tip `dc4643b4c2` and B at PR #4463's head
+  `718a14689a`, its `legacy_data` named `dc4643b4c2`, and only `718a14689a` was read, so a run whose both players carry the
+  backport waited for a Medium computer none had. The mark goes only when every named commit's `GameDataPaths.cs` reads
+  the variable (at most 8 commits); one that lacks it, cannot be read, or answers for another commit keeps it, and so does
+  any `0.50.x.y` build or Steam/installed player, except a version written in parentheses right after a sha that was read,
+  "dc4643b4c2 (0.50.0.120)", which is that commit's own version (`versionOfChecked`).
   A build named without a number counts as another player too (w6458, from w6454's review of PR #1484): "the Steam
   pre-1.0 build", "installed from Steam", "the published 0.50 player", "the pre-1.0 release" (`INSTALLED_BUILD`). Its
   words are read only after the pre-1.0 or 0.50 words marked the run, and "a Steam lobby" or "the release branch" are no
