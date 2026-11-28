@@ -17,7 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isLinkAt } from './workerCopy.ts';
-import { isTrickName } from '../server/fsLink.ts';
+import { isTrickName, presentAt } from '../server/fsLink.ts';
 
 export type LockExec = (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<{ code: number | null; stdout: string; stderr: string }>;
 
@@ -72,13 +72,10 @@ export async function lockIn(p: string, d: LockInDeps): Promise<boolean> {
   try {
     // A file or a link goes by its own name (rd takes only a folder, and a junction it removes without its target).
     const st = fs.lstatSync(p, { throwIfNoEntry: false });
-    if (st?.isDirectory()) {
-      await d.removeTree(p);
-      // rd /s /q answers 0 and leaves `x.`, `y ` and NUL in place, with all that is in them (measured on LothDesktop, w6452);
-      // by its \\?\ path it removes them too, a junction in them without its target (measured).
-      if (fs.lstatSync(p, { throwIfNoEntry: false }) && (d.platform ?? process.platform) === 'win32' && path.isAbsolute(p) && !p.startsWith('\\\\')) await d.removeTree(`\\\\?\\${path.resolve(p)}`);
-    } else if (st) fs.rmSync(p, { force: true });
-    if (fs.lstatSync(p, { throwIfNoEntry: false })) throw new Error('still there');
+    // removeTree (server/proc.ts) goes again by the \\?\ path where rd leaves `x.`, `y ` or NUL in place (w6452, w6462).
+    if (st?.isDirectory()) await d.removeTree(p);
+    else if (st) fs.rmSync(p, { force: true });
+    if (presentAt(p)) throw new Error('still there');
   } catch (e) {
     say(`shared lock: WARNING: could not remove ${p}: ${(e as Error).message}`);
   }
