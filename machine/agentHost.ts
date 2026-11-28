@@ -138,7 +138,7 @@ export class LineTail {
     this.fd = undefined;
     if (fd === undefined) return;
     if (this.depth > 0) this.deferred.push(fd);
-    else if (later) closeLater(fd);
+    else if (later) this.closeLater(fd);
     else closeQuietly(fd);
   }
 
@@ -187,15 +187,21 @@ export class LineTail {
       if (fd !== undefined && fd === this.fd) this.close();
     } finally {
       // w6639: off the loop (a close here held BEAST's daemon 6.7 s, 2026-11-28 01:00Z): nothing waits on these.
-      if (own && fd !== undefined) closeLater(fd);
-      if (--this.depth === 0) for (const d of this.deferred.splice(0)) closeLater(d);
+      if (own && fd !== undefined) this.closeLater(fd);
+      if (--this.depth === 0) for (const d of this.deferred.splice(0)) this.closeLater(d);
     }
   }
-}
 
-/** w6639: close a handle with no one waiting on it, off the loop (libuv's thread pool). */
-function closeLater(fd: number) {
-  fs.close(fd, () => undefined);
+  /** w6639: handles closed off the loop that have not closed yet (a folder removal on Windows fails while one is open). */
+  closing = 0;
+
+  /** w6639: close a handle with no one waiting on it, off the loop (libuv's thread pool). */
+  private closeLater(fd: number) {
+    this.closing++;
+    fs.close(fd, () => {
+      this.closing--;
+    });
+  }
 }
 
 function closeQuietly(fd: number) {
@@ -715,8 +721,11 @@ export class HostedSession implements SessionHandle {
     const f = this.files;
     this.offsetGen++;
     this.tail?.close();
+    // w6639 (7c34d8f7's review): the old tail's handles close off the loop, and one may still be closing; on Windows the
+    // folder cannot go until it has, so then the removal retries for up to ~0.6 s (rare: a close is normally instant).
+    const closing = (this.tail?.closing ?? 0) > 0;
     try {
-      fs.rmSync(f.dir, { recursive: true, force: true });
+      fs.rmSync(f.dir, { recursive: true, force: true, ...(closing ? { maxRetries: 3, retryDelay: 100 } : {}) });
     } catch (e) {
       // A process still holds the folder (w799: an old host the daemon had lost; the host watch stops such a one).
       throw new Error(`its agent host folder ${f.dir} is still in use (${(e as Error).message}); an old agent host may still run there and is stopped within minutes`);
@@ -743,6 +752,8 @@ export class HostedSession implements SessionHandle {
     this.pid = undefined;
     this.follow(0);
     const gen = ++this.launchGen;
+    // The mid-turn mark as it was before this start: send() marks the turn open once start() answers true.
+    const mark = this.info.turnOpenSince;
     const started = (pid: number) => {
       this.pid = pid;
       this.deps.log(`agent host for ${this.info.id} started, pid ${pid}`);
@@ -776,6 +787,10 @@ export class HostedSession implements SessionHandle {
       (e) => {
         if (gen !== this.launchGen || !this.running) return;
         failed(e);
+        // As a start that failed at once (send() then never marks the turn open): no host runs, so it is not mid-turn
+        // (7c34d8f7's review of w6639).
+        if (mark === undefined) delete this.info.turnOpenSince;
+        else this.info.turnOpenSince = mark;
         this.deps.changed();
       },
     );

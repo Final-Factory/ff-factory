@@ -149,6 +149,31 @@ test("w6639: a host whose start the thread answers later: its pid is kept, and a
   assert.equal((failed as { reason?: string }).reason, 'host_start');
   assert.equal(bad.s.info.status, 'error');
   assert.ok(bad.changed() > 0, 'the daemon is told its record changed');
+  // As a start that failed at once: no host runs, so its turn is not left marked open (7c34d8f7's review).
+  assert.equal(bad.s.info.turnOpenSince, undefined);
+});
+
+test("w6639: a host started again while its old tail's handle is still closing off the loop retries the folder removal", { timeout: 30_000 }, async (t) => {
+  const root = tmp(t, 'restart');
+  const h = hosted(root, () => Promise.reject(new Error('no host')));
+  t.after(() => h.s.detach());
+  h.s.send('one', 'orchestrator');
+  await until('the first start failed', () => h.out.some((m) => m.type === 'failed'));
+  const tail = (h.s as unknown as { tail?: LineTail }).tail;
+  assert.ok(tail, 'the first start follows its out.jsonl');
+  const calls: (fs.RmOptions | undefined)[] = [];
+  const rmSync = fs.rmSync;
+  fs.rmSync = ((p: fs.PathLike, o?: fs.RmOptions) => {
+    calls.push(o);
+    return rmSync(p, o);
+  }) as typeof fs.rmSync;
+  t.after(() => void (fs.rmSync = rmSync));
+  // A handle its keep-open timer let go of that libuv has not closed yet: on Windows the folder cannot go until it has.
+  tail.closing = 1;
+  h.s.send('two', 'orchestrator');
+  assert.ok(calls.length > 0, 'the second start removes its folder');
+  assert.equal(calls[0]?.maxRetries, 3, 'the removal retries while a close is pending');
+  tail.closing = 0;
 });
 
 test("w6639: the agent host's launch is not a spawn on the daemon's loop", () => {
