@@ -171,7 +171,7 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
                 {[
                   m.selfReboot.stuckSince && `daemon stuck since ${fmtRelative(m.selfReboot.stuckSince, now)}`,
                   m.selfReboot.skip && `held: ${m.selfReboot.skip.why}`,
-                  m.selfReboot.last && `${m.selfReboot.last.mode === 'live' ? 'rebooted itself' : 'would have rebooted itself (warn only)'} ${fmtRelative(m.selfReboot.last.at, now)}: ${m.selfReboot.last.why}`,
+                  m.selfReboot.last && `${m.selfReboot.last.mode !== 'live' ? 'would have rebooted itself (warn only)' : m.selfReboot.last.failed ? `tried to reboot itself and could not (${m.selfReboot.last.failed})` : 'rebooted itself'} ${fmtRelative(m.selfReboot.last.at, now)}: ${m.selfReboot.last.why}`,
                   m.selfReboot.why,
                 ]
                   .filter(Boolean)

@@ -30,7 +30,7 @@ import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
 import { StallProfiler } from '../server/stallProfile.ts';
 import { DAEMON_ENDING_MARKER, freezeWatchSettings, startFreezeWatch, type FreezeWatch } from './freezeWatch.ts';
-import { DAEMON_ALIVE_EVERY_MS, readSelfReboot, writeAlive } from './selfReboot.ts';
+import { DAEMON_ALIVE_EVERY_MS, portalUnreachableBy, readSelfReboot, writeAlive, type PortalUnreachable } from './selfReboot.ts';
 import { execFileOffThread, useSpawnThread } from '../server/spawnThread.ts';
 import { useProbeGuard } from '../server/probeGuard.ts';
 import { warmScopeProbes } from './linuxScope.ts';
@@ -794,6 +794,9 @@ export class Daemon {
   private steamClient?: SteamClientWatch;
   /** What it last sent of the supervisor's self-reboot file (w6792), as JSON: sent again only when it changes, and after each hello. */
   private selfRebootSent?: string;
+  /** w6792: the link the portal welcomed (welcomed stays true across links), and the last try that could not reach it. */
+  private welcomedLink?: WebSocket;
+  private portalUnreachable?: PortalUnreachable;
   /** Starts the installed Steam client in the desktop session: a person's steam_start and the players broker's self-healing (w6727). */
   private steamStarterMade?: SteamStarter;
   /** Claude Code's own transcripts on this computer, kept free of the secret values this daemon knows (w1688). */
@@ -2695,7 +2698,15 @@ export class Daemon {
     const url = base.replace(/^http/, 'ws').replace(/\/+$/, '') + '/machine';
     const ws = new WebSocket(url, { headers: { authorization: `Bearer ${this.cfg.token}` }, handshakeTimeout: 8_000 });
     this.ws = ws;
+    // w6792: a try that fails before its link opens, unanswered or with a 502, 503 or 504, says the portal cannot be reached.
+    let opened = false;
+    let answered = false;
+    const failed = (f: { status?: number; message?: string }) => {
+      const why = portalUnreachableBy(f);
+      this.portalUnreachable = why ? { at: new Date().toISOString(), why } : undefined;
+    };
     ws.on('open', () => {
+      opened = true;
       this.attempt = 0;
       this.dials = 0;
       this.downSince = 0;
@@ -2720,6 +2731,8 @@ export class Daemon {
       // With this listener, ws leaves the aborting to us: without it each refused attempt (a 502 while the
       // portal restarts) hung until the handshake timeout, and a restart took 40 s to get over.
       log(`portal refused the connection: HTTP ${res.statusCode}`);
+      answered = true;
+      failed({ status: res.statusCode });
       // ws follows no redirect (followRedirects is off): it is refused here as before, and reported (w5576).
       const loc = res.headers.location;
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && typeof loc === 'string') {
@@ -2735,7 +2748,10 @@ export class Daemon {
       req.destroy();
       ws.terminate();
     });
-    ws.on('error', (e) => log('socket error:', e.message));
+    ws.on('error', (e) => {
+      log('socket error:', e.message);
+      if (!opened && !answered) failed({ message: e.message });
+    });
     ws.on('close', (code) => {
       if (this.ws !== ws) return;
       this.ws = undefined;
@@ -2855,10 +2871,10 @@ export class Daemon {
 
   /** w6792: the heartbeat the supervisor reads (Windows), and the supervisor's self-reboot file to the portal when it changed. */
   private selfRebootTick(logsDir = path.join(appDirOfConfig(this.cfg), 'logs')) {
-    const linked = this.ws?.readyState === WebSocket.OPEN && this.welcomed;
+    const linked = this.ws?.readyState === WebSocket.OPEN && this.welcomed && this.welcomedLink === this.ws;
     if (process.platform === 'win32') {
       try {
-        writeAlive(logsDir, linked);
+        writeAlive(logsDir, linked, new Date(), this.portalUnreachable);
       } catch {
         // No logs folder (a test's daemon): the supervisor then sees no working daemon, as before w6792.
       }
@@ -5718,6 +5734,8 @@ export class Daemon {
         if (msg.owners) this.owners = msg.owners;
         this.portalSessions = new Set(msg.sessions.map((s) => s.id));
         this.welcomed = true;
+        this.welcomedLink = this.ws;
+        this.portalUnreachable = undefined;
         void this.reportBenchHours();
         // The worker fence's state (w5555): the portal alerts on a failed one and places no worker here.
         this.send({ type: 'worker_fence', fence: this.fence.state });

@@ -7,7 +7,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { sanitizeSelfReboot, type SelfRebootInfo } from '../shared/selfReboot.ts';
 
-/** In the daemon's logs folder: {pid, at, linked}, rewritten every DAEMON_ALIVE_EVERY_MS. */
+/**
+ * In the daemon's logs folder: {pid, at, linked, portalUnreachable?}, rewritten every DAEMON_ALIVE_EVERY_MS. portalUnreachable
+ * is the last try that failed before a link opened (no answer, or a 502, 503 or 504), kept until the portal welcomes a link:
+ * the supervisor then holds a reboot while it is recent (SUPERVISOR_PORTAL_HOLD_S), since this daemon works and a reboot would
+ * not bring the portal back (w6809's review).
+ */
 export const DAEMON_ALIVE = 'daemon-alive.json';
 export const DAEMON_ALIVE_EVERY_MS = 30_000;
 /** The supervisor counts a heartbeat this old or newer as live (three missed writes are not). */
@@ -22,11 +27,23 @@ export const NOT_ELIGIBLE: Partial<Record<NodeJS.Platform, string>> = {
   linux: 'Linux: systemd restarts the daemon (Restart=always) and there is no supervisor of ours to see it stuck; a reboot needs root, which the daemon does not have',
 };
 
+/** The last try to link that failed because the portal could not be reached; cleared once a link is welcomed. */
+export interface PortalUnreachable {
+  at: string;
+  why: string;
+}
+
+/** w6809's review: whether a failed try to link says the portal cannot be reached (not that it refused this daemon). */
+export function portalUnreachableBy(failure: { status?: number; message?: string }): string | undefined {
+  if (failure.status === undefined) return failure.message ? `no link: ${failure.message}` : 'no link';
+  return [502, 503, 504].includes(failure.status) ? `the portal answered HTTP ${failure.status}` : undefined;
+}
+
 /** Atomically, so the supervisor never reads half a file. */
-export function writeAlive(logsDir: string, linked: boolean, now = new Date()): void {
+export function writeAlive(logsDir: string, linked: boolean, now = new Date(), portalUnreachable?: PortalUnreachable): void {
   const file = path.join(logsDir, DAEMON_ALIVE);
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, at: now.toISOString(), linked }));
+  fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, at: now.toISOString(), linked, ...(!linked && portalUnreachable ? { portalUnreachable } : {}) }));
   fs.renameSync(tmp, file);
 }
 

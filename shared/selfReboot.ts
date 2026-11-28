@@ -15,6 +15,8 @@ export interface SelfRebootEvent {
   why: string;
   /** When the stuck state it answered began. */
   stuckSince?: string;
+  /** live: the reboot did not go through (shutdown.exe failed or never took, then NtShutdownSystem failed), and what they answered. */
+  failed?: string;
 }
 
 export interface SelfRebootInfo {
@@ -49,7 +51,7 @@ export function sanitizeSelfReboot(raw: unknown): SelfRebootInfo | undefined {
   if (time(r.checkedAt)) out.checkedAt = time(r.checkedAt);
   if (time(r.stuckSince)) out.stuckSince = time(r.stuckSince);
   const l = r.last as Record<string, unknown> | undefined;
-  if (l && typeof l === 'object' && time(l.at) && mode(l.mode) && str(l.why)) out.last = { at: time(l.at)!, mode: mode(l.mode)!, why: str(l.why)!, ...(time(l.stuckSince) ? { stuckSince: time(l.stuckSince) } : {}) };
+  if (l && typeof l === 'object' && time(l.at) && mode(l.mode) && str(l.why)) out.last = { at: time(l.at)!, mode: mode(l.mode)!, why: str(l.why)!, ...(time(l.stuckSince) ? { stuckSince: time(l.stuckSince) } : {}), ...(str(l.failed) ? { failed: str(l.failed) } : {}) };
   const s = r.skip as Record<string, unknown> | undefined;
   if (s && typeof s === 'object' && time(s.at) && str(s.why)) out.skip = { at: time(s.at)!, why: str(s.why)! };
   return out;
@@ -70,7 +72,8 @@ export function selfRebootChip(s: SelfRebootInfo): { label: string; tone: 'green
   return s.mode === 'live' ? { label: 'on', tone: 'green' } : { label: 'warn only', tone: 'amber' };
 }
 
-/** "rebooted itself at <at>: <why>", or what it would have done in warn mode. */
+/** "rebooted itself at <at>: <why>", a reboot that failed, or what it would have done in warn mode. */
 export function selfRebootEventLine(e: SelfRebootEvent): string {
-  return e.mode === 'live' ? `rebooted itself at ${e.at}: ${e.why}` : `would have rebooted itself at ${e.at} (warn only): ${e.why}`;
+  if (e.mode !== 'live') return `would have rebooted itself at ${e.at} (warn only): ${e.why}`;
+  return e.failed ? `tried to reboot itself at ${e.at} and could not (${e.failed}): ${e.why}` : `rebooted itself at ${e.at}: ${e.why}`;
 }
