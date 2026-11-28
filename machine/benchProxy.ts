@@ -106,7 +106,12 @@ export class BenchProxy {
     if (!mode) throw new RpcRefused('mode: "shared" or "exclusive"');
     const ownerPid = Number(b.ownerPid);
     if (!Number.isInteger(ownerPid) || ownerPid <= 0) throw new RpcRefused('ownerPid: the process the ticket follows, a positive integer');
-    if (!this.d.alive(ownerPid)) throw new RpcRefused(`ownerPid ${ownerPid} is not running`);
+    // w6744: Git Bash's bench_lock (quiet_gate.sh) sends its MSYS pid as ownerPid, which no Windows process has, and its
+    // Windows pid as ownerWinpid, which the helper follows (bench_queue.py: `owner = args.owner_winpid or args.owner_pid`):
+    // either one running is the owner running.
+    const ownerWinpid = Number(b.ownerWinpid);
+    const winpidGiven = Number.isInteger(ownerWinpid) && ownerWinpid > 0;
+    if (!this.d.alive(ownerPid) && !(winpidGiven && this.d.alive(ownerWinpid))) throw new RpcRefused(`ownerPid ${ownerPid}${winpidGiven ? ` (ownerWinpid ${ownerWinpid})` : ''} is not running`);
     const lock = this.d.lock();
     if (!lock) throw new RpcRefused('no worker root here to keep the bench queue under');
     const cwd = c.sandbox ? this.d.sandboxPath(c.sandbox) : undefined;
@@ -124,16 +129,15 @@ export class BenchProxy {
     // A script owner's revoked turn is stopped by the helper (SIGTERM to the owner and what it started, w1656): only for
     // an owner that runs under the caller's own session, so no worker can point a revoke at another's process.
     let ownerKind: 'script' | 'service' = b.ownerKind === 'script' ? 'script' : 'service';
-    const ownerWinpid = Number(b.ownerWinpid);
     if (ownerKind === 'script') {
-      const of = await this.d.sessionOf(Number.isInteger(ownerWinpid) && ownerWinpid > 0 ? ownerWinpid : ownerPid).catch(() => undefined);
+      const of = await this.d.sessionOf(winpidGiven ? ownerWinpid : ownerPid).catch(() => undefined);
       if (of !== c.session) ownerKind = 'service';
     }
     this.sweep();
     fs.mkdirSync(this.d.dir, { recursive: true });
     const handle = `h${randomBytes(8).toString('hex')}`;
     const args = [script, '--lock', lock, 'hold', '--mode', mode, '--what', str(b.what, 200) || `${c.session}`, '--owner-pid', String(ownerPid), '--status', this.status(handle)];
-    if (Number.isInteger(ownerWinpid) && ownerWinpid > 0) args.push('--owner-winpid', String(ownerWinpid));
+    if (winpidGiven) args.push('--owner-winpid', String(ownerWinpid));
     const start = str(b.ownerStart, 60);
     if (start && /^[\w.:-]+$/.test(start)) args.push('--owner-start', start);
     const maxMin = Number(b.maxMin);

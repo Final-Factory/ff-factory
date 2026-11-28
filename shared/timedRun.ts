@@ -285,11 +285,15 @@ export function runTurns(s: TimedSettings, variants: number): number {
 /**
  * The player's arguments for one leg: probe_ab_win.sh's (w565, w1628), so its tables read the logs as they are
  * (scripts/bench/probe_table.py, ab_stop.py): solo, the save, the perf probe after the settle, quit after the dwell.
+ * Vsync and the frame cap are held off through FeelProbe as probe_ab_win.sh does by default (w6744; its CAPPED=1 note:
+ * a capped leg reads the display's refresh, 16.7 ms on a 60 Hz screen, and hides any saving). The game takes the last
+ * -ffFeelVsync/-ffFeelFps it is given (FeelProbe.cs), so a variant's own `-ffFeelVsync 1` still measures capped.
  */
 export function legArgs(s: TimedSettings, variant: Pick<TimedVariant, 'name' | 'args'>, round: number, saveName: string, logFile: string): string[] {
   const [w, h] = s.res.split('x');
   return [
     '-screen-fullscreen', '0', '-screen-width', w, '-screen-height', h, '-ffNoBackgroundFpsCap',
+    '-ffFeelProbe', '-ffFeelVsync', '0', '-ffFeelFps', '-1',
     '-ffAutomationRole', 'solo', '-ffAutomationSave', saveName, '-ffAutomationWriteReport', 'true', '-ffAutomationLabel', `probe-${variant.name}-${round}`,
     '-ffAutomationPostReadyCommand', `ffauto:wait|${s.settleS};ffauto:perf.sample|${s.sampleS}|20;ffauto:wait|${s.sampleS + 10}`,
     '-ffAutomationPostConnectDelayMs', String(s.dwellS * 1000), '-ffAutomationAutoQuit', 'true',

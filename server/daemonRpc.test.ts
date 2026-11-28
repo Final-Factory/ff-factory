@@ -173,6 +173,32 @@ test('w5545: the bench proxy keys a ticket to the token\'s session, lets only th
   assert.ok(!fs.existsSync(path.join(q, 't00000008', 'pids')));
 });
 
+test('w6744: Git Bash\'s bench_lock (an MSYS ownerPid no Windows process has, a running ownerWinpid) gets a ticket; neither alive is refused', async (t) => {
+  const root = tmp(t, 'benchproxy-winpid');
+  const sb = path.join(root, 'sandboxes', 'slot4');
+  fs.mkdirSync(path.join(sb, 'scripts', 'bench'), { recursive: true });
+  fs.writeFileSync(path.join(sb, 'scripts', 'bench', 'bench_queue.py'), 'RULES_VERSION = 9\n');
+  const spawned: string[][] = [];
+  const proxy = new BenchProxy({
+    dir: path.join(root, 'daemon', 'bench-holds'),
+    lock: () => benchLockDir(root),
+    root,
+    sandboxPath: (id) => (id === 'slot4' ? sb : undefined),
+    alive: (pid) => pid === 23456,
+    sessionOf: async (pid) => (pid === 23456 ? 'w6744-worker' : undefined),
+    spawnHelper: (_py, args) => (spawned.push(args), { pid: 779, onExit: () => undefined }),
+  });
+  const h = proxy.handlers();
+  const me = { session: 'w6744-worker', sandbox: 'slot4' };
+  const a = (await h['bench/take'](me, { mode: 'exclusive', what: 'timing', ownerPid: 1883, ownerWinpid: 23456, ownerKind: 'script', reason: 'timing' })) as { ownerKind: string };
+  assert.equal(a.ownerKind, 'script');
+  assert.equal(spawned[0][spawned[0].indexOf('--owner-pid') + 1], '1883');
+  assert.equal(spawned[0][spawned[0].indexOf('--owner-winpid') + 1], '23456');
+  await assert.rejects(async () => h['bench/take'](me, { mode: 'exclusive', what: 'timing', ownerPid: 1883, ownerWinpid: 23457 }), /ownerPid 1883 \(ownerWinpid 23457\) is not running/);
+  await assert.rejects(async () => h['bench/take'](me, { mode: 'exclusive', what: 'timing', ownerPid: 1883 }), /ownerPid 1883 is not running/);
+  assert.equal(spawned.length, 1);
+});
+
 test('w5545 with w5572: the bench proxy runs the daemon\'s trusted copy of bench_queue.py with -s, never the caller\'s sandbox copy', async (t) => {
   const root = tmp(t, 'benchproxy-trusted');
   const sb = path.join(root, 'sandboxes', 'slot3');
