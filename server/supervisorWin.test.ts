@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import * as win from './machineDeployWin.ts';
 import { SUPERVISOR_HAS_DAEMON, winControlAnswer } from './machineDeploy.ts';
 import { DAEMON_ENDING_MARKER } from '../machine/freezeWatch.ts';
@@ -38,15 +38,19 @@ interface Rig {
   end: () => void;
 }
 
-function rig(t: { after: (fn: () => void) => void }, plan: string): Rig {
-  const dir = tmpDir('ffsup-', t as never);
+function rig(t: { after: (fn: () => void) => void }, plan: string, opts: { delay?: number } = {}): Rig {
+  // The fake daemons end before the folder goes (after hooks run in the order they were added): Windows keeps a live
+  // process's files, and the removal failed with EPERM on CI.
+  let dir = '';
+  t.after(() => end());
+  dir = tmpDir('ffsup-', t as never);
   fs.mkdirSync(path.join(dir, 'app', 'machine'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'app', 'machine', 'daemon.ts'), FAKE_DAEMON);
   fs.writeFileSync(path.join(dir, 'daemon.json'), '{}');
   fs.writeFileSync(path.join(dir, 'plan.txt'), plan);
   let s = win.supervisorScript(process.execPath, false);
   // Test speed: 1 s to call a marked daemon stuck, 200 ms steps, 1 s for a kill to take, no back-off.
-  s = s.replace(`$stuckAfter = ${win.SUPERVISOR_STUCK_AFTER_S}\n`, '$stuckAfter = 1\n').replace('$waitStepMs = 5000\n', '$waitStepMs = 200\n').replace('$p.WaitForExit(15000)', '$p.WaitForExit(1000)').replace(/\$delay = 10\b/g, '$delay = 0');
+  s = s.replace(`$stuckAfter = ${win.SUPERVISOR_STUCK_AFTER_S}\n`, '$stuckAfter = 1\n').replace('$waitStepMs = 5000\n', '$waitStepMs = 200\n').replace('$p.WaitForExit(15000)', '$p.WaitForExit(1000)').replace(/\$delay = 10\b/g, `$delay = ${opts.delay ?? 0}`).replace('$leftWaitS = 10\n', '$leftWaitS = 0\n');
   if (process.platform !== 'win32') s = s.replace(/-WindowStyle Hidden /g, '').replace("'machine\\daemon.ts'", "'machine/daemon.ts'");
   const pids = () =>
     fs.existsSync(path.join(dir, 'pids.txt'))
@@ -56,7 +60,8 @@ function rig(t: { after: (fn: () => void) => void }, plan: string): Rig {
           .split(/\r?\n/)
           .map((l) => ({ pid: +l.split(' ')[0], what: l.split(' ')[1] }))
       : [];
-  const end = () => {
+  function end() {
+    if (!dir) return;
     for (const p of pids()) {
       try {
         process.kill(p.pid, 'SIGKILL');
@@ -64,8 +69,7 @@ function rig(t: { after: (fn: () => void) => void }, plan: string): Rig {
         // Gone already.
       }
     }
-  };
-  t.after(end);
+  }
   return {
     dir,
     pids,
@@ -78,7 +82,14 @@ function rig(t: { after: (fn: () => void) => void }, plan: string): Rig {
       fs.writeFileSync(script, noKill ? s.replace(held, 'function Stop-Held($p) { }') : s);
       const t0 = Date.now();
       return new Promise((resolve) => {
-        execFile(powershell!, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script], { timeout: 60_000 }, (e) => resolve({ code: e ? ((e as { code?: number }).code ?? null) : 0, took: Date.now() - t0 }));
+        // 'exit', not execFile's close: a daemon left behind inherits the supervisor's output handles on Windows and keeps
+        // them open, so a wait for the pipes to close lasted until the timeout (66 s on CI).
+        const c = spawn(powershell!, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script], { stdio: 'ignore' });
+        const timer = setTimeout(() => c.kill(), 60_000);
+        c.on('exit', (code) => {
+          clearTimeout(timer);
+          resolve({ code, took: Date.now() - t0 });
+        });
       });
     },
   };
@@ -212,4 +223,20 @@ test('windows (real PowerShell): a restart request older than the asker waits is
   assert.match(out, /^again=\s*$/m, out);
   assert.ok(!fs.existsSync(req));
   assert.match(fs.readFileSync(path.join(logs, 'supervisor.log'), 'utf8'), /dropped a restart request \d+ s old/);
+});
+
+test('windows (real PowerShell): an asked restart starts at once but keeps the back-off for the next exit (w6784 Worker update CI)', { skip }, async (t) => {
+  const r = rig(t, 'live,live,yield', { delay: 1 });
+  const done = r.run();
+  await until("the daemon's first run", () => r.pids().length === 1);
+  fs.writeFileSync(path.join(r.dir, 'logs', win.SUPERVISOR_REQUEST), JSON.stringify({ why: 'test ask' }));
+  await until('the asked restart', () => r.pids().length === 2);
+  // The second daemon is ended from outside (as an update's Stop-FFDaemon does): the supervisor waits its back-off.
+  process.kill(r.pids()[1].pid, 'SIGKILL');
+  assert.equal((await done).code, 0, r.log());
+  const log = r.log();
+  assert.match(log, /a restart was asked \(test ask\)/);
+  assert.match(log, /starting it again in 0 s/, 'the asked restart starts at once');
+  const waits = [...log.matchAll(/starting it again in (\d+) s/g)].map((m) => +m[1]);
+  assert.ok(waits.at(-1)! >= 2, `the exit after an asked restart waits its back-off, not 0: ${waits.join(', ')}\n${log}`);
 });

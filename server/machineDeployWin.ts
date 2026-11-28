@@ -489,6 +489,7 @@ $daemon = Join-Path $app 'machine\\daemon.ts'
 $argv = ${psq(flags)} + ' "' + $daemon + '" "' + (Join-Path $F 'daemon.json') + '"'
 $log = Join-Path $logs 'supervisor.log'
 $delay = 10
+$leftWaitS = 10
 # w6784: the daemon writes this ({pid, at, why}; machine/freezeWatch.ts DAEMON_ENDING_MARKER) just before the freeze watch ends
 # it and at every exit. A daemon that wrote it and is still not gone $stuckAfter s later is stuck mid-exit (BEAST, 2026-11-28
 # 07:41Z: hours after its SIGKILL, with this supervisor waiting on it the whole time). The wait is in steps so it can act.
@@ -595,7 +596,6 @@ while ($true) {
     if ($left) {
       $abandoned.Add($proc.Id)
       $why = "was left behind stuck mid-exit"
-      $delay = 10
     } else {
       if ($stuckSaid) { Say "the daemon, pid $($proc.Id), has exited after all" }
       # 75 (machine/daemon.ts DAEMON_YIELD_EXIT): a newer daemon of this machine took over, so this supervisor ends too (w1918).
@@ -605,10 +605,15 @@ while ($true) {
   } catch {
     $why = "could not start: $($_.Exception.Message)"
   }
-  if ($asked) { $delay = 0 } elseif (((Get-Date) - $started).TotalMinutes -gt 5) { $delay = 10 } elseif (-not $left) { $delay = [Math]::Min($delay * 2, 300) }
-  Say "the daemon $why; starting it again in $delay s"
+  if (((Get-Date) - $started).TotalMinutes -gt 5) { $delay = 10 } elseif (-not $left -and -not $asked) { $delay = [Math]::Min($delay * 2, 300) }
+  # An asked restart starts at once and a left-behind daemon's successor after $leftWaitS, but neither resets the back-off:
+  # $delay = 0 doubled stays 0, and the supervisor restarted a daemon an update's Stop-FFDaemon had just ended, at once, so
+  # the update could not move app aside (w6784's Worker update CI, 2026-11-28).
+  $wait = $delay
+  if ($asked) { $wait = 0 } elseif ($left) { $wait = $leftWaitS }
+  Say "the daemon $why; starting it again in $wait s"
   # The back-off is in steps too: the state stays fresh, and a restart asked meanwhile starts it at once.
-  $until = (Get-Date).AddSeconds($delay)
+  $until = (Get-Date).AddSeconds($wait)
   while ((Get-Date) -lt $until) {
     Beat $null
     $ask = Take-Request
