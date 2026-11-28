@@ -126,7 +126,7 @@ ends (`logs\daemon-ending.json`, written before the freeze watch's SIGKILL and a
 later, the supervisor ends it again, and if it is still there leaves it behind and starts a fresh daemon (a file
 `supervisor-warn-only` in the daemon's folder makes it only log that). A `machine_daemon restart` over ssh asks a live
 supervisor first, by `logs\daemon-restart-request.json`, with no Task Scheduler or WMI. `machine_daemon start` says when the
-task was already running, so the start changed nothing. Details: [machines.md](machines.md), "A daemon stuck mid-exit".
+task was already running, so the start changed nothing. Details: [machines.md](machines.md), "A daemon stuck mid-exit". A root install the portal sees offline 10 minutes while ssh reaches it gets a `machine_daemon restart` from the portal (warn-only for now: [machines.md](machines.md), "The offline backstop").
 
 **The short way for a new machine: a join code** (w1592): an owner asks for one, and one line at the PC does the rest,
 record and credential included ([Adding a machine with a join code](#adding-a-machine-with-a-join-code-w1592)).

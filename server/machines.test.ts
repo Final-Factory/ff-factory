@@ -12,7 +12,7 @@ import type { Duplex } from 'node:stream';
 import { Store } from './store.ts';
 import { QUEUE_HOLD_MS, SessionManager, snapshotOf, type SessionHandle, type SessionSink } from './sessions.ts';
 import { collectResume } from './restart.ts';
-import { HOST_DIED, HOST_DIED_RESUME_MS, INTERRUPT_ANSWER_MS, DAEMON_RUN_FIELDS, MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonBehind, daemonRunState, enrolledMachines, issueMachineToken, minutesText, revokeMachineToken } from './machines.ts';
+import { DAEMON_BACKSTOP, HOST_DIED, HOST_DIED_RESUME_MS, INTERRUPT_ANSWER_MS, DAEMON_RUN_FIELDS, MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonBehind, daemonRunState, enrolledMachines, issueMachineToken, minutesText, revokeMachineToken } from './machines.ts';
 import { OLDEST_DAEMON_PROTOCOL, PROTOCOL_VERSION, protocolProblem } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
@@ -1920,4 +1920,48 @@ test('w5515: a Mac agent reporting an account the portal never handed it keeps t
   s.send('hello');
   await until('its turn ran', () => s.info.status === 'idle' && s.info.turns > 0);
   assert.equal(s.info.account, undefined, 'the forged account is not taken');
+});
+
+test('machine: the offline backstop (w6784) warns, then enforced restarts, a daemon the redeploy leaves alone (a worker root install) once it has been offline 10 min while ssh answers, at most every 30 min', async (t) => {
+  const { mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  const reports: string[] = [];
+  mm.report = (text) => reports.push(text);
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  mm.update('mx', { root: 'F:/ffw' } as never);
+  d.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  const restarts: string[] = [];
+  mm.controlDaemon = (async (id: string, action: string) => (restarts.push(`${id} ${action}`), 'restarted')) as typeof mm.controlDaemon;
+  mm.deployMachine = (() => assert.fail('a root install is never redeployed')) as never;
+  let probes = 0;
+  const ssh = async () => (probes++, true);
+  const t0 = Date.now();
+  await mm.watchOffline(t0, ssh);
+  assert.deepEqual(await mm.watchOffline(t0 + 9 * 60_000, ssh), []);
+  assert.equal(probes, 0, 'no ssh probe before 10 min');
+  assert.deepEqual(await mm.watchOffline(t0 + 11 * 60_000, ssh), [], 'warn-only acts on nothing');
+  const warns = () => reports.filter((r) => r.includes('backstop (w6784, warn-only)'));
+  assert.equal(warns().length, 1, reports.join('\n'));
+  assert.match(warns()[0], /mx has been offline 11 min while ssh reaches it; enforced, the portal would run machine_daemon restart/);
+  await mm.watchOffline(t0 + 30 * 60_000, ssh);
+  assert.equal(warns().length, 1, 'at most every 30 min');
+  assert.deepEqual(restarts, []);
+  // Enforced: one restart, then not again within 30 min.
+  const was = DAEMON_BACKSTOP.mode;
+  DAEMON_BACKSTOP.mode = 'enforce';
+  t.after(() => (DAEMON_BACKSTOP.mode = was));
+  assert.deepEqual(await mm.watchOffline(t0 + 42 * 60_000, ssh), ['mx']);
+  assert.deepEqual(restarts, ['mx restart']);
+  assert.ok(reports.some((r) => /backstop \(w6784\): mx was offline 42 min while ssh reached it; ran machine_daemon restart: restarted/.test(r)), reports.join('\n'));
+  await mm.watchOffline(t0 + 60 * 60_000, ssh);
+  assert.deepEqual(restarts, ['mx restart']);
+  // A computer ssh does not reach is left alone; one stopped on purpose too.
+  mm.update('mx', { daemonStopped: true });
+  await mm.watchOffline(t0 + 200 * 60_000, ssh);
+  assert.deepEqual(restarts, ['mx restart']);
+  mm.update('mx', { daemonStopped: undefined });
+  await mm.watchOffline(t0 + 300 * 60_000, async () => false);
+  assert.deepEqual(restarts, ['mx restart']);
 });
